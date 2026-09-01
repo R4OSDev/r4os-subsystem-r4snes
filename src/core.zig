@@ -10,5 +10,6 @@ pub const opcode = @import("opcode.zig");
 pub const persistence = @import("persistence.zig");
 pub const ppu = @import("ppu.zig");
 pub const sdsp = @import("sdsp.zig");
+pub const scpu = @import("scpu.zig");
 pub const smp = @import("smp.zig");
 pub const timing = @import("timing.zig");

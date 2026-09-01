@@ -27,3 +27,27 @@ pub fn buttonForUsage(usage: u32) ?controller.Button {
     }
     return null;
 }
+
+pub const InputKind = enum {
+    press,
+    release,
+    repeat,
+    focus_lost,
+    reset,
+};
+
+/// Feed physical keyboard events into the only connected controller.  Repeat
+/// is intentionally idempotent; opposing directions remain independently
+/// held because the physical SNES pad itself does not arbitrate them.
+pub fn applyInput(ports: *controller.Ports, usage: u32, kind: InputKind) bool {
+    switch (kind) {
+        .focus_lost, .reset => {
+            ports.clearInput();
+            return true;
+        },
+        .press, .repeat, .release => {},
+    }
+    const button = buttonForUsage(usage) orelse return false;
+    ports.port1.set(button, kind != .release);
+    return true;
+}

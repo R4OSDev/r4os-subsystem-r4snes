@@ -14,6 +14,7 @@ pub const AccessClass = enum {
 pub const Latch = enum {
     cpu,
     ppu,
+    none,
 };
 
 pub const MmioRead = struct {
@@ -85,6 +86,7 @@ pub const Bus = struct {
         switch (latch) {
             .cpu => self.cpu_open_bus = value,
             .ppu => self.ppu_open_bus = value,
+            .none => {},
         }
         return .{ .value = value, .master_cycles = cycles, .class = class };
     }

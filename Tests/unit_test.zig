@@ -4,6 +4,7 @@ const core = @import("core");
 
 test {
     _ = @import("cpu_test.zig");
+    _ = @import("system_test.zig");
 }
 
 test "all cartridge board and bus owners are analyzable" {

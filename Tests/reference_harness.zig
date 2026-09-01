@@ -71,7 +71,7 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.1")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.5")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
@@ -185,12 +185,19 @@ fn runGilyon(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []
 
     var system_bus = core.bus.Bus{};
     var mmio = CpuTestMmio{};
-    var port = core.bus.CpuPort(*CpuTestMmio){
+    var scpu = core.scpu.Scpu{};
+    var clock = core.timing.Clock.init(if (cartridge.board.region == .pal) .pal else .ntsc);
+    var controllers = core.controller.Ports{};
+    var cpu = core.cpu.Cpu{};
+    var port = core.scpu.TimedPortWithDevice(*CpuTestMmio){
         .bus = &system_bus,
         .cartridge = &cartridge,
-        .mmio = &mmio,
+        .scpu = &scpu,
+        .clock = &clock,
+        .controllers = &controllers,
+        .cpu = &cpu,
+        .device = &mmio,
     };
-    var cpu = core.cpu.Cpu{};
 
     const step_limit: u64 = 100_000_000;
     var steps: u64 = 0;
