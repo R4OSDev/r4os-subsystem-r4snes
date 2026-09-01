@@ -58,6 +58,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_unit_tests.step);
 
-    const reference_step = b.step("reference-test", "Validate pinned SNES reference inventories and corpus counts");
+    const reference_step = b.step("reference-test", "Execute pinned SNES qualification ROMs, models and all SPC700 vectors");
     reference_step.dependOn(&run_references.step);
 }

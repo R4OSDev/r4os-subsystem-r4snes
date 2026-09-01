@@ -15,7 +15,9 @@ follows:
 - `cpu.zig`: W65C816 architectural state, ALU, address formation, interrupts
   and bounded bus-micro-operation execution.
 - `ppu.zig`: dot-observed S-PPU state and complete native frame production.
-- `smp.zig` and `sdsp.zig`: S-SMP/SPC700 and S-DSP state.
+- `spc700.zig` and `smp.zig`: complete bus-phased SPC700, ARAM, timers,
+  CPU/APU latches, semantic IPL and optional exact user IPL.
+- `sdsp.zig`: S-DSP state, completed by the next audio milestone.
 - `controller.zig`: port-1 serial pad state; port 2 remains disconnected.
 - `coprocessors.zig`: explicit enhancement-chip registry without implicit
   fallbacks.
@@ -44,7 +46,15 @@ that owner. Complete changed frames are packed as native XRGB32 at 256/512 by
 224/239/448/478; unchanged output does not advance the generation. The shared
 SDK alone scales, letterboxes and splits damage into at most 128x128 rasters.
 
+The S-SMP bus exposes every instruction read, write and wait phase. Its three
+divider timers advance from those phases, while the independent rational APU
+oscillator records synchronization points for the four directional port
+latches without using host time. The standard semantic IPL accepts the public
+upload protocol but never supplies arbitrary bytes at `$FFC0-$FFFF`; an exact
+path exists only for an optional 64-byte user file in the private firmware
+tree.
+
 Scheduling, guest-time admission and audio enter through the generic SDK
-runtime only in later milestones. Version 0.7.0 still does not start a parsed
-cartridge in the R4OS application because the APU and productive runtime host
-are not yet connected.
+runtime only in later milestones. Version 0.8.0 still does not start a parsed
+cartridge in the R4OS application because S-DSP output and the productive
+runtime host are not yet connected.

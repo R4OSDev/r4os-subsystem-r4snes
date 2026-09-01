@@ -6,6 +6,7 @@ test {
     _ = @import("cpu_test.zig");
     _ = @import("dma_test.zig");
     _ = @import("ppu_test.zig");
+    _ = @import("smp_test.zig");
     _ = @import("video_host_test.zig");
     _ = @import("system_test.zig");
 }

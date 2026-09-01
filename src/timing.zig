@@ -1,7 +1,9 @@
 pub const ntsc_master_hz: u64 = 21_477_272;
 pub const pal_master_hz: u64 = 21_281_370;
 pub const nominal_audio_hz: u32 = 32_000;
-pub const apu_placeholder_hz: u64 = 1_024_000;
+// One externally observable S-SMP bus phase per two 2.048 MHz source clocks.
+// Integer phase accumulation keeps this oscillator independent of host slices.
+pub const apu_bus_hz: u64 = 1_024_000;
 
 // A host turn may never advance more guest time than this.  The bound is
 // deliberately independent of the video standard and host wait duration.
@@ -125,7 +127,7 @@ pub const Clock = struct {
         // Fixed order at each physical clock: refresh edge, S-CPU consumers,
         // APU phase accumulator, then the beam/canonical master timestamp.
         sink.onMasterTick(self, refresh_start, refresh_wait);
-        self.apu_phase += apu_placeholder_hz;
+        self.apu_phase += apu_bus_hz;
         while (self.apu_phase >= self.profile().master_hz) {
             self.apu_phase -= self.profile().master_hz;
             self.apu_ticks +%= 1;

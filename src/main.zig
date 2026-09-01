@@ -12,6 +12,7 @@ const error_metadata: i32 = 70;
 const error_cartridge: i32 = 71;
 const error_not_implemented: i32 = 72;
 const error_allocator: i32 = 73;
+const error_firmware: i32 = 74;
 
 pub fn r4_app_main(app: *r4os.App) i32 {
     if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
@@ -76,10 +77,58 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     };
     defer cartridge.deinit();
 
+    const machine = allocator.create(core.machine.Machine) catch {
+        sys.println("R4SNES: machine state could not be allocated.");
+        return error_allocator;
+    };
+    defer allocator.destroy(machine);
+    machine.* = core.machine.Machine.init(1);
+    machine.smp.powerSemanticIpl();
+    defer machine.smp.removeExactIpl();
+    var firmware_path = r4os.AbsoluteFilePath.parse(core.persistence.spc700_ipl_path) catch {
+        sys.println("R4SNES: internal SPC700 IPL path is invalid.");
+        return error_firmware;
+    };
+    switch (files.info(firmware_path.asZ())) {
+        .missing => {},
+        .failure => {
+            sys.println("R4SNES: optional SPC700.IPL metadata could not be read.");
+            return error_firmware;
+        },
+        .value => |firmware_info| {
+            if (firmware_info.is_dir != 0 or firmware_info.size != core.smp.exact_ipl_size) {
+                sys.println("R4SNES: optional SPC700.IPL must be an exact 64-byte file.");
+                return error_firmware;
+            }
+            var firmware: [core.smp.exact_ipl_size]u8 = undefined;
+            var firmware_offset: usize = 0;
+            while (firmware_offset < firmware.len) {
+                const count = switch (files.readAt(firmware_path.asZ(), @intCast(firmware_offset), firmware[firmware_offset..])) {
+                    .bytes => |value| value,
+                    .end, .failure => {
+                        sys.println("R4SNES: optional SPC700.IPL read was incomplete.");
+                        return error_firmware;
+                    },
+                };
+                if (count == 0) {
+                    sys.println("R4SNES: optional SPC700.IPL read made no progress.");
+                    return error_firmware;
+                }
+                firmware_offset += count;
+            }
+            machine.smp.installExactIpl(&firmware) catch {
+                sys.println("R4SNES: optional SPC700.IPL validation failed.");
+                return error_firmware;
+            };
+            machine.smp.reset();
+            @memset(firmware[0..], 0);
+        },
+    }
+
     // Parsing owns a private normalized copy and exposes ROM as read-only. CPU,
-    // 5A22, DMA/HDMA and the base PPU are qualified independently; productive
-    // execution is rejected until the APU and runtime-machine stages complete.
-    sys.println("R4SNES: cartridge, CPU, 5A22 and complete PPU recognized; APU/runtime integration is not implemented in 0.7.0.");
+    // 5A22, DMA/HDMA, PPU and S-SMP are qualified independently; productive
+    // execution is rejected until S-DSP and runtime-machine stages complete.
+    sys.println("R4SNES: cartridge, CPU, 5A22, complete PPU and SPC700 recognized; S-DSP/runtime integration is not implemented in 0.8.0.");
     return error_not_implemented;
 }
 
@@ -98,8 +147,13 @@ fn selfTest(app: *r4os.App) i32 {
     const sys = app.system();
     var machine = core.machine.Machine.init(1);
     if (!machine.foundationReady() or core.cpu.opcode_table.len != 256 or !machine.scpu.cpuMayRun()) return error_not_implemented;
+    machine.smp.bus_mode = .vector_ram;
+    machine.smp.pc = 0x0200;
+    machine.smp.aram[0x0200] = 0x00;
+    machine.smp.step() catch return error_not_implemented;
+    if (machine.smp.pc != 0x0201) return error_not_implemented;
     machine.close();
     if (!machine.closed) return error_not_implemented;
-    sys.println("R4SNES SELFTEST OK: CPU, timed 5A22, byte-bounded DMA and base PPU owners isolated; incomplete machine execution safely rejected.");
+    sys.println("R4SNES SELFTEST OK: CPU, timed 5A22, byte-bounded DMA, complete PPU and SPC700/S-SMP owners isolated; incomplete S-DSP/runtime execution safely rejected.");
     return 0;
 }

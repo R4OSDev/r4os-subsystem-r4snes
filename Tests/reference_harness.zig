@@ -123,7 +123,7 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.8")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.9")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
@@ -270,6 +270,12 @@ fn run(init: std.process.Init) !void {
     defer allocator.free(cpu_full_path);
     const basic_steps = try runGilyon(allocator, io, cwd, cpu_basic_path);
     const full_steps = try runGilyon(allocator, io, cwd, cpu_full_path);
+    const spc_path = try std.fs.path.join(allocator, &.{ root, "Tests", "Binaries", "Gilyon-v1.4", "spctest", "spctest.sfc" });
+    defer allocator.free(spc_path);
+    const spc_steps = try runGilyonSpc(allocator, io, cwd, spc_path);
+    const ipl_speed_path = try std.fs.path.join(allocator, &.{ root, "Tests", "Binaries", "Generated", "Undisbeliever-ac6ef800", "hardware-tests", "audio", "ipl-speed-test.sfc" });
+    defer allocator.free(ipl_speed_path);
+    const ipl_speed = try runIplSpeed(allocator, io, cwd, ipl_speed_path);
 
     const vector_root = try std.fs.path.join(allocator, &.{ root, "Tests", "SPC700-SingleStep", "v1" });
     defer allocator.free(vector_root);
@@ -279,8 +285,8 @@ fn run(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} PPU-diagnostics={d} HDRV-geometries={d} Gilyon-basic={d} Gilyon-full={d} SPC700-files={d} vectors={d}\n",
-        .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, ppu_cases.foreign_roms.len, hdrv_cases.cases.len, basic_steps, full_steps, vectors.files, vectors.records },
+        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} PPU-diagnostics={d} HDRV-geometries={d} Gilyon-basic={d} Gilyon-full={d} Gilyon-spc={d} IPL-speed-bytes={d} IPL-speed-first-divergence=none IPL-speed-steps={d} SPC700-files={d} vectors={d}\n",
+        .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, ppu_cases.foreign_roms.len, hdrv_cases.cases.len, basic_steps, full_steps, spc_steps, ipl_speed.bytes, ipl_speed.steps, vectors.files, vectors.records },
     );
 }
 
@@ -289,9 +295,21 @@ const CpuTestMmio = struct {
     vram_word_address: u16 = 0,
     vblank_high: bool = false,
     dma: [8]u8 = [_]u8{0} ** 8,
+    smp: ?*core.smp.Smp = null,
+    apu_fault: bool = false,
 
     pub fn read(self: *CpuTestMmio, address: u32, _: u8, _: u8) core.bus.MmioRead {
         const offset: u16 = @truncate(address);
+        if (offset >= 0x2140 and offset <= 0x2143) {
+            const apu = self.smp orelse return .{};
+            if (apu.semantic_ipl_state == .running) {
+                _ = apu.runSemanticInstructions(1_024) catch {
+                    self.apu_fault = true;
+                    return .{ .handled = true, .value = 0xff };
+                };
+            }
+            return .{ .handled = true, .value = apu.cpuReadPort(@intCast(offset - 0x2140)) };
+        }
         return switch (offset) {
             0x4210 => value: {
                 self.vblank_high = !self.vblank_high;
@@ -304,6 +322,11 @@ const CpuTestMmio = struct {
 
     pub fn write(self: *CpuTestMmio, address: u32, value: u8, _: u8, _: u8) bool {
         const offset: u16 = @truncate(address);
+        if (offset >= 0x2140 and offset <= 0x2143) {
+            const apu = self.smp orelse return false;
+            apu.cpuWritePort(@intCast(offset - 0x2140), value);
+            return true;
+        }
         switch (offset) {
             0x2116 => self.vram_word_address = (self.vram_word_address & 0xff00) | value,
             0x2117 => self.vram_word_address = (self.vram_word_address & 0x00ff) | (@as(u16, value) << 8),
@@ -335,6 +358,14 @@ const CpuTestMmio = struct {
 };
 
 fn runGilyon(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8) !u64 {
+    return runGilyonCore(allocator, io, cwd, path, false);
+}
+
+fn runGilyonSpc(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8) !u64 {
+    return runGilyonCore(allocator, io, cwd, path, true);
+}
+
+fn runGilyonCore(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8, with_smp: bool) !u64 {
     const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_rom_bytes));
     defer allocator.free(bytes);
     var cartridge = try core.cartridge.Cartridge.parse(allocator, bytes);
@@ -342,6 +373,11 @@ fn runGilyon(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []
 
     var system_bus = core.bus.Bus{};
     var mmio = CpuTestMmio{};
+    var smp = core.smp.Smp{};
+    if (with_smp) {
+        smp.powerSemanticIpl();
+        mmio.smp = &smp;
+    }
     var scpu = core.scpu.Scpu{};
     var clock = core.timing.Clock.init(if (cartridge.board.region == .pal) .pal else .ntsc);
     var controllers = core.controller.Ports{};
@@ -356,10 +392,11 @@ fn runGilyon(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []
         .device = &mmio,
     };
 
-    const step_limit: u64 = 100_000_000;
+    const step_limit: u64 = if (with_smp) 400_000_000 else 100_000_000;
     var steps: u64 = 0;
     while (steps < step_limit) : (steps += 1) {
         const outcome = try cpu.step(&port);
+        if (mmio.apu_fault) return error.GilyonApuFault;
         if (outcome.state == .stopped) {
             std.debug.print("R4SNES Gilyon stopped: {s} PC={x:0>2}:{x:0>4} test={x:0>4}\n", .{ path, cpu.pb, cpu.pc, @as(u16, system_bus.wram[0x10]) | (@as(u16, system_bus.wram[0x11]) << 8) });
             return error.GilyonStopped;
@@ -374,6 +411,55 @@ fn runGilyon(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []
     }
     std.debug.print("R4SNES Gilyon timeout: {s} PC={x:0>2}:{x:0>4} test={x:0>4}\n", .{ path, cpu.pb, cpu.pc, @as(u16, system_bus.wram[0x10]) | (@as(u16, system_bus.wram[0x11]) << 8) });
     return error.GilyonTimeout;
+}
+
+const IplSpeedResult = struct { bytes: usize, steps: u64 };
+
+fn runIplSpeed(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8) !IplSpeedResult {
+    const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_rom_bytes));
+    defer allocator.free(bytes);
+    var cartridge = try core.cartridge.Cartridge.parse(allocator, bytes);
+    defer cartridge.deinit();
+
+    var system_bus = core.bus.Bus{};
+    var smp = core.smp.Smp{};
+    smp.powerSemanticIpl();
+    var mmio = CpuTestMmio{ .smp = &smp };
+    var scpu = core.scpu.Scpu{};
+    var clock = core.timing.Clock.init(if (cartridge.board.region == .pal) .pal else .ntsc);
+    var controllers = core.controller.Ports{};
+    var cpu = core.cpu.Cpu{};
+    var port = core.scpu.TimedPortWithDevice(*CpuTestMmio){
+        .bus = &system_bus,
+        .cartridge = &cartridge,
+        .scpu = &scpu,
+        .clock = &clock,
+        .controllers = &controllers,
+        .cpu = &cpu,
+        .device = &mmio,
+    };
+
+    const transfer_size: usize = 32 * 1024;
+    const step_limit: u64 = 100_000_000;
+    var steps: u64 = 0;
+    while (steps < step_limit) : (steps += 1) {
+        const outcome = try cpu.step(&port);
+        if (outcome.state == .stopped) return error.IplSpeedStopped;
+        if (mmio.apu_fault) return error.IplSpeedApuFault;
+        if (smp.semantic_ipl_state == .receiving and smp.semantic_received == transfer_size) {
+            for (0..transfer_size) |index| {
+                const expected: u8 = @truncate(index / 128);
+                const actual = smp.aram[0x0200 + index];
+                if (actual != expected) {
+                    std.debug.print("R4SNES IPL speed first divergence: byte={d} ARAM={x:0>4} actual={x:0>2} expected={x:0>2}\n", .{ index, 0x0200 + index, actual, expected });
+                    return error.IplSpeedDataMismatch;
+                }
+            }
+            return .{ .bytes = transfer_size, .steps = steps + 1 };
+        }
+    }
+    std.debug.print("R4SNES IPL speed timeout: PC={x:0>2}:{x:0>4} received={d} state={s}\n", .{ cpu.pb, cpu.pc, smp.semantic_received, @tagName(smp.semantic_ipl_state) });
+    return error.IplSpeedTimeout;
 }
 
 fn expectSha256(bytes: []const u8, expected: []const u8) !void {
@@ -416,6 +502,9 @@ fn scanVectors(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, root: 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
     var result = VectorCounts{};
+    var smp = core.smp.Smp{};
+    smp.bus_mode = .vector_ram;
+    smp.trace_enabled = true;
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file or !std.ascii.endsWithIgnoreCase(entry.path, ".json")) continue;
         const path = try std.fs.path.join(allocator, &.{ root, entry.path });
@@ -429,8 +518,165 @@ fn scanVectors(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, root: 
             else => return error.InvalidVectorFile,
         };
         if (records != 1000) return error.InvalidVectorRecordCount;
+        const array = parsed.value.array;
+        for (array.items) |record| try runSpc700Vector(&smp, record);
         result.files += 1;
         result.records += records;
     }
     return result;
+}
+
+fn runSpc700Vector(smp: *core.smp.Smp, record: std.json.Value) !void {
+    const object = switch (record) {
+        .object => |value| value,
+        else => return error.InvalidVectorRecord,
+    };
+    const name = try jsonString(object.get("name"));
+    const initial = try jsonObject(object.get("initial"));
+    const final = try jsonObject(object.get("final"));
+    const expected_cycles = try jsonArray(object.get("cycles"));
+
+    @memset(smp.aram[0..], 0);
+    smp.a = try jsonU8(initial.get("a"));
+    smp.x = try jsonU8(initial.get("x"));
+    smp.y = try jsonU8(initial.get("y"));
+    smp.sp = try jsonU8(initial.get("sp"));
+    smp.pc = try jsonU16(initial.get("pc"));
+    smp.psw = try jsonU8(initial.get("psw"));
+    smp.cycles = 0;
+    smp.stopped = false;
+    smp.waiting = false;
+    smp.fault = null;
+    try loadVectorRam(smp, try jsonArray(initial.get("ram")));
+
+    smp.beginTrace();
+    smp.step() catch |fault| {
+        std.debug.print("SPC700 vector {s}: execution fault={s}\n", .{ name, @errorName(fault) });
+        return fault;
+    };
+    const actual_cycles = smp.endTrace();
+
+    const expected_a = try jsonU8(final.get("a"));
+    const expected_x = try jsonU8(final.get("x"));
+    const expected_y = try jsonU8(final.get("y"));
+    const expected_sp = try jsonU8(final.get("sp"));
+    const expected_pc = try jsonU16(final.get("pc"));
+    const expected_psw = try jsonU8(final.get("psw"));
+    if (smp.a != expected_a or smp.x != expected_x or smp.y != expected_y or smp.sp != expected_sp or
+        smp.pc != expected_pc or smp.psw != expected_psw)
+    {
+        std.debug.print(
+            "SPC700 vector {s}: state actual A={x:0>2} X={x:0>2} Y={x:0>2} SP={x:0>2} PC={x:0>4} PSW={x:0>2}; expected A={x:0>2} X={x:0>2} Y={x:0>2} SP={x:0>2} PC={x:0>4} PSW={x:0>2}\n",
+            .{ name, smp.a, smp.x, smp.y, smp.sp, smp.pc, smp.psw, expected_a, expected_x, expected_y, expected_sp, expected_pc, expected_psw },
+        );
+        return error.Spc700StateMismatch;
+    }
+
+    const final_ram = try jsonArray(final.get("ram"));
+    for (final_ram.items) |entry| {
+        const pair = try jsonArray(entry);
+        if (pair.items.len != 2) return error.InvalidVectorRamEntry;
+        const address = try jsonU16(pair.items[0]);
+        const expected = try jsonU8(pair.items[1]);
+        if (smp.aram[address] != expected) {
+            std.debug.print("SPC700 vector {s}: RAM[{x:0>4}] actual={x:0>2} expected={x:0>2}\n", .{ name, address, smp.aram[address], expected });
+            return error.Spc700RamMismatch;
+        }
+    }
+
+    if (actual_cycles.len != expected_cycles.items.len) {
+        std.debug.print("SPC700 vector {s}: cycle count actual={d} expected={d}\n", .{ name, actual_cycles.len, expected_cycles.items.len });
+        return error.Spc700CycleCountMismatch;
+    }
+    for (expected_cycles.items, actual_cycles, 0..) |expected_value, actual, index| {
+        const expected = try jsonArray(expected_value);
+        if (expected.items.len != 3) return error.InvalidVectorCycle;
+        const expected_kind = try jsonString(expected.items[2]);
+        const expected_cycle_kind: core.smp.BusCycleKind = if (std.mem.eql(u8, expected_kind, "read"))
+            .read
+        else if (std.mem.eql(u8, expected_kind, "write"))
+            .write
+        else if (std.mem.eql(u8, expected_kind, "wait"))
+            .wait
+        else
+            return error.InvalidVectorCycleKind;
+        const address_matches = switch (expected.items[0]) {
+            .null => actual.address == null,
+            else => actual.address != null and actual.address.? == try jsonU16(expected.items[0]),
+        };
+        const value_matches = switch (expected.items[1]) {
+            .null => true,
+            else => actual.value != null and actual.value.? == try jsonU8(expected.items[1]),
+        };
+        if (actual.kind != expected_cycle_kind or !address_matches or !value_matches) {
+            std.debug.print(
+                "SPC700 vector {s}: cycle {d} actual={s} address={?x} value={?x}; expected={s} address={any} value={any}\n",
+                .{ name, index, @tagName(actual.kind), actual.address, actual.value, expected_kind, expected.items[0], expected.items[1] },
+            );
+            return error.Spc700CycleMismatch;
+        }
+    }
+}
+
+fn loadVectorRam(smp: *core.smp.Smp, entries: std.json.Array) !void {
+    for (entries.items) |entry| {
+        const pair = try jsonArray(entry);
+        if (pair.items.len != 2) return error.InvalidVectorRamEntry;
+        smp.aram[try jsonU16(pair.items[0])] = try jsonU8(pair.items[1]);
+    }
+}
+
+fn jsonObject(value: ?std.json.Value) !std.json.ObjectMap {
+    return switch (value orelse return error.MissingVectorField) {
+        .object => |object| object,
+        else => error.InvalidVectorField,
+    };
+}
+
+fn jsonArray(value: anytype) !std.json.Array {
+    const resolved = switch (@TypeOf(value)) {
+        ?std.json.Value => value orelse return error.MissingVectorField,
+        std.json.Value => value,
+        else => @compileError("unsupported JSON value wrapper"),
+    };
+    return switch (resolved) {
+        .array => |array| array,
+        else => error.InvalidVectorField,
+    };
+}
+
+fn jsonString(value: anytype) ![]const u8 {
+    const resolved = switch (@TypeOf(value)) {
+        ?std.json.Value => value orelse return error.MissingVectorField,
+        std.json.Value => value,
+        else => @compileError("unsupported JSON value wrapper"),
+    };
+    return switch (resolved) {
+        .string => |string| string,
+        else => error.InvalidVectorField,
+    };
+}
+
+fn jsonU8(value: anytype) !u8 {
+    const integer = try jsonInteger(value);
+    if (integer < 0 or integer > std.math.maxInt(u8)) return error.InvalidVectorInteger;
+    return @intCast(integer);
+}
+
+fn jsonU16(value: anytype) !u16 {
+    const integer = try jsonInteger(value);
+    if (integer < 0 or integer > std.math.maxInt(u16)) return error.InvalidVectorInteger;
+    return @intCast(integer);
+}
+
+fn jsonInteger(value: anytype) !i64 {
+    const resolved = switch (@TypeOf(value)) {
+        ?std.json.Value => value orelse return error.MissingVectorField,
+        std.json.Value => value,
+        else => @compileError("unsupported JSON value wrapper"),
+    };
+    return switch (resolved) {
+        .integer => |integer| integer,
+        else => error.InvalidVectorField,
+    };
 }

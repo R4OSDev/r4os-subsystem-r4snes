@@ -8,6 +8,7 @@ const Harness = struct {
     ports: core.controller.Ports = .{},
     cpu: core.cpu.Cpu = .{},
     scpu: core.scpu.Scpu = .{},
+    smp: core.smp.Smp = .{},
 
     fn write(self: *Harness, address: u32, value: u8) void {
         tryWrite(self.scpu.write(&self.bus, &self.clock, &self.ports, &self.cpu, address, value));
@@ -33,6 +34,7 @@ const Sink = struct {
 
     pub fn onMasterTick(self: *Sink, clock: *const core.timing.Clock, refresh_start: bool, refresh_wait: bool) void {
         self.harness.scpu.onMasterTick(clock, &self.harness.ports, &self.harness.cpu, refresh_start, refresh_wait);
+        _ = self.harness.smp.advanceOscillator(clock.profile().master_hz, 1);
     }
 };
 
@@ -429,6 +431,8 @@ fn expectSystemDigestEqual(a: *const Harness, b: *const Harness) !void {
     try std.testing.expectEqual(a.clock.refresh_events, b.clock.refresh_events);
     try std.testing.expectEqual(a.clock.apu_phase, b.clock.apu_phase);
     try std.testing.expectEqual(a.clock.apu_ticks, b.clock.apu_ticks);
+    try std.testing.expectEqual(a.smp.oscillator_phase, b.smp.oscillator_phase);
+    try std.testing.expectEqual(a.smp.oscillator_ticks, b.smp.oscillator_ticks);
     try std.testing.expectEqual(a.scpu.event_digest, b.scpu.event_digest);
     try std.testing.expectEqual(a.scpu.auto_joy_counter, b.scpu.auto_joy_counter);
     try std.testing.expectEqualSlices(u16, a.scpu.joy[0..], b.scpu.joy[0..]);
