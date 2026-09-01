@@ -142,6 +142,11 @@ fn scanRoms(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, root: []c
         const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_rom_bytes));
         defer allocator.free(bytes);
         _ = try core.cartridge.inspectCandidateSize(bytes.len);
+        var parsed = core.cartridge.Cartridge.parse(allocator, bytes) catch |fault| {
+            std.debug.print("R4SNES cartridge parse failed: {s} fault={s}\n", .{ entry.path, @errorName(fault) });
+            return fault;
+        };
+        parsed.deinit();
         count += 1;
     }
     return count;

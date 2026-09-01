@@ -11,7 +11,7 @@ const timing = @import("timing.zig");
 
 pub const Machine = struct {
     instance_id: u64,
-    board: board.Board = .{},
+    board: ?board.Board = null,
     bus: bus.Bus = .{},
     cpu: cpu.Cpu = .{},
     ppu: ppu.Ppu = .{},

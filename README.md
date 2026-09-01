@@ -4,11 +4,13 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.1.0 is deliberately a foundation release. It establishes isolated
-owners for cartridge/board, 24-bit bus, S-CPU, PPU, S-SMP, S-DSP, controller,
-coprocessors, persistence and R4OS host adapters. Every cartridge launch is
-validated only as a bounded candidate and then rejected with a concrete
-not-implemented result. This version makes no playability claim.
+Version 0.2.0 owns a bounded cartridge frontend and the complete base 24-bit
+address space. It strips one plausible copier header, selects one unambiguous
+LoROM/HiROM/ExLoROM/ExHiROM header, hashes the normalized immutable ROM,
+allocates board-sized private SRAM and exposes checked ROM/SRAM decoders. A
+private 128-KiB WRAM bus delegates MMIO and records 6/8/12-masterclock access
+classes with separate CPU/PPU open-bus latches. Every parsed cartridge is still
+rejected before execution, so this version makes no playability claim.
 
 The only connected controller is port 1 and it uses physical keyboard usages:
 

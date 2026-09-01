@@ -1,7 +1,13 @@
+const std = @import("std");
+const board = @import("board.zig");
+
 pub const copier_header_size: usize = 512;
 pub const mapping_granularity: usize = 32 * 1024;
 pub const minimum_rom_size: usize = mapping_granularity;
 pub const maximum_rom_size: usize = 64 * 1024 * 1024;
+pub const maximum_source_size: usize = maximum_rom_size + copier_header_size;
+pub const title_length: usize = 21;
+pub const header_length: usize = 64;
 
 pub const CandidateGeometry = struct {
     file_size: usize,
@@ -9,10 +15,119 @@ pub const CandidateGeometry = struct {
     copier_header: bool,
 };
 
-/// Performs metadata-only bounds validation. Cartridge bytes are deliberately
-/// outside this foundation API, so the caller cannot accidentally mutate or
-/// execute an unimplemented image.
+pub const Header = struct {
+    offset: usize,
+    mapping: board.Mapping,
+    region: board.Region,
+    map_mode: u8,
+    rom_type: u8,
+    rom_size_code: u8,
+    ram_size_code: u8,
+    region_code: u8,
+    version: u8,
+    reset_vector: u16,
+    startup_opcode: u8,
+    checksum: u16,
+    checksum_complement: u16,
+    checksum_present: bool,
+    checksum_matches: bool,
+    declared_rom_bytes: usize,
+    declared_sram_bytes: usize,
+    title: [title_length]u8,
+    score: i16,
+};
+
+pub const Cartridge = struct {
+    allocator: std.mem.Allocator,
+    rom_storage: []u8,
+    sram_storage: []u8,
+    identity: [32]u8,
+    header: Header,
+    board: board.Board,
+    had_copier_header: bool,
+    sram_dirty: bool = false,
+
+    pub fn parse(allocator: std.mem.Allocator, source: []const u8) !Cartridge {
+        const geometry = try inspectCandidateSize(source.len);
+        const normalized_start: usize = if (geometry.copier_header) copier_header_size else 0;
+        const normalized = source[normalized_start..];
+        const header = try selectHeader(normalized);
+        const enhancement = board.enhancementForHeader(header.rom_type, header.map_mode);
+        const capability = board.capability(enhancement);
+        if (capability.disposition == .excluded) return error.ExcludedBoard;
+        if (capability.disposition == .unsupported) return error.UnsupportedBoard;
+        if (capability.disposition == .base_implemented and normalized.len > 8 * 1024 * 1024) {
+            return error.UnaddressableBoardGeometry;
+        }
+
+        const rom_copy = try allocator.alloc(u8, normalized.len);
+        errdefer allocator.free(rom_copy);
+        @memcpy(rom_copy, normalized);
+        const sram_copy = try allocator.alloc(u8, header.declared_sram_bytes);
+        errdefer allocator.free(sram_copy);
+        @memset(sram_copy, 0);
+
+        var identity: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(normalized, &identity, .{});
+        return .{
+            .allocator = allocator,
+            .rom_storage = rom_copy,
+            .sram_storage = sram_copy,
+            .identity = identity,
+            .header = header,
+            .board = .{
+                .mapping = header.mapping,
+                .region = header.region,
+                .fast_rom = (header.map_mode & 0x10) != 0,
+                .capability = capability,
+                .sram_bytes = sram_copy.len,
+                .battery = hasBattery(header.rom_type),
+            },
+            .had_copier_header = geometry.copier_header,
+        };
+    }
+
+    pub fn deinit(self: *Cartridge) void {
+        self.allocator.free(self.sram_storage);
+        self.allocator.free(self.rom_storage);
+        self.sram_storage = &.{};
+        self.rom_storage = &.{};
+        self.sram_dirty = false;
+    }
+
+    pub fn rom(self: *const Cartridge) []const u8 {
+        return self.rom_storage;
+    }
+
+    pub fn sram(self: *const Cartridge) []const u8 {
+        return self.sram_storage;
+    }
+
+    pub fn readRom(self: *const Cartridge, index: usize) u8 {
+        return self.rom_storage[index];
+    }
+
+    pub fn readSram(self: *const Cartridge, index: usize) u8 {
+        return self.sram_storage[index];
+    }
+
+    pub fn writeSram(self: *Cartridge, index: usize, value: u8) void {
+        if (self.sram_storage[index] == value) return;
+        self.sram_storage[index] = value;
+        self.sram_dirty = true;
+    }
+
+    pub fn identityHex(self: *const Cartridge) [64]u8 {
+        var result: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(result[0..], "{x}", .{self.identity}) catch unreachable;
+        return result;
+    }
+};
+
+/// Performs bounds and copier-header geometry validation without reading or
+/// mutating cartridge bytes.
 pub fn inspectCandidateSize(file_size: usize) !CandidateGeometry {
+    if (file_size > maximum_source_size) return error.CartridgeTooLarge;
     const remainder = file_size % mapping_granularity;
     const has_copier_header = remainder == copier_header_size;
     if (remainder != 0 and !has_copier_header) return error.InvalidCartridgeGeometry;
@@ -23,5 +138,145 @@ pub fn inspectCandidateSize(file_size: usize) !CandidateGeometry {
         .file_size = file_size,
         .rom_size = rom_size,
         .copier_header = has_copier_header,
+    };
+}
+
+const HeaderLocation = struct {
+    offset: usize,
+    mapping: board.Mapping,
+};
+
+const locations = [_]HeaderLocation{
+    .{ .offset = 0x007FC0, .mapping = .lo_rom },
+    .{ .offset = 0x00FFC0, .mapping = .hi_rom },
+    .{ .offset = 0x407FC0, .mapping = .ex_lo_rom },
+    .{ .offset = 0x40FFC0, .mapping = .ex_hi_rom },
+};
+
+fn selectHeader(rom: []const u8) !Header {
+    var selected: ?Header = null;
+    var tied = false;
+    for (locations) |location| {
+        const candidate = parseHeaderCandidate(rom, location) orelse continue;
+        if (selected == null or candidate.score > selected.?.score) {
+            selected = candidate;
+            tied = false;
+        } else if (candidate.score == selected.?.score) {
+            tied = true;
+        }
+    }
+    if (selected == null) return error.NoValidHeader;
+    if (tied) return error.AmbiguousHeader;
+    return selected.?;
+}
+
+fn parseHeaderCandidate(rom: []const u8, location: HeaderLocation) ?Header {
+    if (location.offset + header_length > rom.len) return null;
+    if ((location.mapping == .ex_lo_rom or location.mapping == .ex_hi_rom) and rom.len <= 4 * 1024 * 1024) return null;
+    if ((location.mapping == .lo_rom or location.mapping == .hi_rom) and rom.len > 4 * 1024 * 1024) return null;
+    const bytes = rom[location.offset .. location.offset + header_length];
+    const map_mode = bytes[0x15];
+    if ((map_mode & 0x20) == 0) return null;
+    const enhancement = board.enhancementForHeader(bytes[0x16], map_mode);
+    if (board.mappingForHeader(map_mode, enhancement) != location.mapping) return null;
+    const region = board.regionForCode(bytes[0x19]) orelse return null;
+    const reset_vector = readU16(bytes[0x3C..0x3E]);
+    if (reset_vector < 0x8000) return null;
+    const startup_index = board.decodeRomIndex(location.mapping, @as(u32, reset_vector), rom.len) orelse return null;
+    const startup_opcode = rom[startup_index];
+    if (startup_opcode == 0x00 or startup_opcode == 0xFF) return null;
+
+    const declared_rom_bytes = sizeCodeBytes(bytes[0x17]) orelse return null;
+    if (declared_rom_bytes < minimum_rom_size or declared_rom_bytes > maximum_rom_size) return null;
+    if (declared_rom_bytes > rom.len *| 2 or rom.len > declared_rom_bytes *| 2) return null;
+    const declared_sram_bytes = ramCodeBytes(bytes[0x18]) orelse return null;
+    if (enhancement == .none) {
+        if (bytes[0x16] == 0x00 and declared_sram_bytes != 0) return null;
+        if ((bytes[0x16] == 0x01 or bytes[0x16] == 0x02) and declared_sram_bytes == 0) return null;
+    }
+
+    const complement = readU16(bytes[0x1C..0x1E]);
+    const checksum = readU16(bytes[0x1E..0x20]);
+    const checksum_present = checksum != 0 or complement != 0;
+    if (checksum_present and (checksum ^ complement) != 0xFFFF) return null;
+    const calculated_checksum = checksum16(rom);
+
+    var title: [title_length]u8 = undefined;
+    @memcpy(title[0..], bytes[0..title_length]);
+    if (!plausibleTitle(title[0..])) return null;
+
+    var score: i16 = 16;
+    if (plausibleStartup(startup_opcode)) score += 4 else score += 1;
+    if (declared_rom_bytes == rom.len) score += 4;
+    if (checksum_present) score += 2;
+    if (checksum_present and checksum == calculated_checksum) score += 2;
+    if (enhancement != .unknown) score += 2;
+    if (bytes[0x18] == 0 or bytes[0x16] != 0x00) score += 1;
+
+    return .{
+        .offset = location.offset,
+        .mapping = location.mapping,
+        .region = region,
+        .map_mode = map_mode,
+        .rom_type = bytes[0x16],
+        .rom_size_code = bytes[0x17],
+        .ram_size_code = bytes[0x18],
+        .region_code = bytes[0x19],
+        .version = bytes[0x1B],
+        .reset_vector = reset_vector,
+        .startup_opcode = startup_opcode,
+        .checksum = checksum,
+        .checksum_complement = complement,
+        .checksum_present = checksum_present,
+        .checksum_matches = checksum_present and checksum == calculated_checksum,
+        .declared_rom_bytes = declared_rom_bytes,
+        .declared_sram_bytes = declared_sram_bytes,
+        .title = title,
+        .score = score,
+    };
+}
+
+fn sizeCodeBytes(code: u8) ?usize {
+    if (code > 16) return null;
+    return @as(usize, 1) << @intCast(@as(u16, code) + 10);
+}
+
+fn ramCodeBytes(code: u8) ?usize {
+    if (code == 0) return 0;
+    if (code > 11) return null;
+    return @as(usize, 1) << @intCast(@as(u16, code) + 10);
+}
+
+fn hasBattery(rom_type: u8) bool {
+    return switch (rom_type & 0x0F) {
+        0x02, 0x05, 0x06, 0x09, 0x0A => true,
+        else => false,
+    };
+}
+
+fn readU16(bytes: []const u8) u16 {
+    return @as(u16, bytes[0]) | (@as(u16, bytes[1]) << 8);
+}
+
+fn checksum16(bytes: []const u8) u16 {
+    var result: u16 = 0;
+    for (bytes) |value| result +%= value;
+    return result;
+}
+
+fn plausibleTitle(title: []const u8) bool {
+    var visible: usize = 0;
+    for (title) |value| {
+        if (value == 0 or value == 0xFF) continue;
+        if (value < 0x20 or value == 0x7F) return false;
+        if (value != ' ') visible += 1;
+    }
+    return visible >= 3;
+}
+
+fn plausibleStartup(opcode: u8) bool {
+    return switch (opcode) {
+        0x18, 0x38, 0x4C, 0x5C, 0x78, 0x9C, 0xA2, 0xA9, 0xC2, 0xD8, 0xE2, 0xF8, 0xFB => true,
+        else => false,
     };
 }
