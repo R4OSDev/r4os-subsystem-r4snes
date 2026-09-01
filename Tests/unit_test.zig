@@ -2,6 +2,10 @@ const std = @import("std");
 const r4os = @import("r4os");
 const core = @import("core");
 
+test {
+    _ = @import("cpu_test.zig");
+}
+
 test "all cartridge board and bus owners are analyzable" {
     std.testing.refAllDecls(core);
 }

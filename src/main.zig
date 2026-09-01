@@ -76,9 +76,10 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     };
     defer cartridge.deinit();
 
-    // Parsing owns a private normalized copy and exposes ROM as read-only. CPU
-    // execution remains unavailable until the following roadmap stages.
-    sys.println("R4SNES: cartridge and board recognized; execution is not implemented in 0.2.0.");
+    // Parsing owns a private normalized copy and exposes ROM as read-only. The
+    // complete CPU is qualified independently; productive machine execution
+    // starts after 5A22 timing and MMIO are connected in the next stage.
+    sys.println("R4SNES: cartridge, board and CPU recognized; 5A22 integration is not implemented in 0.3.0.");
     return error_not_implemented;
 }
 
@@ -96,9 +97,9 @@ fn cartridgeError(fault: anyerror) []const u8 {
 fn selfTest(app: *r4os.App) i32 {
     const sys = app.system();
     var machine = core.machine.Machine.init(1);
-    if (!machine.foundationReady()) return error_not_implemented;
+    if (!machine.foundationReady() or core.cpu.opcode_table.len != 256) return error_not_implemented;
     machine.close();
     if (!machine.closed) return error_not_implemented;
-    sys.println("R4SNES SELFTEST OK: hardware owners isolated; cartridge execution safely rejected.");
+    sys.println("R4SNES SELFTEST OK: hardware owners isolated; complete CPU decode available; machine execution safely rejected.");
     return 0;
 }

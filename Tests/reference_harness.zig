@@ -107,6 +107,13 @@ fn run(init: std.process.Init) !void {
     const roms = try scanRoms(allocator, io, cwd, rom_root);
     if (roms != expected.test_roms) return error.RomCountMismatch;
 
+    const cpu_basic_path = try std.fs.path.join(allocator, &.{ root, "Tests", "Binaries", "Gilyon-v1.4", "cputest", "cputest-basic.sfc" });
+    defer allocator.free(cpu_basic_path);
+    const cpu_full_path = try std.fs.path.join(allocator, &.{ root, "Tests", "Binaries", "Gilyon-v1.4", "cputest", "cputest-full.sfc" });
+    defer allocator.free(cpu_full_path);
+    const basic_steps = try runGilyon(allocator, io, cwd, cpu_basic_path);
+    const full_steps = try runGilyon(allocator, io, cwd, cpu_full_path);
+
     const vector_root = try std.fs.path.join(allocator, &.{ root, "Tests", "SPC700-SingleStep", "v1" });
     defer allocator.free(vector_root);
     const vectors = try scanVectors(allocator, io, cwd, vector_root);
@@ -115,9 +122,94 @@ fn run(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} SPC700-files={d} vectors={d}\n",
-        .{ expected.repositories, expected.downloads, expected.trees, roms, vectors.files, vectors.records },
+        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} Gilyon-basic={d} Gilyon-full={d} SPC700-files={d} vectors={d}\n",
+        .{ expected.repositories, expected.downloads, expected.trees, roms, basic_steps, full_steps, vectors.files, vectors.records },
     );
+}
+
+const CpuTestMmio = struct {
+    vram: [64 * 1024]u8 = [_]u8{0} ** (64 * 1024),
+    vram_word_address: u16 = 0,
+    vblank_high: bool = false,
+    dma: [8]u8 = [_]u8{0} ** 8,
+
+    pub fn read(self: *CpuTestMmio, address: u32, _: u8, _: u8) core.bus.MmioRead {
+        const offset: u16 = @truncate(address);
+        return switch (offset) {
+            0x4210 => value: {
+                self.vblank_high = !self.vblank_high;
+                break :value .{ .handled = true, .value = if (self.vblank_high) 0x80 else 0x00 };
+            },
+            0x4212, 0x4218, 0x4219 => .{ .handled = true, .value = 0 },
+            else => .{},
+        };
+    }
+
+    pub fn write(self: *CpuTestMmio, address: u32, value: u8, _: u8, _: u8) bool {
+        const offset: u16 = @truncate(address);
+        switch (offset) {
+            0x2116 => self.vram_word_address = (self.vram_word_address & 0xff00) | value,
+            0x2117 => self.vram_word_address = (self.vram_word_address & 0x00ff) | (@as(u16, value) << 8),
+            0x2118 => self.vram[@as(usize, self.vram_word_address) * 2] = value,
+            0x2119 => {
+                self.vram[@as(usize, self.vram_word_address) * 2 + 1] = value;
+                self.vram_word_address +%= 1;
+            },
+            0x4300...0x4307 => self.dma[offset - 0x4300] = value,
+            // The ROM's two startup DMAs only clear VRAM and upload the font.
+            // Neither affects CPU-visible state or the direct tilemap writes
+            // used for the machine-readable result below.
+            0x420b => {},
+            else => {},
+        }
+        return true;
+    }
+
+    fn contains(self: *const CpuTestMmio, needle: []const u8) bool {
+        if (needle.len == 0) return true;
+        var word: usize = 0;
+        while (word + needle.len <= self.vram.len / 2) : (word += 1) {
+            var index: usize = 0;
+            while (index < needle.len and self.vram[(word + index) * 2] == needle[index]) : (index += 1) {}
+            if (index == needle.len) return true;
+        }
+        return false;
+    }
+};
+
+fn runGilyon(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8) !u64 {
+    const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_rom_bytes));
+    defer allocator.free(bytes);
+    var cartridge = try core.cartridge.Cartridge.parse(allocator, bytes);
+    defer cartridge.deinit();
+
+    var system_bus = core.bus.Bus{};
+    var mmio = CpuTestMmio{};
+    var port = core.bus.CpuPort(*CpuTestMmio){
+        .bus = &system_bus,
+        .cartridge = &cartridge,
+        .mmio = &mmio,
+    };
+    var cpu = core.cpu.Cpu{};
+
+    const step_limit: u64 = 100_000_000;
+    var steps: u64 = 0;
+    while (steps < step_limit) : (steps += 1) {
+        const outcome = try cpu.step(&port);
+        if (outcome.state == .stopped) {
+            std.debug.print("R4SNES Gilyon stopped: {s} PC={x:0>2}:{x:0>4} test={x:0>4}\n", .{ path, cpu.pb, cpu.pc, @as(u16, system_bus.wram[0x10]) | (@as(u16, system_bus.wram[0x11]) << 8) });
+            return error.GilyonStopped;
+        }
+        if ((steps & 0x3ff) == 0) {
+            if (mmio.contains("Failed") or mmio.contains("Invalid test order")) {
+                std.debug.print("R4SNES Gilyon failure: {s} PC={x:0>2}:{x:0>4} test={x:0>4}\n", .{ path, cpu.pb, cpu.pc, @as(u16, system_bus.wram[0x10]) | (@as(u16, system_bus.wram[0x11]) << 8) });
+                return error.GilyonFunctionalFailure;
+            }
+            if (mmio.contains("Success")) return steps + 1;
+        }
+    }
+    std.debug.print("R4SNES Gilyon timeout: {s} PC={x:0>2}:{x:0>4} test={x:0>4}\n", .{ path, cpu.pb, cpu.pc, @as(u16, system_bus.wram[0x10]) | (@as(u16, system_bus.wram[0x11]) << 8) });
+    return error.GilyonTimeout;
 }
 
 fn expectSha256(bytes: []const u8, expected: []const u8) !void {

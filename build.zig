@@ -39,6 +39,21 @@ pub fn build(b: *std.Build) void {
     run_references.addArg(b.option([]const u8, "snes-reference-root", "SNES reference root; absent material is skipped") orelse "../../../ExFiles/Reference/SNES");
     run_references.addArg(b.option([]const u8, "snes-qualification-matrix", "SNES qualification matrix") orelse "../../../Docs/Subsystems/SNESQualificationMatrix.json");
 
+    const coverage_root = b.createModule(.{
+        .root_source_file = b.path("Tests/cpu_coverage.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    coverage_root.addImport("core", core);
+    const coverage_generator = b.addExecutable(.{
+        .name = "r4snes-cpu-coverage",
+        .root_module = coverage_root,
+    });
+    const run_coverage = b.addRunArtifact(coverage_generator);
+    const coverage_output = run_coverage.addOutputFileArg("CPU_OPCODE_COVERAGE.json");
+    const install_coverage = b.addInstallFile(coverage_output, "share/r4snes/CPU_OPCODE_COVERAGE.json");
+    b.getInstallStep().dependOn(&install_coverage.step);
+
     const test_step = b.step("test", "Build R4SNES and run deterministic owner tests");
     test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_unit_tests.step);

@@ -1,13 +1,23 @@
 ﻿# Compatibility
 
-The 0.2.0 cartridge stage accepts `.sfc` and `.smc` candidates up to 64 MiB,
+The 0.3.0 cartridge stage accepts `.sfc` and `.smc` candidates up to 64 MiB,
 normalizes an optional 512-byte copier header and requires one unambiguous
 LoROM, HiROM, ExLoROM or ExHiROM header. Region, board capability, declared
 sizes, reset vector, startup opcode and checksum/complement contribute to a
 concrete result. Header checksum equality is evidence rather than a lone veto,
 so consistent homebrew remains representable. Execution still ends with a
-deterministic not-implemented error. No commercial cartridge is shipped,
-embedded or needed by the public build.
+deterministic not-implemented error until 5A22 integration. No commercial
+cartridge is shipped, embedded or needed by the public build.
+
+CPU qualification covers every legal opcode in emulation mode and all four
+native M/X combinations. Synthetic cases check register/flag widths, direct
+page and bank boundaries, high-before-low read-modify-write stores, native and
+emulation stacks, BCD arithmetic, block moves, interrupt vectors, WAI/STP and
+the first differing micro-operation between traces. The optional reference
+gate executes the unchanged Gilyon 1.4 basic and full ROMs through the same CPU,
+cartridge and bus used by the module. WDC documentation is normative; observed
+edge behavior was independently compared with Ares and Mesen 2 without copying
+their implementation.
 
 The capability table names every planned enhancement family and the
 user-firmware sizes for NEC-DSP/ST hardware without claiming those devices are

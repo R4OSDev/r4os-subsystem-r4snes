@@ -95,6 +95,33 @@ pub const Bus = struct {
     }
 };
 
+// Compile-time adapter used by the CPU core. It keeps the CPU independent of
+// cartridge mapping and MMIO ownership while ensuring production execution
+// still goes through this 24-bit bus for every externally visible cycle.
+pub fn CpuPort(comptime Mmio: type) type {
+    return struct {
+        bus: *Bus,
+        cartridge: *cartridge.Cartridge,
+        mmio: Mmio,
+
+        const Self = @This();
+
+        pub fn read(self: *Self, address: u32) Access {
+            return self.bus.read(self.cartridge, self.mmio, address);
+        }
+
+        pub fn write(self: *Self, address: u32, value: u8) Access {
+            return self.bus.write(self.cartridge, self.mmio, address, value);
+        }
+
+        pub fn idle(_: *Self, _: u32) u8 {
+            // Internal 5A22 cycles are refined by the timing/MMIO stage. The
+            // CPU nevertheless emits a distinct idle micro-operation now.
+            return 6;
+        }
+    };
+}
+
 pub const NullMmio = struct {
     pub fn read(_: NullMmio, _: u32, _: u8, _: u8) MmioRead {
         return .{};

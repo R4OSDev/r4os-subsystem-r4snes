@@ -6,6 +6,7 @@ pub const coprocessors = @import("coprocessors.zig");
 pub const cpu = @import("cpu.zig");
 pub const host_adapter = @import("host_adapter.zig");
 pub const machine = @import("machine.zig");
+pub const opcode = @import("opcode.zig");
 pub const persistence = @import("persistence.zig");
 pub const ppu = @import("ppu.zig");
 pub const sdsp = @import("sdsp.zig");
