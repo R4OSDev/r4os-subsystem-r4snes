@@ -1,0 +1,66 @@
+const std = @import("std");
+const r4os = @import("r4os");
+const core = @import("core.zig");
+
+const error_profile: i32 = 64;
+const error_launch: i32 = 65;
+const error_path: i32 = 66;
+const error_missing: i32 = 67;
+const error_directory: i32 = 68;
+const error_size: i32 = 69;
+const error_metadata: i32 = 70;
+const error_cartridge: i32 = 71;
+const error_not_implemented: i32 = 72;
+
+pub fn r4_app_main(app: *r4os.App) i32 {
+    if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
+    if (app.profile != .desktop) return error_profile;
+    const files = app.files() orelse return r4os.abi.err_no_group;
+    const sys = app.system();
+    const launch = r4os.subsystem_launch.parse(app.args()) catch {
+        sys.println("R4SNES: invalid R4SUBSYS1 launch request.");
+        return error_launch;
+    };
+    var path = r4os.AbsoluteFilePath.parse(launch.guest_path) catch {
+        sys.println("R4SNES: invalid absolute cartridge path.");
+        return error_path;
+    };
+    const info = switch (files.info(path.asZ())) {
+        .value => |value| value,
+        .missing => {
+            sys.println("R4SNES: cartridge file not found.");
+            return error_missing;
+        },
+        .failure => {
+            sys.println("R4SNES: cartridge metadata could not be read.");
+            return error_metadata;
+        },
+    };
+    if (info.is_dir != 0) {
+        sys.println("R4SNES: cartridge path is a directory.");
+        return error_directory;
+    }
+    const size = std.math.cast(usize, info.size) orelse {
+        sys.println("R4SNES: cartridge is too large for this host.");
+        return error_size;
+    };
+    _ = core.cartridge.inspectCandidateSize(size) catch {
+        sys.println("R4SNES: unsupported cartridge geometry.");
+        return error_cartridge;
+    };
+
+    // Foundation safety invariant: no cartridge byte is opened, read, patched
+    // or executed before board mapping and execution owners are implemented.
+    sys.println("R4SNES: cartridge candidate recognized; execution is not implemented in 0.1.0.");
+    return error_not_implemented;
+}
+
+fn selfTest(app: *r4os.App) i32 {
+    const sys = app.system();
+    var machine = core.machine.Machine.init(1);
+    if (!machine.foundationReady()) return error_not_implemented;
+    machine.close();
+    if (!machine.closed) return error_not_implemented;
+    sys.println("R4SNES SELFTEST OK: foundation owners isolated; cartridge execution safely rejected.");
+    return 0;
+}

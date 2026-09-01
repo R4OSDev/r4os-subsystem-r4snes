@@ -1,0 +1,11 @@
+﻿R4SNES is an original Zig implementation for R4OS.
+
+Design evidence is consulted in this order:
+1. Public hardware and component documentation pinned by the workspace.
+2. Open test ROMs and generated single-step vectors with recorded licenses.
+3. Independently implemented, high-accuracy emulators for behavioral comparison.
+4. Measurements on real hardware during the final manual acceptance stage.
+
+No leaked Nintendo documentation, proprietary firmware, Nintendo boot ROM or
+commercial game ROM is a distributable dependency. Optional local test inputs
+remain outside this public repository and outside every R4OS image.
