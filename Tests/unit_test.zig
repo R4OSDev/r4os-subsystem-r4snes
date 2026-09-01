@@ -5,6 +5,7 @@ const core = @import("core");
 test {
     _ = @import("cpu_test.zig");
     _ = @import("dma_test.zig");
+    _ = @import("ppu_test.zig");
     _ = @import("system_test.zig");
 }
 

@@ -358,6 +358,34 @@ test "production DMA bus confines conflicts wrap and refresh while CPU is halted
     try std.testing.expect(!firstDmaTransfer(&h.scpu.dma).valid);
 }
 
+test "production timed port advances the PPU on the canonical master timeline" {
+    const allocator = std.testing.allocator;
+    const image = try makeCpuImage(allocator);
+    defer allocator.free(image);
+    var cart = try core.cartridge.Cartridge.parse(allocator, image);
+    defer cart.deinit();
+    var h = Harness{};
+    var ppu = core.ppu.Ppu{};
+    ppu.forced_blank = false;
+    ppu.brightness = 15;
+    ppu.cgram[0] = 0x1f;
+    h.clock.v_counter = 1;
+    h.clock.h_counter = 88;
+    var port = core.scpu.TimedPortWithDevice(*core.ppu.Ppu){
+        .bus = &h.bus,
+        .cartridge = &cart,
+        .scpu = &h.scpu,
+        .clock = &h.clock,
+        .controllers = &h.ports,
+        .cpu = &h.cpu,
+        .device = &ppu,
+    };
+    _ = port.idle(0);
+    try std.testing.expectEqual(@as(u32, 0xffff0000), ppu.working_frame[0]);
+    try std.testing.expectEqual(@as(u16, 93), ppu.h_counter);
+    try std.testing.expectEqual(h.clock.v_counter, ppu.v_counter);
+}
+
 fn serviceDma(port: anytype) !void {
     var steps: usize = 0;
     while (!port.cpuReady() and steps < 100_000) : (steps += 1) {

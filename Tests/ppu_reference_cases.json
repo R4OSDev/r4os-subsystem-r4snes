@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "release": "0.73.7",
+  "policy": "Synthetic owner models with exact XRGB32 digests are gates. Foreign visual ROMs remain bounded diagnostics until a licensed hardware pixel or register oracle is attached.",
+  "model_oracles": [
+    {"mode": 0, "geometry": "256x224", "xrgb32": "solid red", "digest_fnv1a64": "84eefc2777a6e325"},
+    {"mode": 1, "geometry": "256x224", "xrgb32": "solid green", "digest_fnv1a64": "a71592d0a1312325"},
+    {"mode": 2, "geometry": "256x224", "xrgb32": "solid blue", "digest_fnv1a64": "f24128f9b0f3e325"},
+    {"mode": 3, "geometry": "256x224", "xrgb32": "solid yellow", "digest_fnv1a64": "488f665ded0f2325"},
+    {"mode": 4, "geometry": "256x224", "xrgb32": "solid magenta", "digest_fnv1a64": "9ef804ce64d52325"}
+  ],
+  "foreign_roms": [
+    {
+      "id": "undisbeliever-vmain-2bpp-remapping",
+      "path": "Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-2bpp-with-remapping.sfc",
+      "sha256": "5997d5290fe0f387a4cd534a84a9fc2b6053e41dcf84fc50fe4e3c9778535ad4",
+      "bytes": 131072,
+      "enabled_as_gate": false,
+      "oracle_status": "diagnostic_only",
+      "reason": "The cartridge is a visual address-remapping demonstration without a licensed exact capture for the selected console revision.",
+      "timeout_master_clocks": 107386360,
+      "first_bus_divergence": "Record VMAIN, VMADD, translated VRAM word address, byte lane, beam position and first differing XRGB32 pixel."
+    },
+    {
+      "id": "undisbeliever-object-dropout",
+      "path": "Tests/Binaries/Generated/Undisbeliever-ac6ef800/hardware-tests/object-dropout-test.sfc",
+      "sha256": "1c279577f4c393c7afe2166a87b2c56446e94701ea6420c9ab25ff60738fd606",
+      "bytes": 131072,
+      "enabled_as_gate": false,
+      "oracle_status": "diagnostic_only",
+      "reason": "Dropout depends on sprite evaluation timing and needs a revision-bound hardware frame before it can judge pass or fail.",
+      "timeout_master_clocks": 107386360,
+      "first_bus_divergence": "Record scanline, evaluated sprite and sliver counts, STAT77 range/time flags, OAM address and first differing pixel."
+    },
+    {
+      "id": "undisbeliever-inidisp-mid-frame",
+      "path": "Tests/Binaries/Generated/Undisbeliever-ac6ef800/hardware-tests/inidisp_enable_display_mid_frame.sfc",
+      "sha256": "d63b83ffa3224fa9b0fd7787f49e2b9be222bb0d12c6615f451c0dfaead19803",
+      "bytes": 131072,
+      "enabled_as_gate": false,
+      "oracle_status": "diagnostic_only",
+      "reason": "The program demonstrates a beam-relative INIDISP transition; its image is not a self-reported result.",
+      "timeout_master_clocks": 107386360,
+      "first_bus_divergence": "Record the $2100 write master clock, H/V counters, forced-blank state and first differing XRGB32 pixel."
+    },
+    {
+      "id": "undisbeliever-vram-mid-scanline",
+      "path": "Tests/Binaries/Generated/Undisbeliever-ac6ef800/hardware-tests/vram-mid-scanline-test.sfc",
+      "sha256": "fc04912719a8b6eb1ba4fc19ed12b46f6ec488f0b987cf7834c23d181075f90f",
+      "bytes": 131072,
+      "enabled_as_gate": false,
+      "oracle_status": "diagnostic_only",
+      "reason": "Active-display VRAM behavior is hardware- and beam-sensitive and the ROM supplies no machine-readable verdict.",
+      "timeout_master_clocks": 107386360,
+      "first_bus_divergence": "Record VMADD/VMAIN, read/write lane, access classification, beam position and first differing pixel."
+    }
+  ]
+}

@@ -381,15 +381,29 @@ pub fn MmioWithDevice(comptime Device: type) type {
 
 pub const Mmio = MmioWithDevice(bus_mod.NullMmio);
 
-const EventSink = struct {
-    scpu: *Scpu,
-    ports: *controller_mod.Ports,
-    cpu: *cpu_mod.Cpu,
+fn EventSink(comptime Device: type) type {
+    return struct {
+        scpu: *Scpu,
+        ports: *controller_mod.Ports,
+        cpu: *cpu_mod.Cpu,
+        device: Device,
 
-    pub fn onMasterTick(self: *EventSink, clock: *const timing.Clock, refresh_start: bool, refresh_wait: bool) void {
-        self.scpu.onMasterTick(clock, self.ports, self.cpu, refresh_start, refresh_wait);
-    }
-};
+        const Self = @This();
+
+        pub fn onMasterTick(self: *Self, clock: *const timing.Clock, refresh_start: bool, refresh_wait: bool) void {
+            self.scpu.onMasterTick(clock, self.ports, self.cpu, refresh_start, refresh_wait);
+            if (comptime deviceObservesMasterClock(Device)) self.device.onMasterTick(clock);
+        }
+    };
+}
+
+fn deviceObservesMasterClock(comptime Device: type) bool {
+    const Owner = switch (@typeInfo(Device)) {
+        .pointer => |pointer| pointer.child,
+        else => Device,
+    };
+    return @hasDecl(Owner, "onMasterTick");
+}
 
 pub fn TimedPortWithDevice(comptime Device: type) type {
     return struct {
@@ -457,8 +471,8 @@ pub fn TimedPortWithDevice(comptime Device: type) type {
             };
         }
 
-        fn makeSink(self: *Self) EventSink {
-            return .{ .scpu = self.scpu, .ports = self.controllers, .cpu = self.cpu };
+        fn makeSink(self: *Self) EventSink(Device) {
+            return .{ .scpu = self.scpu, .ports = self.controllers, .cpu = self.cpu, .device = self.device };
         }
     };
 }
@@ -483,7 +497,7 @@ pub fn DmaBusPort(comptime Device: type) type {
         }
 
         pub fn advanceDma(self: *Self, clocks: u8) u8 {
-            var events = EventSink{ .scpu = self.scpu, .ports = self.controllers, .cpu = self.cpu };
+            var events = EventSink(Device){ .scpu = self.scpu, .ports = self.controllers, .cpu = self.cpu, .device = self.device };
             return self.clock.advanceCpuCycle(clocks, &events);
         }
 

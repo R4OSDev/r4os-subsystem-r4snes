@@ -10,11 +10,13 @@ const Expected = struct {
     references_sha256: []const u8,
     qualification_matrix_sha256: []const u8,
     dma_cases_sha256: []const u8,
+    ppu_cases_sha256: []const u8,
     repositories: usize,
     downloads: usize,
     trees: usize,
     test_roms: usize,
     dma_reference_roms: usize,
+    ppu_reference_roms: usize,
     spc700_files: usize,
     spc700_records: usize,
 };
@@ -62,6 +64,20 @@ const DmaReferenceCases = struct {
     foreign_roms: []const DmaReferenceRom,
 };
 
+const PpuModelOracle = struct {
+    mode: u3,
+    geometry: []const u8,
+    xrgb32: []const u8,
+    digest_fnv1a64: []const u8,
+};
+
+const PpuReferenceCases = struct {
+    schema: u32,
+    release: []const u8,
+    model_oracles: []const PpuModelOracle,
+    foreign_roms: []const DmaReferenceRom,
+};
+
 pub fn main(init: std.process.Init) void {
     run(init) catch |fault| {
         std.debug.print("R4SNES reference harness FAILED: {s}\n", .{@errorName(fault)});
@@ -90,7 +106,7 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.6")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.7")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
@@ -118,6 +134,39 @@ fn run(init: std.process.Init) !void {
             rom.timeout_master_clocks == 0 or rom.first_bus_divergence.len == 0)
         {
             return error.UnqualifiedDmaReferenceGate;
+        }
+    }
+
+    const ppu_cases_bytes = try cwd.readFileAlloc(io, "Tests/ppu_reference_cases.json", allocator, .limited(max_manifest_bytes));
+    defer allocator.free(ppu_cases_bytes);
+    try expectSha256(ppu_cases_bytes, expected.ppu_cases_sha256);
+    var parsed_ppu_cases = try std.json.parseFromSlice(PpuReferenceCases, allocator, ppu_cases_bytes, .{ .ignore_unknown_fields = true });
+    defer parsed_ppu_cases.deinit();
+    const ppu_cases = parsed_ppu_cases.value;
+    const ppu_digests = [_][]const u8{
+        "84eefc2777a6e325",
+        "a71592d0a1312325",
+        "f24128f9b0f3e325",
+        "488f665ded0f2325",
+        "9ef804ce64d52325",
+    };
+    if (ppu_cases.schema != 1 or !std.mem.eql(u8, ppu_cases.release, "0.73.7") or
+        ppu_cases.model_oracles.len != ppu_digests.len or ppu_cases.foreign_roms.len != expected.ppu_reference_roms)
+    {
+        return error.PpuReferenceManifestMismatch;
+    }
+    for (ppu_cases.model_oracles, 0..) |model, index| {
+        if (model.mode != index or !std.mem.eql(u8, model.geometry, "256x224") or model.xrgb32.len == 0 or
+            !std.mem.eql(u8, model.digest_fnv1a64, ppu_digests[index]))
+        {
+            return error.PpuModelOracleMismatch;
+        }
+    }
+    for (ppu_cases.foreign_roms) |rom| {
+        if (rom.enabled_as_gate or !std.mem.eql(u8, rom.oracle_status, "diagnostic_only") or
+            rom.timeout_master_clocks == 0 or rom.first_bus_divergence.len == 0)
+        {
+            return error.UnqualifiedPpuReferenceGate;
         }
     }
 
@@ -151,6 +200,17 @@ fn run(init: std.process.Init) !void {
         var parsed = try core.cartridge.Cartridge.parse(allocator, bytes);
         parsed.deinit();
     }
+    for (ppu_cases.foreign_roms) |rom| {
+        const path = try std.fs.path.join(allocator, &.{ root, rom.path });
+        defer allocator.free(path);
+        const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_rom_bytes));
+        defer allocator.free(bytes);
+        if (bytes.len != rom.bytes) return error.PpuReferenceSizeMismatch;
+        try expectSha256(bytes, rom.sha256);
+        _ = try core.cartridge.inspectCandidateSize(bytes.len);
+        var parsed = try core.cartridge.Cartridge.parse(allocator, bytes);
+        parsed.deinit();
+    }
 
     const rom_root = try std.fs.path.join(allocator, &.{ root, "Tests", "Binaries" });
     defer allocator.free(rom_root);
@@ -172,8 +232,8 @@ fn run(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} Gilyon-basic={d} Gilyon-full={d} SPC700-files={d} vectors={d}\n",
-        .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, basic_steps, full_steps, vectors.files, vectors.records },
+        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} PPU-diagnostics={d} Gilyon-basic={d} Gilyon-full={d} SPC700-files={d} vectors={d}\n",
+        .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, ppu_cases.foreign_roms.len, basic_steps, full_steps, vectors.files, vectors.records },
     );
 }
 
