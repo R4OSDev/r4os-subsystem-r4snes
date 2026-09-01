@@ -2,6 +2,7 @@ const bus_mod = @import("bus.zig");
 const cartridge_mod = @import("cartridge.zig");
 const controller_mod = @import("controller.zig");
 const cpu_mod = @import("cpu.zig");
+const dma_mod = @import("dma.zig");
 const timing = @import("timing.zig");
 
 pub const MathOperation = enum {
@@ -45,6 +46,7 @@ pub const Scpu = struct {
     counters_latched: bool = false,
     dma_enable: u8 = 0,
     hdma_enable: u8 = 0,
+    dma: dma_mod.Controller = .{},
     interrupt_polls: u64 = 0,
     event_digest: u64 = 0xcbf29ce484222325,
 
@@ -69,6 +71,7 @@ pub const Scpu = struct {
         ppu_open_bus: u8,
     ) bus_mod.MmioRead {
         const offset: u16 = @truncate(address);
+        if (self.dma.readRegister(offset, cpu_open_bus)) |value| return internal(value);
         switch (offset) {
             0x2137 => {
                 self.latchCounters(clock);
@@ -133,6 +136,10 @@ pub const Scpu = struct {
         value: u8,
     ) bool {
         const offset: u16 = @truncate(address);
+        if (self.dma.writeRegister(offset, value)) {
+            self.mixEvent((@as(u64, offset) << 8) | value);
+            return true;
+        }
         switch (offset) {
             0x2180 => {
                 bus.wram[@as(usize, @intCast(self.wram_address & 0x1ffff))] = value;
@@ -176,8 +183,14 @@ pub const Scpu = struct {
             0x4208 => self.htime = (self.htime & 0x0ff) | (@as(u16, value & 1) << 8),
             0x4209 => self.vtime = (self.vtime & 0x100) | value,
             0x420a => self.vtime = (self.vtime & 0x0ff) | (@as(u16, value & 1) << 8),
-            0x420b => self.dma_enable = value,
-            0x420c => self.hdma_enable = value,
+            0x420b => {
+                self.dma_enable = value;
+                self.dma.requestManual(value, 6);
+            },
+            0x420c => {
+                self.hdma_enable = value;
+                self.dma.setHdmaEnabled(value);
+            },
             0x420d => bus.fast_rom_enabled = (value & 1) != 0,
             else => return false,
         }
@@ -232,6 +245,12 @@ pub const Scpu = struct {
 
         if ((clock.master_cycles & 3) == 0) self.pollInterrupts(clock, cpu);
         if ((clock.master_cycles & 127) == 0) self.joypadEdge(clock, ports);
+        if (clock.v_counter == 0 and clock.h_counter == 12) self.dma.beginFrame();
+        if (clock.v_counter < clock.profile().vblank_start and clock.h_counter == 1_104) self.dma.beginHblank();
+    }
+
+    pub fn cpuMayRun(self: *const Scpu) bool {
+        return self.dma.cpuMayRun();
     }
 
     fn pollInterrupts(self: *Scpu, clock: *const timing.Clock, cpu: *cpu_mod.Cpu) void {
@@ -410,6 +429,23 @@ pub fn TimedPortWithDevice(comptime Device: type) type {
             return elapsed;
         }
 
+        pub fn cpuReady(self: *const Self) bool {
+            return self.scpu.cpuMayRun();
+        }
+
+        pub fn serviceDmaStep(self: *Self) dma_mod.StepResult {
+            var dma_port = DmaBusPort(Device){
+                .bus = self.bus,
+                .cartridge = self.cartridge,
+                .scpu = self.scpu,
+                .clock = self.clock,
+                .controllers = self.controllers,
+                .cpu = self.cpu,
+                .device = self.device,
+            };
+            return self.scpu.dma.step(&dma_port);
+        }
+
         fn makeMmio(self: *Self) DeviceMmio {
             return .{
                 .scpu = self.scpu,
@@ -428,3 +464,100 @@ pub fn TimedPortWithDevice(comptime Device: type) type {
 }
 
 pub const TimedPort = TimedPortWithDevice(bus_mod.NullMmio);
+
+pub fn DmaBusPort(comptime Device: type) type {
+    return struct {
+        bus: *bus_mod.Bus,
+        cartridge: *cartridge_mod.Cartridge,
+        scpu: *Scpu,
+        clock: *timing.Clock,
+        controllers: *controller_mod.Ports,
+        cpu: *cpu_mod.Cpu,
+        device: Device,
+
+        const Self = @This();
+        const DeviceMmio = MmioWithDevice(Device);
+
+        pub fn masterClock(self: *const Self) u64 {
+            return self.clock.master_cycles;
+        }
+
+        pub fn advanceDma(self: *Self, clocks: u8) u8 {
+            var events = EventSink{ .scpu = self.scpu, .ports = self.controllers, .cpu = self.cpu };
+            return self.clock.advanceCpuCycle(clocks, &events);
+        }
+
+        pub fn readDma(self: *Self, address: u32, _: dma_mod.Revision) dma_mod.ReadResult {
+            const valid = dma_mod.validAAddress(address);
+            const value = if (valid) self.readBus(address) else invalid: {
+                self.bus.cpu_open_bus = 0;
+                break :invalid 0;
+            };
+            const elapsed = self.advanceDma(8);
+            return .{ .address = address & bus_mod.address_mask, .value = value, .valid = valid, .master_cycles = elapsed };
+        }
+
+        pub fn transferByte(
+            self: *Self,
+            channel: *const dma_mod.Channel,
+            byte_index: u3,
+            address_a: u32,
+            revision: dma_mod.Revision,
+        ) dma_mod.TransferResult {
+            const canonical_a = address_a & bus_mod.address_mask;
+            const address_b = channel.bBusAddress(byte_index);
+            const valid_a = dma_mod.validAAddress(canonical_a);
+            const wram_conflict = address_b == 0x2180 and dma_mod.isWorkRamAddress(canonical_a);
+            var value: u8 = 0;
+            const valid = valid_a and !wram_conflict;
+
+            if (!channel.directionBtoA()) {
+                if (valid_a) {
+                    value = self.readBus(canonical_a);
+                } else {
+                    self.bus.cpu_open_bus = 0;
+                }
+                if (!wram_conflict) self.writeBus(address_b, value);
+            } else {
+                if (wram_conflict) {
+                    value = if (revision == .s_cpu_a) 0 else 0xff;
+                    self.bus.cpu_open_bus = value;
+                } else {
+                    value = self.readBus(address_b);
+                }
+                if (valid_a) self.writeBus(canonical_a, value);
+            }
+
+            const elapsed = self.advanceDma(8);
+            return .{
+                .a_address = canonical_a,
+                .b_address = address_b,
+                .value = value,
+                .valid = valid,
+                .conflict = wram_conflict,
+                .master_cycles = elapsed,
+            };
+        }
+
+        fn readBus(self: *Self, address: u32) u8 {
+            var adapter = self.makeMmio();
+            return self.bus.read(self.cartridge, &adapter, address).value;
+        }
+
+        fn writeBus(self: *Self, address: u32, value: u8) void {
+            var adapter = self.makeMmio();
+            _ = self.bus.write(self.cartridge, &adapter, address, value);
+        }
+
+        fn makeMmio(self: *Self) DeviceMmio {
+            return .{
+                .scpu = self.scpu,
+                .bus = self.bus,
+                .clock = self.clock,
+                .ports = self.controllers,
+                .cpu = self.cpu,
+                .device = self.device,
+            };
+        }
+    };
+}

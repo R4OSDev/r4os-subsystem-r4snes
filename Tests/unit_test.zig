@@ -4,6 +4,7 @@ const core = @import("core");
 
 test {
     _ = @import("cpu_test.zig");
+    _ = @import("dma_test.zig");
     _ = @import("system_test.zig");
 }
 
@@ -283,9 +284,12 @@ test "machines retain private 128 KiB buses and idempotent close state" {
     first.cpu.a = 0xBEEF;
     try std.testing.expectEqual(@as(u8, 0), second.bus.wram[0x1234]);
     try std.testing.expectEqual(@as(u16, 0), second.cpu.a);
+    first.scpu.dma.requestManual(1, 6);
+    try std.testing.expect(!first.scpu.cpuMayRun());
     first.close();
     first.close();
     try std.testing.expect(first.closed);
+    try std.testing.expect(first.scpu.cpuMayRun());
     try std.testing.expect(second.foundationReady());
 }
 

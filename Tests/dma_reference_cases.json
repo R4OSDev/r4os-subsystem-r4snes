@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "release": "0.73.6",
+  "policy": "Only a machine-readable hardware oracle may enable a foreign ROM as a gate. Visual, revision-dependent, or nondeterministic cases remain diagnostics.",
+  "model_oracles": [
+    "all manual transfer modes emit exact B-bus patterns and clock totals",
+    "HDMA direct tables implement repeat skip reload completion and restart",
+    "HDMA indirect tables and skipped lines retain deterministic byte boundaries",
+    "production DMA bus confines conflicts wrap and refresh while CPU is halted"
+  ],
+  "foreign_roms": [
+    {
+      "id": "undisbeliever-current-dma-hdma-boundary",
+      "path": "Tests/Binaries/Generated/Undisbeliever-ac6ef800/hardware-glitch-tests/dma-ends-at-hdma-start/dma-ends-hdma-start-1-ch.sfc",
+      "sha256": "e62601f95a999096e461410450c88ea081b919ce5bdac5436af6f66b8e4b6ce6",
+      "bytes": 131072,
+      "enabled_as_gate": false,
+      "oracle_status": "diagnostic_only",
+      "reason": "The ROM reports a visual and console-revision-sensitive result; no licensed exact register or pixel baseline is bound yet.",
+      "timeout_master_clocks": 107386360,
+      "first_bus_divergence": "Capture channel, phase, A address, B address, value, validity and master clock from the bounded DMA trace."
+    },
+    {
+      "id": "undisbeliever-current-scpu-a-2100",
+      "path": "Tests/Binaries/Generated/Undisbeliever-ac6ef800/hardware-glitch-tests/scpu-a-dma-bug/scpu-a-dma-bug-fix.sfc",
+      "sha256": "3cd1be4e11d6b2dfa6654c58e9f55a1baba9fb17aebe6dd7af8a5884e3c712f4",
+      "bytes": 131072,
+      "enabled_as_gate": false,
+      "oracle_status": "diagnostic_only",
+      "reason": "The S-CPU-A $2100-after-HDMA failure is revision-specific and not deterministic enough to synthesize as a pass/fail rule.",
+      "timeout_master_clocks": 107386360,
+      "first_bus_divergence": "Capture the preceding HDMA target, manual-DMA channel, WRAM result, phase and master clock without inventing a corruption value."
+    },
+    {
+      "id": "undisbeliever-v20210217-scpu-a-2100",
+      "path": "Tests/Binaries/Undisbeliever-v20210217/snes-test-roms/scpu-a-dma-bug-fix.sfc",
+      "sha256": "5f0d455f3eb949b7f346a7982a2a8f6b70fdc86c0d2c79d6a6b32c5725cdcb8a",
+      "bytes": 131072,
+      "enabled_as_gate": false,
+      "oracle_status": "diagnostic_only",
+      "reason": "Historical reproduction snapshot; it is provenance evidence, not an independent hardware oracle.",
+      "timeout_master_clocks": 107386360,
+      "first_bus_divergence": "Use the same bounded channel/A-bus/B-bus/value/master-clock record as the current source build and report the first difference."
+    }
+  ]
+}

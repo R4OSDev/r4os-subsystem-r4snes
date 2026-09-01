@@ -37,6 +37,7 @@ pub const Machine = struct {
 
     pub fn close(self: *Machine) void {
         self.closed = true;
+        self.scpu.dma.abortAll();
         self.controllers.clearInput();
     }
 };

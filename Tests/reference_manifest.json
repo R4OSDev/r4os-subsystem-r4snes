@@ -1,11 +1,13 @@
 {
   "schema": 1,
   "references_sha256": "a2aa8b74fee6f49de8a52c5e5fc73c932e2c3e1e3633266325b809bc805b0fc6",
-  "qualification_matrix_sha256": "cf6447b5adfb4cdbe628300e5440834c296561e664bf59607a1bbb4522efa127",
+  "qualification_matrix_sha256": "bbfa7e992932d1c7b9900e81ff88db80f3e343946d3a173b0689c509a30146de",
+  "dma_cases_sha256": "997fe478761e4cb17f97e7d063d9d400c11c5fc743fe4d3f6c91ff985dc7efff",
   "repositories": 16,
   "downloads": 5,
   "trees": 9,
   "test_roms": 147,
+  "dma_reference_roms": 3,
   "spc700_files": 256,
   "spc700_records": 256000
 }

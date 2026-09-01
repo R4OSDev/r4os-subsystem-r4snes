@@ -243,6 +243,137 @@ test "production CPU port keeps execution invariant across host grouping" {
     try std.testing.expectEqual(first.cpu.master_cycles, second.cpu.master_cycles);
 }
 
+const PpuDmaDevice = struct {
+    registers: [256]u8 = [_]u8{0} ** 256,
+    writes: u64 = 0,
+
+    pub fn read(self: *PpuDmaDevice, address: u32, _: u8, _: u8) core.bus.MmioRead {
+        const offset: u16 = @truncate(address);
+        if (offset < 0x2100 or offset > 0x21ff) return .{};
+        return .{ .handled = true, .value = self.registers[@as(u8, @truncate(offset))], .latch = .ppu };
+    }
+
+    pub fn write(self: *PpuDmaDevice, address: u32, value: u8, _: u8, _: u8) bool {
+        const offset: u16 = @truncate(address);
+        if (offset < 0x2100 or offset > 0x21ff) return false;
+        self.registers[@as(u8, @truncate(offset))] = value;
+        self.writes +%= 1;
+        return true;
+    }
+};
+
+test "production DMA bus confines conflicts wrap and refresh while CPU is halted" {
+    const allocator = std.testing.allocator;
+    const image = try makeCpuImage(allocator);
+    defer allocator.free(image);
+    var cart = try core.cartridge.Cartridge.parse(allocator, image);
+    defer cart.deinit();
+    var h = Harness{};
+    var device = PpuDmaDevice{};
+    var port = core.scpu.TimedPortWithDevice(*PpuDmaDevice){
+        .bus = &h.bus,
+        .cartridge = &cart,
+        .scpu = &h.scpu,
+        .clock = &h.clock,
+        .controllers = &h.ports,
+        .cpu = &h.cpu,
+        .device = &device,
+    };
+
+    h.bus.wram[0x100] = 0x12;
+    h.bus.wram[0x101] = 0x34;
+    h.write(0x4300, 4);
+    h.write(0x4301, 0xff);
+    h.write(0x4302, 0x00);
+    h.write(0x4303, 0x01);
+    h.write(0x4304, 0x7e);
+    h.write(0x4305, 2);
+    h.write(0x4306, 0);
+    h.clock.master_cycles = 536;
+    h.clock.h_counter = 536;
+    h.clock.refresh_position = 538;
+    h.write(0x420b, 1);
+    try std.testing.expect(!port.cpuReady());
+    try serviceDma(&port);
+    try std.testing.expectEqual(@as(u8, 0x12), device.registers[0xff]);
+    try std.testing.expectEqual(@as(u8, 0x34), device.registers[0x00]);
+    try std.testing.expectEqual(@as(u64, 1), h.clock.refresh_events);
+    try std.testing.expectEqual(@as(u64, 40), h.clock.refresh_wait_master_cycles);
+    try std.testing.expect(port.cpuReady());
+
+    h.write(0x4200, 0x80);
+    h.clock.v_counter = h.clock.profile().vblank_start - 1;
+    h.clock.h_counter = 1_362;
+    h.clock.master_cycles = 1_362;
+    h.scpu.last_vblank = false;
+    h.cpu.nmi_pending = false;
+    h.write(0x4300, 0);
+    h.write(0x4301, 0x10);
+    h.write(0x4302, 0x00);
+    h.write(0x4303, 0x01);
+    h.write(0x4304, 0x7e);
+    h.write(0x4305, 1);
+    h.write(0x420b, 1);
+    try serviceDma(&port);
+    try std.testing.expect(h.cpu.nmi_pending);
+    try std.testing.expect(h.scpu.nmi_flag);
+
+    h.scpu.dma.clearTrace();
+    h.scpu.wram_address = 0x400;
+    h.write(0x4300, 0);
+    h.write(0x4301, 0x80);
+    h.write(0x4302, 0x00);
+    h.write(0x4303, 0x02);
+    h.write(0x4304, 0x7e);
+    h.write(0x4305, 1);
+    h.write(0x420b, 1);
+    try serviceDma(&port);
+    try std.testing.expectEqual(@as(u32, 0x400), h.scpu.wram_address);
+    try std.testing.expectEqual(core.dma.TraceKind.conflict, firstDmaTransfer(&h.scpu.dma).kind);
+
+    h.scpu.dma.clearTrace();
+    h.bus.wram[0x200] = 0;
+    h.write(0x4300, 0x80);
+    h.write(0x4301, 0x80);
+    h.write(0x4302, 0x00);
+    h.write(0x4303, 0x02);
+    h.write(0x4304, 0x7e);
+    h.write(0x4305, 1);
+    h.write(0x420b, 1);
+    try serviceDma(&port);
+    try std.testing.expectEqual(@as(u8, 0xff), h.bus.wram[0x200]);
+    try std.testing.expectEqual(core.dma.TraceKind.conflict, firstDmaTransfer(&h.scpu.dma).kind);
+
+    h.scpu.dma.clearTrace();
+    device.registers[0x10] = 0xa5;
+    h.write(0x4300, 0);
+    h.write(0x4301, 0x10);
+    h.write(0x4302, 0x00);
+    h.write(0x4303, 0x43);
+    h.write(0x4304, 0x00);
+    h.write(0x4305, 1);
+    h.write(0x420b, 1);
+    try serviceDma(&port);
+    try std.testing.expectEqual(@as(u8, 0), device.registers[0x10]);
+    try std.testing.expect(!firstDmaTransfer(&h.scpu.dma).valid);
+}
+
+fn serviceDma(port: anytype) !void {
+    var steps: usize = 0;
+    while (!port.cpuReady() and steps < 100_000) : (steps += 1) {
+        const result = port.serviceDmaStep();
+        try std.testing.expect(result.progressed);
+    }
+    try std.testing.expect(steps < 100_000);
+}
+
+fn firstDmaTransfer(controller: *const core.dma.Controller) core.dma.TraceEntry {
+    for (controller.lastTrace()) |entry| {
+        if (entry.kind == .transfer or entry.kind == .conflict) return entry;
+    }
+    unreachable;
+}
+
 fn runCpu(h: *Harness, cart: *core.cartridge.Cartridge, count: usize, groups: []const usize) !void {
     var port = core.scpu.TimedPort{
         .bus = &h.bus,

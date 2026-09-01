@@ -9,10 +9,12 @@ const Expected = struct {
     schema: u32,
     references_sha256: []const u8,
     qualification_matrix_sha256: []const u8,
+    dma_cases_sha256: []const u8,
     repositories: usize,
     downloads: usize,
     trees: usize,
     test_roms: usize,
+    dma_reference_roms: usize,
     spc700_files: usize,
     spc700_records: usize,
 };
@@ -43,6 +45,23 @@ const Matrix = struct {
     suites: []const MatrixSuite,
 };
 
+const DmaReferenceRom = struct {
+    path: []const u8,
+    sha256: []const u8,
+    bytes: usize,
+    enabled_as_gate: bool,
+    oracle_status: []const u8,
+    timeout_master_clocks: u64,
+    first_bus_divergence: []const u8,
+};
+
+const DmaReferenceCases = struct {
+    schema: u32,
+    release: []const u8,
+    model_oracles: []const []const u8,
+    foreign_roms: []const DmaReferenceRom,
+};
+
 pub fn main(init: std.process.Init) void {
     run(init) catch |fault| {
         std.debug.print("R4SNES reference harness FAILED: {s}\n", .{@errorName(fault)});
@@ -71,7 +90,7 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.5")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.6")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
@@ -82,6 +101,25 @@ fn run(init: std.process.Init) !void {
     var matrix_roms: usize = 0;
     for (matrix.suites) |suite| matrix_roms += suite.rom_count orelse 0;
     if (matrix_roms != expected.test_roms) return error.QualificationSuiteCountMismatch;
+
+    const dma_cases_bytes = try cwd.readFileAlloc(io, "Tests/dma_reference_cases.json", allocator, .limited(max_manifest_bytes));
+    defer allocator.free(dma_cases_bytes);
+    try expectSha256(dma_cases_bytes, expected.dma_cases_sha256);
+    var parsed_dma_cases = try std.json.parseFromSlice(DmaReferenceCases, allocator, dma_cases_bytes, .{ .ignore_unknown_fields = true });
+    defer parsed_dma_cases.deinit();
+    const dma_cases = parsed_dma_cases.value;
+    if (dma_cases.schema != 1 or !std.mem.eql(u8, dma_cases.release, "0.73.6") or
+        dma_cases.foreign_roms.len != expected.dma_reference_roms or dma_cases.model_oracles.len != 4)
+    {
+        return error.DmaReferenceManifestMismatch;
+    }
+    for (dma_cases.foreign_roms) |rom| {
+        if (rom.enabled_as_gate or !std.mem.eql(u8, rom.oracle_status, "diagnostic_only") or
+            rom.timeout_master_clocks == 0 or rom.first_bus_divergence.len == 0)
+        {
+            return error.UnqualifiedDmaReferenceGate;
+        }
+    }
 
     cwd.access(io, root, .{}) catch {
         std.debug.print("R4SNES reference harness SKIP: optional root missing: {s}\n", .{root});
@@ -100,6 +138,18 @@ fn run(init: std.process.Init) !void {
         references.files.len != expected.downloads or references.trees.len != expected.trees)
     {
         return error.ReferenceManifestMismatch;
+    }
+
+    for (dma_cases.foreign_roms) |rom| {
+        const path = try std.fs.path.join(allocator, &.{ root, rom.path });
+        defer allocator.free(path);
+        const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_rom_bytes));
+        defer allocator.free(bytes);
+        if (bytes.len != rom.bytes) return error.DmaReferenceSizeMismatch;
+        try expectSha256(bytes, rom.sha256);
+        _ = try core.cartridge.inspectCandidateSize(bytes.len);
+        var parsed = try core.cartridge.Cartridge.parse(allocator, bytes);
+        parsed.deinit();
     }
 
     const rom_root = try std.fs.path.join(allocator, &.{ root, "Tests", "Binaries" });
@@ -122,8 +172,8 @@ fn run(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} Gilyon-basic={d} Gilyon-full={d} SPC700-files={d} vectors={d}\n",
-        .{ expected.repositories, expected.downloads, expected.trees, roms, basic_steps, full_steps, vectors.files, vectors.records },
+        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} Gilyon-basic={d} Gilyon-full={d} SPC700-files={d} vectors={d}\n",
+        .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, basic_steps, full_steps, vectors.files, vectors.records },
     );
 }
 
