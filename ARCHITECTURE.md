@@ -14,13 +14,14 @@ follows:
 - `opcode.zig`: the single exhaustive 256-entry legal-opcode decode truth.
 - `cpu.zig`: W65C816 architectural state, ALU, address formation, interrupts
   and bounded bus-micro-operation execution.
-- `ppu.zig`: S-PPU state and future frame production.
+- `ppu.zig`: dot-observed S-PPU state and complete native frame production.
 - `smp.zig` and `sdsp.zig`: S-SMP/SPC700 and S-DSP state.
 - `controller.zig`: port-1 serial pad state; port 2 remains disconnected.
 - `coprocessors.zig`: explicit enhancement-chip registry without implicit
   fallbacks.
 - `persistence.zig`: canonical SRAM path and future atomic persistence policy.
-- `host_adapter.zig`: R4OS physical-key mapping only.
+- `host_adapter.zig`: R4OS physical-key mapping and generation-safe XRGB32
+  bridge into `r4os.subsystem_host`.
 - `machine.zig`: instance-local composition and lifecycle boundary.
 
 No component stores a host pointer or global mutable guest state. Cartridge
@@ -36,7 +37,14 @@ write, idle and vector-read operations with 24-bit address, value and bus time.
 Repeated MVN/MVP iterations remain separate bounded steps, and WAI/STP remain
 observable states rather than host loops.
 
-Scheduling, PPU progression, guest time and audio enter through the generic SDK
-runtime only in later milestones. Version 0.3.0 still does not start a parsed
-cartridge in the R4OS application because the 5A22 MMIO/timing owner is not yet
-connected.
+The PPU consumes the canonical 5A22 master-clock stream. Modes 0-7, Mode-7
+matrix/repeat/flip/EXTBG, windows, main/subscreen, color math, fixed color,
+mosaic, VMAIN, sprites and active-display register effects remain private to
+that owner. Complete changed frames are packed as native XRGB32 at 256/512 by
+224/239/448/478; unchanged output does not advance the generation. The shared
+SDK alone scales, letterboxes and splits damage into at most 128x128 rasters.
+
+Scheduling, guest-time admission and audio enter through the generic SDK
+runtime only in later milestones. Version 0.7.0 still does not start a parsed
+cartridge in the R4OS application because the APU and productive runtime host
+are not yet connected.

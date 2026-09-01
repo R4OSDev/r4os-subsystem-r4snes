@@ -1,15 +1,17 @@
 {
   "schema": 1,
   "references_sha256": "a2aa8b74fee6f49de8a52c5e5fc73c932e2c3e1e3633266325b809bc805b0fc6",
-  "qualification_matrix_sha256": "db48d245a1536099dec6014aa6791ebed65125145e821f50532dbb77cbc84961",
+  "qualification_matrix_sha256": "4b7ab1094ca3b08bcd7174cd1cb36d59e202989b1996af685433b51658c0b6d3",
   "dma_cases_sha256": "997fe478761e4cb17f97e7d063d9d400c11c5fc743fe4d3f6c91ff985dc7efff",
-  "ppu_cases_sha256": "540db38a505e7f7db5196f5a7b0494f7d09d7efe8ac44d14310fd92a11d3401f",
+  "ppu_cases_sha256": "1e0583887cb3c289895aaa15f3d95ba736798d3967b89499b3b9e5d48b924f68",
+  "hdrv_cases_sha256": "076c26ba3818c7043ecdee8d9fa54daf51346220987456ca45b4e1c44fc1e2a6",
   "repositories": 16,
   "downloads": 5,
   "trees": 9,
   "test_roms": 147,
   "dma_reference_roms": 3,
-  "ppu_reference_roms": 4,
+  "ppu_reference_roms": 23,
+  "hdrv_geometry_cases": 9,
   "spc700_files": 256,
   "spc700_records": 256000
 }

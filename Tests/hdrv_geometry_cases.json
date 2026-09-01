@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "release": "0.73.8",
+  "source": "HDRV register-level geometry scenarios; subjective cartridge observations remain deferred to 0.73.23",
+  "source_rom_sha256": "1509663be537fbf06ad37b7116d6b34785a9e272175cd8de5a43f1d5afd69097",
+  "cases": [
+    {"id":"lores-224","bgmode":0,"setini":0,"width":256,"height":224},
+    {"id":"lores-239","bgmode":0,"setini":4,"width":256,"height":239},
+    {"id":"lores-interlace-448","bgmode":0,"setini":1,"width":256,"height":448},
+    {"id":"lores-interlace-478","bgmode":0,"setini":5,"width":256,"height":478},
+    {"id":"hires-224","bgmode":5,"setini":0,"width":512,"height":224},
+    {"id":"hires-239","bgmode":5,"setini":4,"width":512,"height":239},
+    {"id":"hires-interlace-448","bgmode":5,"setini":1,"width":512,"height":448},
+    {"id":"hires-interlace-478","bgmode":5,"setini":5,"width":512,"height":478},
+    {"id":"pseudo-hires-224","bgmode":0,"setini":8,"width":512,"height":224}
+  ]
+}

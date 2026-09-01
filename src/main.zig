@@ -79,7 +79,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     // Parsing owns a private normalized copy and exposes ROM as read-only. CPU,
     // 5A22, DMA/HDMA and the base PPU are qualified independently; productive
     // execution is rejected until the APU and runtime-machine stages complete.
-    sys.println("R4SNES: cartridge, CPU, 5A22 and base PPU recognized; APU/runtime integration is not implemented in 0.6.0.");
+    sys.println("R4SNES: cartridge, CPU, 5A22 and complete PPU recognized; APU/runtime integration is not implemented in 0.7.0.");
     return error_not_implemented;
 }
 

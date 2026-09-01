@@ -1,58 +1,44 @@
 {
   "schema": 1,
-  "release": "0.73.7",
-  "policy": "Synthetic owner models with exact XRGB32 digests are gates. Foreign visual ROMs remain bounded diagnostics until a licensed hardware pixel or register oracle is attached.",
+  "release": "0.73.8",
+  "policy": "Exact synthetic XRGB32 models are owner gates. Digest-pinned foreign visual cartridges are bounded diagnostics until a licensed hardware pixel/register oracle for the selected console revision is attached.",
   "model_oracles": [
     {"mode": 0, "geometry": "256x224", "xrgb32": "solid red", "digest_fnv1a64": "84eefc2777a6e325"},
     {"mode": 1, "geometry": "256x224", "xrgb32": "solid green", "digest_fnv1a64": "a71592d0a1312325"},
     {"mode": 2, "geometry": "256x224", "xrgb32": "solid blue", "digest_fnv1a64": "f24128f9b0f3e325"},
     {"mode": 3, "geometry": "256x224", "xrgb32": "solid yellow", "digest_fnv1a64": "488f665ded0f2325"},
-    {"mode": 4, "geometry": "256x224", "xrgb32": "solid magenta", "digest_fnv1a64": "9ef804ce64d52325"}
+    {"mode": 4, "geometry": "256x224", "xrgb32": "solid magenta", "digest_fnv1a64": "9ef804ce64d52325"},
+    {"mode": 5, "geometry": "512x224", "xrgb32": "solid yellow hires", "digest_fnv1a64": "0e1cf24d55fc2325"},
+    {"mode": 6, "geometry": "512x224", "xrgb32": "solid cyan hires", "digest_fnv1a64": "4d176b91742c2325"},
+    {"mode": 7, "geometry": "256x224", "xrgb32": "identity matrix solid red", "digest_fnv1a64": "84eefc2777a6e325"},
+    {"mode": 7, "geometry": "256x224", "xrgb32": "EXTBG high-priority solid green", "digest_fnv1a64": "a71592d0a1312325"},
+    {"mode": 1, "geometry": "256x224", "xrgb32": "windowed fixed-green addition", "digest_fnv1a64": "18e3f9c9ab60f325"},
+    {"mode": 1, "geometry": "256x224", "xrgb32": "BG1 window mask plus color math", "digest_fnv1a64": "6b59fc2d52c67325"},
+    {"mode": 0, "geometry": "256x224", "xrgb32": "four-pixel mosaic stripes", "digest_fnv1a64": "fc18121383760325"}
   ],
   "foreign_roms": [
-    {
-      "id": "undisbeliever-vmain-2bpp-remapping",
-      "path": "Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-2bpp-with-remapping.sfc",
-      "sha256": "5997d5290fe0f387a4cd534a84a9fc2b6053e41dcf84fc50fe4e3c9778535ad4",
-      "bytes": 131072,
-      "enabled_as_gate": false,
-      "oracle_status": "diagnostic_only",
-      "reason": "The cartridge is a visual address-remapping demonstration without a licensed exact capture for the selected console revision.",
-      "timeout_master_clocks": 107386360,
-      "first_bus_divergence": "Record VMAIN, VMADD, translated VRAM word address, byte lane, beam position and first differing XRGB32 pixel."
-    },
-    {
-      "id": "undisbeliever-object-dropout",
-      "path": "Tests/Binaries/Generated/Undisbeliever-ac6ef800/hardware-tests/object-dropout-test.sfc",
-      "sha256": "1c279577f4c393c7afe2166a87b2c56446e94701ea6420c9ab25ff60738fd606",
-      "bytes": 131072,
-      "enabled_as_gate": false,
-      "oracle_status": "diagnostic_only",
-      "reason": "Dropout depends on sprite evaluation timing and needs a revision-bound hardware frame before it can judge pass or fail.",
-      "timeout_master_clocks": 107386360,
-      "first_bus_divergence": "Record scanline, evaluated sprite and sliver counts, STAT77 range/time flags, OAM address and first differing pixel."
-    },
-    {
-      "id": "undisbeliever-inidisp-mid-frame",
-      "path": "Tests/Binaries/Generated/Undisbeliever-ac6ef800/hardware-tests/inidisp_enable_display_mid_frame.sfc",
-      "sha256": "d63b83ffa3224fa9b0fd7787f49e2b9be222bb0d12c6615f451c0dfaead19803",
-      "bytes": 131072,
-      "enabled_as_gate": false,
-      "oracle_status": "diagnostic_only",
-      "reason": "The program demonstrates a beam-relative INIDISP transition; its image is not a self-reported result.",
-      "timeout_master_clocks": 107386360,
-      "first_bus_divergence": "Record the $2100 write master clock, H/V counters, forced-blank state and first differing XRGB32 pixel."
-    },
-    {
-      "id": "undisbeliever-vram-mid-scanline",
-      "path": "Tests/Binaries/Generated/Undisbeliever-ac6ef800/hardware-tests/vram-mid-scanline-test.sfc",
-      "sha256": "fc04912719a8b6eb1ba4fc19ed12b46f6ec488f0b987cf7834c23d181075f90f",
-      "bytes": 131072,
-      "enabled_as_gate": false,
-      "oracle_status": "diagnostic_only",
-      "reason": "Active-display VRAM behavior is hardware- and beam-sensitive and the ROM supplies no machine-readable verdict.",
-      "timeout_master_clocks": 107386360,
-      "first_bus_divergence": "Record VMADD/VMAIN, read/write lane, access classification, beam position and first differing pixel."
-    }
+    {"id":"vmain-1bpp-no-remapping","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-1bpp-no-remapping.sfc","sha256":"e1cd952e68218fcb7434d7254e326bf690cf78e7c08310fc46792a5478896db8","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, VMADD, translated word, byte lane, beam and first pixel."},
+    {"id":"vmain-1bpp-with-remapping","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-1bpp-with-remapping.sfc","sha256":"45a78b621d36fb509003c68d371dbfc64046e7976ebd8f1ed6c09a74c0b21b5c","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, VMADD, translated word, byte lane, beam and first pixel."},
+    {"id":"vmain-2bpp-no-remapping","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-2bpp-no-remapping.sfc","sha256":"ae660fc4c1fbf3cae0b6a309390823dc4c4272edb543e53b56f4dcbc619613d0","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, VMADD, translated word, byte lane, beam and first pixel."},
+    {"id":"vmain-2bpp-split-with-remapping","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-2bpp-split-with-remapping.sfc","sha256":"e435a437844e9023381110064cfff471ada875e8c644f0de6b941902ace7b659","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, VMADD, translated word, byte lane, beam and first pixel."},
+    {"id":"vmain-2bpp-with-remapping","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-2bpp-with-remapping.sfc","sha256":"5997d5290fe0f387a4cd534a84a9fc2b6053e41dcf84fc50fe4e3c9778535ad4","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, VMADD, translated word, byte lane, beam and first pixel."},
+    {"id":"vmain-4bpp-no-remapping-word","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-4bpp-no-remapping-word.sfc","sha256":"8c1bbdfea6b29c56e16a1f20d6d094dec82335cffe5663fd3f785cae6808c25e","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, VMADD, translated word, byte lane, beam and first pixel."},
+    {"id":"vmain-4bpp-no-remapping","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-4bpp-no-remapping.sfc","sha256":"9131e5fd6b34df8ce3f0042123932ee939c0d7f97978548d964bc4ed99dfa6a6","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, VMADD, translated word, byte lane, beam and first pixel."},
+    {"id":"vmain-4bpp-with-remapping-word","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-4bpp-with-remapping-word.sfc","sha256":"afb0c5705f3e714630f09812aa004b00b7133965a70a9f1281508a2357780bc8","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, VMADD, translated word, byte lane, beam and first pixel."},
+    {"id":"vmain-4bpp-with-remapping","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-4bpp-with-remapping.sfc","sha256":"c331e359c0593bf10180bea6cd20e3e5ebb703356685b3ccc6f3ae71847b3dc6","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, VMADD, translated word, byte lane, beam and first pixel."},
+    {"id":"vmain-8bpp-no-remapping","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-8bpp-no-remapping.sfc","sha256":"a40d1e94c87c838e2d8ee4a336546e47ceff542ced8718ad2228e3f8ab0ee20a","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, VMADD, translated word, byte lane, beam and first pixel."},
+    {"id":"vmain-8bpp-with-remapping","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-8bpp-with-remapping.sfc","sha256":"f6976a6f052ad9ecda4b780de84d44de4ad669ba664f51a10b912eb174413289","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, VMADD, translated word, byte lane, beam and first pixel."},
+    {"id":"vmain-mode7-no-remapping","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-mode7-image-no-remapping.sfc","sha256":"d4f5e99883cf8ec3577ca928e95b72657907c530d38849adb95fd32b6923d8f5","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual Mode-7 VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, Mode-7 translated word, matrix state and first pixel."},
+    {"id":"vmain-mode7-tilemap","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-mode7-image-tilemap.sfc","sha256":"a1c2de9e9c0b68c79464767a06fa4edfb899914c75ec8b7f25401e1b6341012a","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual Mode-7 VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, Mode-7 translated word, matrix state and first pixel."},
+    {"id":"vmain-mode7-10bit","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-mode7-image-with-10bit-remapping.sfc","sha256":"3e28c8a0129bca8784a22adeb52701da96780ebbc0d6a24002b3d9066fb6b121","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual Mode-7 VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, Mode-7 translated word, matrix state and first pixel."},
+    {"id":"vmain-mode7-8bit","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/vmain-address-remapping/vmain-mode7-image-with-8bit-remapping.sfc","sha256":"c25fb702c399b17748782b97cdf4b909bb78c36ae07609ceb8ec754e4838ebe0","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual Mode-7 VMAIN demonstration without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"VMAIN, Mode-7 translated word, matrix state and first pixel."},
+    {"id":"effect-window-mask-logic","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/effects/window-mask-logic.sfc","sha256":"5d241b3f92a13a60af636425cdebd105a12a7effb2ef7d9c3524b222979b5a07","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual window logic example; exact owner models provide the automated gate.","timeout_master_clocks":107386360,"first_bus_divergence":"Window selections, logic, TMW/TSW, beam and first pixel."},
+    {"id":"effect-mode7-columns","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/effects/vmain-mode7-tilemap-columns.sfc","sha256":"845510324830f5db59647c90503a3dbc9168971fb6580999249ac695f26c877b","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual Mode-7 streaming example without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"HDMA/VMAIN state, Mode-7 matrix, beam and first pixel."},
+    {"id":"effect-hdma-textbox-wipe","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/effects/hdma-textbox-wipe.sfc","sha256":"745dc48081676117981b7388731f8d3482a11bc72059d43956e996897d288ffd","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual HDMA/window example without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"HDMA channel state, window registers, beam and first pixel."},
+    {"id":"example-vram-without-dma","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/examples/vram-writes-without-dma.sfc","sha256":"d237a766f2e71e3c34937e0d3048ae2e6117e937d0b33a4e833498c0dc6359ef","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Visual integration example without licensed exact capture.","timeout_master_clocks":107386360,"first_bus_divergence":"CPU write, VMAIN/VMADD, access window, beam and first pixel."},
+    {"id":"undisbeliever-object-dropout","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/hardware-tests/object-dropout-test.sfc","sha256":"1c279577f4c393c7afe2166a87b2c56446e94701ea6420c9ab25ff60738fd606","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Revision-sensitive sprite evaluation needs a licensed hardware frame.","timeout_master_clocks":107386360,"first_bus_divergence":"Scanline, sprite/sliver counts, STAT77, OAM and first pixel."},
+    {"id":"undisbeliever-inidisp-mid-frame","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/hardware-tests/inidisp_enable_display_mid_frame.sfc","sha256":"d63b83ffa3224fa9b0fd7787f49e2b9be222bb0d12c6615f451c0dfaead19803","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Beam-relative visual transition without machine-readable result.","timeout_master_clocks":107386360,"first_bus_divergence":"INIDISP write master clock, beam, blank state and first pixel."},
+    {"id":"undisbeliever-vram-mid-scanline","path":"Tests/Binaries/Generated/Undisbeliever-ac6ef800/hardware-tests/vram-mid-scanline-test.sfc","sha256":"fc04912719a8b6eb1ba4fc19ed12b46f6ec488f0b987cf7834c23d181075f90f","bytes":131072,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Revision-sensitive active-display VRAM behavior lacks a licensed oracle.","timeout_master_clocks":107386360,"first_bus_divergence":"VMADD/VMAIN, lane, access class, beam and first pixel."},
+    {"id":"hdrv-native-video","path":"Tests/Binaries/Generated/HDRV-8b7dbec/hdrvtest.sfc","sha256":"1509663be537fbf06ad37b7116d6b34785a9e272175cd8de5a43f1d5afd69097","bytes":524288,"enabled_as_gate":false,"oracle_status":"diagnostic_only","reason":"Interactive visual/audio cartridge; deterministic geometry is gated by the companion register script.","timeout_master_clocks":214772720,"first_bus_divergence":"Script step, SETINI/BGMODE, field, published geometry and first pixel."}
   ]
 }

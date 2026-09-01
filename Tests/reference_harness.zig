@@ -11,12 +11,14 @@ const Expected = struct {
     qualification_matrix_sha256: []const u8,
     dma_cases_sha256: []const u8,
     ppu_cases_sha256: []const u8,
+    hdrv_cases_sha256: []const u8,
     repositories: usize,
     downloads: usize,
     trees: usize,
     test_roms: usize,
     dma_reference_roms: usize,
     ppu_reference_roms: usize,
+    hdrv_geometry_cases: usize,
     spc700_files: usize,
     spc700_records: usize,
 };
@@ -78,6 +80,21 @@ const PpuReferenceCases = struct {
     foreign_roms: []const DmaReferenceRom,
 };
 
+const HdrvGeometryCase = struct {
+    id: []const u8,
+    bgmode: u3,
+    setini: u8,
+    width: u16,
+    height: u16,
+};
+
+const HdrvGeometryCases = struct {
+    schema: u32,
+    release: []const u8,
+    source_rom_sha256: []const u8,
+    cases: []const HdrvGeometryCase,
+};
+
 pub fn main(init: std.process.Init) void {
     run(init) catch |fault| {
         std.debug.print("R4SNES reference harness FAILED: {s}\n", .{@errorName(fault)});
@@ -106,7 +123,7 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.7")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.8")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
@@ -143,24 +160,54 @@ fn run(init: std.process.Init) !void {
     var parsed_ppu_cases = try std.json.parseFromSlice(PpuReferenceCases, allocator, ppu_cases_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_ppu_cases.deinit();
     const ppu_cases = parsed_ppu_cases.value;
-    const ppu_digests = [_][]const u8{
-        "84eefc2777a6e325",
-        "a71592d0a1312325",
-        "f24128f9b0f3e325",
-        "488f665ded0f2325",
-        "9ef804ce64d52325",
+    const ExpectedPpu = struct { mode: u3, geometry: []const u8, digest: []const u8 };
+    const ppu_expected = [_]ExpectedPpu{
+        .{ .mode = 0, .geometry = "256x224", .digest = "84eefc2777a6e325" },
+        .{ .mode = 1, .geometry = "256x224", .digest = "a71592d0a1312325" },
+        .{ .mode = 2, .geometry = "256x224", .digest = "f24128f9b0f3e325" },
+        .{ .mode = 3, .geometry = "256x224", .digest = "488f665ded0f2325" },
+        .{ .mode = 4, .geometry = "256x224", .digest = "9ef804ce64d52325" },
+        .{ .mode = 5, .geometry = "512x224", .digest = "0e1cf24d55fc2325" },
+        .{ .mode = 6, .geometry = "512x224", .digest = "4d176b91742c2325" },
+        .{ .mode = 7, .geometry = "256x224", .digest = "84eefc2777a6e325" },
+        .{ .mode = 7, .geometry = "256x224", .digest = "a71592d0a1312325" },
+        .{ .mode = 1, .geometry = "256x224", .digest = "18e3f9c9ab60f325" },
+        .{ .mode = 1, .geometry = "256x224", .digest = "6b59fc2d52c67325" },
+        .{ .mode = 0, .geometry = "256x224", .digest = "fc18121383760325" },
     };
-    if (ppu_cases.schema != 1 or !std.mem.eql(u8, ppu_cases.release, "0.73.7") or
-        ppu_cases.model_oracles.len != ppu_digests.len or ppu_cases.foreign_roms.len != expected.ppu_reference_roms)
+    if (ppu_cases.schema != 1 or !std.mem.eql(u8, ppu_cases.release, "0.73.8") or
+        ppu_cases.model_oracles.len != ppu_expected.len or ppu_cases.foreign_roms.len != expected.ppu_reference_roms)
     {
         return error.PpuReferenceManifestMismatch;
     }
     for (ppu_cases.model_oracles, 0..) |model, index| {
-        if (model.mode != index or !std.mem.eql(u8, model.geometry, "256x224") or model.xrgb32.len == 0 or
-            !std.mem.eql(u8, model.digest_fnv1a64, ppu_digests[index]))
+        const oracle = ppu_expected[index];
+        if (model.mode != oracle.mode or !std.mem.eql(u8, model.geometry, oracle.geometry) or model.xrgb32.len == 0 or
+            !std.mem.eql(u8, model.digest_fnv1a64, oracle.digest))
         {
             return error.PpuModelOracleMismatch;
         }
+    }
+
+    const hdrv_cases_bytes = try cwd.readFileAlloc(io, "Tests/hdrv_geometry_cases.json", allocator, .limited(max_manifest_bytes));
+    defer allocator.free(hdrv_cases_bytes);
+    try expectSha256(hdrv_cases_bytes, expected.hdrv_cases_sha256);
+    var parsed_hdrv_cases = try std.json.parseFromSlice(HdrvGeometryCases, allocator, hdrv_cases_bytes, .{ .ignore_unknown_fields = true });
+    defer parsed_hdrv_cases.deinit();
+    const hdrv_cases = parsed_hdrv_cases.value;
+    if (hdrv_cases.schema != 1 or !std.mem.eql(u8, hdrv_cases.release, "0.73.8") or
+        hdrv_cases.source_rom_sha256.len != 64 or hdrv_cases.cases.len != expected.hdrv_geometry_cases)
+    {
+        return error.HdrvGeometryManifestMismatch;
+    }
+    for (hdrv_cases.cases) |case| {
+        if (case.id.len == 0) return error.HdrvGeometryManifestMismatch;
+        var display = core.ppu.Ppu{};
+        if (!display.write(0x2105, case.bgmode, 0, 0) or !display.write(0x2133, case.setini, 0, 0)) {
+            return error.HdrvGeometryRegisterRejected;
+        }
+        const frame = display.renderCompleteFrame();
+        if (frame.width != case.width or frame.height != case.height) return error.HdrvGeometryMismatch;
     }
     for (ppu_cases.foreign_roms) |rom| {
         if (rom.enabled_as_gate or !std.mem.eql(u8, rom.oracle_status, "diagnostic_only") or
@@ -232,8 +279,8 @@ fn run(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} PPU-diagnostics={d} Gilyon-basic={d} Gilyon-full={d} SPC700-files={d} vectors={d}\n",
-        .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, ppu_cases.foreign_roms.len, basic_steps, full_steps, vectors.files, vectors.records },
+        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} PPU-diagnostics={d} HDRV-geometries={d} Gilyon-basic={d} Gilyon-full={d} SPC700-files={d} vectors={d}\n",
+        .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, ppu_cases.foreign_roms.len, hdrv_cases.cases.len, basic_steps, full_steps, vectors.files, vectors.records },
     );
 }
 

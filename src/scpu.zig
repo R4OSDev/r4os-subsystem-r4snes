@@ -374,7 +374,9 @@ pub fn MmioWithDevice(comptime Device: type) type {
 
         pub fn write(self: *Self, address: u32, value: u8, cpu_open_bus: u8, ppu_open_bus: u8) bool {
             if (self.scpu.write(self.bus, self.clock, self.ports, self.cpu, address, value)) return true;
-            return self.device.write(address, value, cpu_open_bus, ppu_open_bus);
+            const handled = self.device.write(address, value, cpu_open_bus, ppu_open_bus);
+            if (handled and comptime deviceSynchronizesClock(Device)) self.device.synchronizeClock(self.clock);
+            return handled;
         }
     };
 }
@@ -403,6 +405,14 @@ fn deviceObservesMasterClock(comptime Device: type) bool {
         else => Device,
     };
     return @hasDecl(Owner, "onMasterTick");
+}
+
+fn deviceSynchronizesClock(comptime Device: type) bool {
+    const Owner = switch (@typeInfo(Device)) {
+        .pointer => |pointer| pointer.child,
+        else => Device,
+    };
+    return @hasDecl(Owner, "synchronizeClock");
 }
 
 pub fn TimedPortWithDevice(comptime Device: type) type {
