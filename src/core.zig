@@ -20,4 +20,5 @@ pub const sdd1 = @import("sdd1.zig");
 pub const smp = @import("smp.zig");
 pub const spc7110 = @import("spc7110.zig");
 pub const srtc = @import("srtc.zig");
+pub const superfx = @import("superfx.zig");
 pub const timing = @import("timing.zig");

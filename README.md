@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.11.0 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.13.0 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
 color math, fixed color, mosaic, VMAIN, hires, overscan and interlace. It
@@ -64,6 +64,29 @@ snapshot; host time reversal is ignored. Unknown revisions, contradictory
 headers and checksum-valid but semantically invalid RTC records fail with
 specific diagnostics instead of falling back to a base board.
 
+S-DD1 and SPC7110/Epson RTC are executable board owners with bounded streaming
+decompression, exact cartridge windows, data/arithmetic ports and their
+documented SRAM/RTC behavior. Seven synthetic streams match the unchanged
+Mesen2 and Snes9x decoders byte-for-byte; Ares is retained as a third reviewed
+state-machine source.
+
+Super FX is executable as GSU-1 or GSU-2. The owner implements all 256 opcode
+bytes and all ALT states, the real pipeline and branch delay slot, ROM/RAM
+buffers, 512-byte cache, S-CPU/GSU bus arbitration, IRQ/STOP, clock selection,
+and the complete 2/4/8-bpp PLOT/RPIX cache pipeline. Standard cartridge headers
+do not encode the GSU revision: the compatible default is GSU-2/VCR `$04`,
+while explicit board metadata may select GSU-1/VCR `$03`; SlowROM/FastROM is
+never misused as a revision signal. Battery-backed 32/64/128-KiB GSU work RAM
+uses the same normalized-ROM `HASH.SAV` location, while battery-less boards do
+not touch persistence.
+
+`Tests/Build-SuperFxPrograms.ps1` uses the pinned WLA-DX 10.7 binaries on both
+Linux and Windows to rebuild two unchanged OpenSNES GSU examples and four
+original opcode/cache/pixel/bus programs. The reference gate binds every
+binary digest, RAM completion cells and aggregate device state, and compares
+all 16384 pixels from the OpenSNES wireframe example with an independent
+Bresenham bitmap.
+
 The only connected controller is port 1 and it uses physical keyboard usages:
 
 - D-pad: arrow keys
@@ -85,3 +108,5 @@ parses all bound diagnostic cartridges, runs both
 Gilyon CPU ROMs and Gilyon SPC through the production ports, executes the IPL
 speed transfer, checks all 256000 SPC700 vectors including bus phases, and
 binds the nine exact S-DSP comparison cases.
+Use `./Build.sh superfx-reference-test` for the focused reproducible GSU source,
+binary, completion, state and pixel-frame gate.

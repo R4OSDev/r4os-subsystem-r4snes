@@ -1,0 +1,24 @@
+; Original R4SNES ROM-buffer to GSU-RAM bus probe.
+.include "memmap_gsu.inc"
+
+.BANK 0 SLOT 0
+.ORG 0
+
+start:
+    IBT R0, #$70
+    RAMB
+    IBT R0, #$00
+    ROMB
+    IWT R14, #rom_value
+    NOP
+    GETB
+    IWT R1, #$0300
+    STB (R1)
+    IWT R0, #$600D
+    IWT R1, #$0302
+    STW (R1)
+    STOP
+    NOP
+
+rom_value:
+    .DB $5A

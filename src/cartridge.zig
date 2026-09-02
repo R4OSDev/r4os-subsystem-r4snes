@@ -4,6 +4,7 @@ const obc1 = @import("obc1.zig");
 const sdd1 = @import("sdd1.zig");
 const spc7110 = @import("spc7110.zig");
 const srtc = @import("srtc.zig");
+const superfx = @import("superfx.zig");
 
 pub const copier_header_size: usize = 512;
 pub const mapping_granularity: usize = 32 * 1024;
@@ -29,6 +30,8 @@ pub const Header = struct {
     ram_size_code: u8,
     region_code: u8,
     version: u8,
+    expansion_ram_size_code: u8 = 0,
+    cartridge_subtype: u8 = 0,
     reset_vector: u16,
     startup_opcode: u8,
     checksum: u16,
@@ -39,6 +42,13 @@ pub const Header = struct {
     declared_sram_bytes: usize,
     title: [title_length]u8,
     score: i16,
+};
+
+pub const ParseOptions = struct {
+    /// The standard SNES header identifies the GSU family, but has no field
+    /// that distinguishes GSU-1 from GSU-2.  GSU-2 is the compatible default
+    /// used by open homebrew; callers with board metadata may select GSU-1.
+    superfx_revision: ?superfx.Revision = null,
 };
 
 pub const Cartridge = struct {
@@ -56,8 +66,13 @@ pub const Cartridge = struct {
     srtc_device: ?srtc.Device = null,
     sdd1_device: ?sdd1.Device = null,
     spc7110_device: ?spc7110.Device = null,
+    superfx_device: ?superfx.Device = null,
 
     pub fn parse(allocator: std.mem.Allocator, source: []const u8) !Cartridge {
+        return parseWithOptions(allocator, source, .{});
+    }
+
+    pub fn parseWithOptions(allocator: std.mem.Allocator, source: []const u8, options: ParseOptions) !Cartridge {
         const geometry = try inspectCandidateSize(source.len);
         const normalized_start: usize = if (geometry.copier_header) copier_header_size else 0;
         const normalized = source[normalized_start..];
@@ -71,6 +86,7 @@ pub const Cartridge = struct {
                     .srtc => error.UnsupportedSrtcRevision,
                     .sdd1 => error.UnsupportedSdd1Revision,
                     .spc7110 => error.UnsupportedSpc7110Revision,
+                    .super_fx => error.UnsupportedSuperFxRevision,
                 };
             }
         }
@@ -80,6 +96,17 @@ pub const Cartridge = struct {
             return error.UnaddressableBoardGeometry;
         }
         const battery = hasBattery(header.rom_type);
+        const superfx_revision = if (enhancement == .super_fx)
+            options.superfx_revision orelse superfx.default_revision
+        else
+            null;
+        const cartridge_ram_bytes = if (enhancement == .super_fx) blk: {
+            if (header.expansion_ram_size_code >= 1 and header.expansion_ram_size_code <= 7) {
+                break :blk superfx.workRamBytes(header.expansion_ram_size_code);
+            }
+            if (header.declared_sram_bytes != 0) break :blk header.declared_sram_bytes;
+            break :blk superfx.default_ram_bytes;
+        } else header.declared_sram_bytes;
         switch (enhancement) {
             .obc1 => if (header.mapping != .lo_rom or header.declared_sram_bytes != obc1.ram_bytes or !battery)
                 return error.ContradictoryOBC1Board,
@@ -92,13 +119,18 @@ pub const Cartridge = struct {
             .spc7110_epson_rtc => if (header.mapping != .hi_rom or !battery or
                 header.declared_sram_bytes != 8 * 1024 or normalized.len <= spc7110.programRomBytes(normalized.len))
                 return error.ContradictorySpc7110Board,
+            .super_fx => {
+                if (header.mapping != .lo_rom) return error.ContradictorySuperFxBoard;
+                superfx.validateGeometry(superfx_revision.?, normalized.len, cartridge_ram_bytes) catch
+                    return error.ContradictorySuperFxBoard;
+            },
             else => {},
         }
 
         const rom_copy = try allocator.alloc(u8, normalized.len);
         errdefer allocator.free(rom_copy);
         @memcpy(rom_copy, normalized);
-        const sram_copy = try allocator.alloc(u8, header.declared_sram_bytes);
+        const sram_copy = try allocator.alloc(u8, cartridge_ram_bytes);
         errdefer allocator.free(sram_copy);
         @memset(sram_copy, 0);
 
@@ -126,11 +158,13 @@ pub const Cartridge = struct {
                 .{ .has_rtc = header.rom_type == 0xF9 }
             else
                 null,
+            .superfx_device = if (superfx_revision) |revision| superfx.Device.init(revision) else null,
         };
         if (result.obc1_device) |*device| try device.power(result.sram_storage);
         if (result.srtc_device) |*device| device.power();
         if (result.sdd1_device) |*device| device.power();
         if (result.spc7110_device) |*device| device.power();
+        if (result.superfx_device) |*device| try device.power(device.revision, result.rom_storage.len, result.sram_storage.len);
         return result;
     }
 
@@ -146,6 +180,7 @@ pub const Cartridge = struct {
         self.srtc_device = null;
         self.sdd1_device = null;
         self.spc7110_device = null;
+        self.superfx_device = null;
     }
 
     pub fn rom(self: *const Cartridge) []const u8 {
@@ -177,6 +212,7 @@ pub const Cartridge = struct {
         if (self.srtc_device) |*device| return device.read(address, open_bus);
         if (self.sdd1_device) |*device| return device.read(self.rom_storage, self.sram_storage, address, open_bus);
         if (self.spc7110_device) |*device| return device.read(self.rom_storage, self.sram_storage, address, open_bus);
+        if (self.superfx_device) |*device| return device.readCpu(self.rom_storage, self.sram_storage, address, open_bus);
         return null;
     }
 
@@ -207,7 +243,26 @@ pub const Cartridge = struct {
                 return true;
             }
         }
+        if (self.superfx_device) |*device| {
+            const result = device.writeCpu(self.sram_storage, address, value);
+            if (result.handled) {
+                if (result.changed and self.board.battery) self.markSramDirty(result.first, result.end);
+                _ = device.takeDirtyRange();
+                return true;
+            }
+        }
         return false;
+    }
+
+    pub fn runSuperFxSlice(self: *Cartridge, maximum_instructions: usize) ?superfx.RunResult {
+        if (self.superfx_device) |*device| {
+            const result = device.runSlice(self.rom_storage, self.sram_storage, maximum_instructions);
+            if (device.takeDirtyRange()) |dirty| {
+                if (self.board.battery) self.markSramDirty(dirty.first, dirty.end);
+            }
+            return result;
+        }
+        return null;
     }
 
     pub fn dirtyRange(self: *const Cartridge) ?struct { first: usize, end: usize } {
@@ -297,6 +352,7 @@ fn parseHeaderCandidate(rom: []const u8, location: HeaderLocation) ?Header {
             .obc1, .sdd1 => .lo_rom,
             .srtc => .ex_hi_rom,
             .spc7110 => .hi_rom,
+            .super_fx => .lo_rom,
         } else board.mappingForHeader(map_mode, enhancement)
     else
         board.mappingForHeader(map_mode, enhancement);
@@ -350,6 +406,8 @@ fn parseHeaderCandidate(rom: []const u8, location: HeaderLocation) ?Header {
         .ram_size_code = bytes[0x18],
         .region_code = bytes[0x19],
         .version = bytes[0x1B],
+        .expansion_ram_size_code = rom[location.offset - 3],
+        .cartridge_subtype = rom[location.offset - 1],
         .reset_vector = reset_vector,
         .startup_opcode = startup_opcode,
         .checksum = checksum,

@@ -1,0 +1,44 @@
+; Original R4SNES cache-line, taken-branch, delay-slot and completion probe.
+.include "memmap_gsu.inc"
+
+.BANK 0 SLOT 0
+.ORG 0
+
+start:
+    IBT R0, #$70
+    RAMB
+    IWT R0, #$0000
+    IWT R3, #$0004
+    CACHE
+
+loop:
+    INC R0
+    DEC R3
+    BNE loop
+    NOP
+
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+
+    IWT R1, #$0120
+    STW (R1)
+    STOP
+    NOP

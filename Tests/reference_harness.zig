@@ -191,7 +191,7 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.13")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.14")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
@@ -207,6 +207,7 @@ fn run(init: std.process.Init) !void {
     try expectImplementedEnhancement(matrix.enhancement_chips, "srtc", "0.73.12");
     try expectImplementedEnhancement(matrix.enhancement_chips, "sdd1", "0.73.13");
     try expectImplementedEnhancement(matrix.enhancement_chips, "spc7110-epson-rtc", "0.73.13");
+    try expectImplementedEnhancement(matrix.enhancement_chips, "superfx-gsu1-gsu2", "0.73.14");
 
     const dma_cases_bytes = try cwd.readFileAlloc(io, "Tests/dma_reference_cases.json", allocator, .limited(max_manifest_bytes));
     defer allocator.free(dma_cases_bytes);

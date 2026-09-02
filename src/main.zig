@@ -131,7 +131,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     // 5A22, DMA/HDMA, PPU, S-SMP and S-DSP are qualified independently;
     // productive execution is rejected until the runtime-machine/window-host
     // stage composes those owners.
-    sys.println("R4SNES: cartridge, OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.12.0.");
+    sys.println("R4SNES: cartridge, OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.13.0.");
     return error_not_implemented;
 }
 
@@ -145,10 +145,12 @@ fn cartridgeError(fault: anyerror) []const u8 {
         error.UnsupportedSrtcRevision => "R4SNES: cartridge declares an unsupported S-RTC revision.",
         error.UnsupportedSdd1Revision => "R4SNES: cartridge declares an unsupported S-DD1 revision.",
         error.UnsupportedSpc7110Revision => "R4SNES: cartridge declares an unsupported SPC7110 revision.",
+        error.UnsupportedSuperFxRevision => "R4SNES: cartridge declares an unsupported Super FX revision.",
         error.ContradictoryOBC1Board => "R4SNES: OBC-1 header contradicts its LoROM, battery or 8-KiB RAM profile.",
         error.ContradictorySrtcBoard => "R4SNES: S-RTC header contradicts its ExHiROM, battery or save-RAM profile.",
         error.ContradictorySdd1Board => "R4SNES: S-DD1 header contradicts its LoROM, battery or 32-KiB RAM profile.",
         error.ContradictorySpc7110Board => "R4SNES: SPC7110 header contradicts its HiROM, battery, 8-KiB RAM or data-ROM profile.",
+        error.ContradictorySuperFxBoard => "R4SNES: Super FX header contradicts its LoROM, GSU revision, ROM or 32/64/128-KiB work-RAM profile.",
         error.UnaddressableBoardGeometry => "R4SNES: cartridge board geometry exceeds its implemented address space.",
         error.OutOfMemory => "R4SNES: cartridge memory could not be allocated.",
         else => "R4SNES: cartridge validation failed.",
@@ -194,10 +196,18 @@ fn selfTest(app: *r4os.App) i32 {
     if (!epson.isHalted() or !epson.writePort(0x4840, 1) or
         (epson.readPort(0x4842, 0) & 0x80) == 0)
         return error_not_implemented;
+    var gsu = core.superfx.Device.init(.gsu2);
+    var no_rom: [0]u8 = .{};
+    var no_ram: [0]u8 = .{};
+    gsu.r[0] = 0x1234;
+    gsu.r[1] = 0x02FF;
+    gsu.executeDecoded(&no_rom, &no_ram, 0x3D) catch return error_not_implemented;
+    gsu.executeDecoded(&no_rom, &no_ram, 0x81) catch return error_not_implemented;
+    if (gsu.r[0] != 0x33CC or gsu.revision.versionCode() != 4) return error_not_implemented;
     machine.close();
     machine.close();
     if (!machine.closed or machine.smp.dsp.capture_enabled or machine.smp.dsp.queuedFrames() != 0) return error_not_implemented;
-    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
+    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
     return 0;
 }
 

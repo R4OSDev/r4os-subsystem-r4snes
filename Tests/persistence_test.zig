@@ -150,11 +150,62 @@ fn makeCart(
         .obc1_device = if (enhancement == .obc1) .{} else null,
         .srtc_device = if (enhancement == .srtc) .{} else null,
         .spc7110_device = if (enhancement == .spc7110_epson_rtc) .{ .has_rtc = true } else null,
+        .superfx_device = if (enhancement == .super_fx) core.superfx.Device.init(.gsu2) else null,
     };
     if (result.obc1_device) |*device| try device.power(result.sram_storage);
     if (result.srtc_device) |*device| device.power();
     if (result.spc7110_device) |*device| device.power();
+    if (result.superfx_device) |*device| try device.power(.gsu2, result.rom_storage.len, result.sram_storage.len);
     return result;
+}
+
+test "battery-backed Super FX work RAM uses the canonical hash save and internal GSU writes survive reopen" {
+    const allocator = std.testing.allocator;
+    var fake = try FakeBackend.init(allocator);
+    defer fake.deinit();
+    var first = try makeCart(allocator, 64 * 1024, true, .super_fx, 0x5A);
+    defer first.deinit();
+    var second = try makeCart(allocator, 64 * 1024, true, .super_fx, 0x5A);
+    defer second.deinit();
+
+    var session = try core.persistence.Session.open(&first, fake.backend(), 41, 100, 200);
+    const device = &first.superfx_device.?;
+    device.scmr = 0x08;
+    device.r[0] = 0x1234;
+    device.r[1] = 0xBEEF;
+    device.source_register = 1;
+    try device.executeDecoded(first.rom_storage, first.sram_storage, 0x30);
+    try device.drain(first.rom_storage, first.sram_storage);
+    _ = first.runSuperFxSlice(0);
+    try std.testing.expect(first.sram_dirty);
+    try std.testing.expectEqual(@as(u8, 0xEF), first.sram_storage[0x1234]);
+    try std.testing.expectEqual(@as(u8, 0xBE), first.sram_storage[0x1235]);
+    try std.testing.expect(try session.maybeFlush(&first, core.persistence.flush_delay_master_cycles, 100, 200));
+    try session.close(&first, 41, 100, 200);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), fake.sram_len);
+
+    var reopened = try core.persistence.Session.open(&second, fake.backend(), 42, 100, 200);
+    try std.testing.expectEqual(@as(u8, 0xEF), second.sram_storage[0x1234]);
+    try std.testing.expectEqual(@as(u8, 0xBE), second.sram_storage[0x1235]);
+    try reopened.close(&second, 42, 100, 200);
+
+    var volatile_cart = try makeCart(allocator, 64 * 1024, false, .super_fx, 0x6B);
+    defer volatile_cart.deinit();
+    var volatile_backend = try FakeBackend.init(allocator);
+    defer volatile_backend.deinit();
+    var volatile_session = try core.persistence.Session.open(&volatile_cart, volatile_backend.backend(), 43, 100, 200);
+    const volatile_device = &volatile_cart.superfx_device.?;
+    volatile_device.scmr = 0x08;
+    volatile_device.r[0] = 9;
+    volatile_device.r[1] = 0x0042;
+    volatile_device.source_register = 1;
+    try volatile_device.executeDecoded(volatile_cart.rom_storage, volatile_cart.sram_storage, 0x30);
+    try volatile_device.drain(volatile_cart.rom_storage, volatile_cart.sram_storage);
+    _ = volatile_cart.runSuperFxSlice(0);
+    try std.testing.expect(!volatile_cart.sram_dirty);
+    try volatile_session.close(&volatile_cart, 43, 100, 200);
+    try std.testing.expectEqual(@as(usize, 0), volatile_backend.acquire_calls);
+    try std.testing.expectEqual(@as(usize, 0), volatile_backend.write_calls);
 }
 
 test "normalized hash names only exact canonical SAV and RTC paths" {

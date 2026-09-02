@@ -1,0 +1,32 @@
+; Original R4SNES GSU arithmetic, flags, multiply and RAM completion probe.
+.include "memmap_gsu.inc"
+
+.BANK 0 SLOT 0
+.ORG 0
+
+start:
+    IBT R0, #$70
+    RAMB
+
+    IWT R0, #$1234
+    IWT R1, #$0100
+    STW (R1)
+
+    IWT R2, #$0002
+    ADD R2
+    SUB R2
+    XOR R2
+    IWT R1, #$0102
+    STW (R1)
+
+    IWT R6, #$3000
+    IWT R0, #$1800
+    FMULT
+    IWT R1, #$0104
+    STW (R1)
+
+    IWT R0, #$C0DE
+    IWT R1, #$0106
+    STW (R1)
+    STOP
+    NOP

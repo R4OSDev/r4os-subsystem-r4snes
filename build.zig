@@ -39,8 +39,31 @@ pub fn build(b: *std.Build) void {
     });
     const run_references = b.addRunArtifact(reference_harness);
     run_references.setCwd(b.path("."));
-    run_references.addArg(b.option([]const u8, "snes-reference-root", "SNES reference root; absent material is skipped") orelse "../../../ExFiles/Reference/SNES");
+    const snes_reference_root = b.option([]const u8, "snes-reference-root", "SNES reference root; absent material is skipped") orelse "../../../ExFiles/Reference/SNES";
+    run_references.addArg(snes_reference_root);
     run_references.addArg(b.option([]const u8, "snes-qualification-matrix", "SNES qualification matrix") orelse "../../../Docs/Subsystems/SNESQualificationMatrix.json");
+
+    const superfx_output = b.option([]const u8, "superfx-program-output", "Generated Super FX program directory") orelse "../../../Temp/R4SNES-SuperFX";
+    const assemble_superfx = b.addSystemCommand(&.{ "pwsh", "-NoLogo", "-NoProfile", "-File" });
+    assemble_superfx.addFileArg(b.path("Tests/Build-SuperFxPrograms.ps1"));
+    assemble_superfx.addArg("-ReferenceRoot");
+    assemble_superfx.addArg(snes_reference_root);
+    assemble_superfx.addArg("-OutputDirectory");
+    assemble_superfx.addArg(superfx_output);
+    const superfx_program_root = b.createModule(.{
+        .root_source_file = b.path("Tests/superfx_program_harness.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    superfx_program_root.addImport("core", core);
+    const superfx_program_harness = b.addExecutable(.{
+        .name = "r4snes-superfx-program-harness",
+        .root_module = superfx_program_root,
+    });
+    const run_superfx_programs = b.addRunArtifact(superfx_program_harness);
+    run_superfx_programs.setCwd(b.path("."));
+    run_superfx_programs.addArg(superfx_output);
+    run_superfx_programs.step.dependOn(&assemble_superfx.step);
 
     const coverage_root = b.createModule(.{
         .root_source_file = b.path("Tests/cpu_coverage.zig"),
@@ -64,4 +87,7 @@ pub fn build(b: *std.Build) void {
 
     const reference_step = b.step("reference-test", "Execute pinned SNES qualification ROMs, models and all SPC700 vectors");
     reference_step.dependOn(&run_references.step);
+    reference_step.dependOn(&run_superfx_programs.step);
+    const superfx_reference_step = b.step("superfx-reference-test", "Rebuild and execute pinned OpenSNES and owner GSU programs");
+    superfx_reference_step.dependOn(&run_superfx_programs.step);
 }

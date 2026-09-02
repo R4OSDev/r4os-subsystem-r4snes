@@ -1,0 +1,29 @@
+; Original R4SNES 4-bpp PLOT/RPIX framebuffer and completion probe.
+.include "memmap_gsu.inc"
+
+.BANK 0 SLOT 0
+.ORG 0
+
+start:
+    IBT R0, #$70
+    RAMB
+    IBT R0, #$01
+    CMODE
+    IBT R0, #$0B
+    COLOR
+    IWT R1, #$0000
+    IWT R2, #$0000
+    PLOT
+    PLOT
+    PLOT
+    PLOT
+    PLOT
+    PLOT
+    PLOT
+    PLOT
+    IWT R1, #$0003
+    RPIX
+    IWT R1, #$0200
+    STB (R1)
+    STOP
+    NOP

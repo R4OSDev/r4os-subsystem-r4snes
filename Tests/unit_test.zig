@@ -10,6 +10,7 @@ test {
     _ = @import("persistence_test.zig");
     _ = @import("sdsp_test.zig");
     _ = @import("smp_test.zig");
+    _ = @import("superfx_test.zig");
     _ = @import("video_host_test.zig");
     _ = @import("system_test.zig");
 }
@@ -230,7 +231,7 @@ test "capability matrix names every planned firmware and excluded family without
         .{ .kind = .srtc, .disposition = .base_implemented },
         .{ .kind = .sdd1, .disposition = .base_implemented },
         .{ .kind = .spc7110_epson_rtc, .disposition = .base_implemented },
-        .{ .kind = .super_fx, .disposition = .planned },
+        .{ .kind = .super_fx, .disposition = .base_implemented },
         .{ .kind = .sa1, .disposition = .planned },
         .{ .kind = .cx4, .disposition = .planned },
         .{ .kind = .dsp1_family, .disposition = .planned_user_firmware },
@@ -245,7 +246,7 @@ test "capability matrix names every planned firmware and excluded family without
         const capability = core.board.capability(entry.kind);
         try std.testing.expectEqual(entry.disposition, capability.disposition);
         if (entry.kind != .none and entry.kind != .obc1 and entry.kind != .srtc and
-            entry.kind != .sdd1 and entry.kind != .spc7110_epson_rtc)
+            entry.kind != .sdd1 and entry.kind != .spc7110_epson_rtc and entry.kind != .super_fx)
         {
             try std.testing.expect(capability.disposition != .base_implemented);
         }
@@ -258,6 +259,8 @@ test "capability matrix names every planned firmware and excluded family without
     try std.testing.expectEqual(core.board.Enhancement.st018, core.board.enhancementForHeader(0xF5, 0x30));
     try std.testing.expectEqual(core.board.Enhancement.sa1, core.board.enhancementForHeader(0x35, 0x23));
     try std.testing.expectEqual(core.board.Enhancement.sdd1, core.board.enhancementForHeader(0x45, 0x32));
+    try std.testing.expectEqual(core.board.Enhancement.super_fx, core.board.enhancementForHeader(0x15, 0x20));
+    try std.testing.expectEqual(core.board.Enhancement.super_fx, core.board.enhancementForHeader(0x1A, 0x30));
     try std.testing.expectEqual(core.board.Enhancement.unknown, core.board.enhancementForHeader(0x99, 0x20));
 }
 

@@ -49,7 +49,7 @@ pub const capability_table = [_]Capability{
     .{ .enhancement = .srtc, .disposition = .base_implemented, .planned_version = "0.73.12" },
     .{ .enhancement = .sdd1, .disposition = .base_implemented, .planned_version = "0.73.13" },
     .{ .enhancement = .spc7110_epson_rtc, .disposition = .base_implemented, .planned_version = "0.73.13" },
-    .{ .enhancement = .super_fx, .disposition = .planned, .planned_version = "0.73.14" },
+    .{ .enhancement = .super_fx, .disposition = .base_implemented, .planned_version = "0.73.14" },
     .{ .enhancement = .sa1, .disposition = .planned, .planned_version = "0.73.15" },
     .{ .enhancement = .cx4, .disposition = .planned, .planned_version = "0.73.16" },
     .{ .enhancement = .dsp1_family, .disposition = .planned_user_firmware, .planned_version = "0.73.17", .firmware_bytes = 0x2000 },
@@ -101,6 +101,7 @@ pub const RevisionFamily = enum {
     srtc,
     sdd1,
     spc7110,
+    super_fx,
 };
 
 /// Classifies only recognizable but unsupported revisions. It is deliberately
@@ -115,6 +116,9 @@ pub fn unsupportedRevisionFamily(rom_type: u8, map_mode: u8) ?RevisionFamily {
         (map_mode & 0x2F) == 0x22 and rom_type != 0x43 and rom_type != 0x45) return .sdd1;
     if ((rom_type & 0xF0) == 0xF0 and (rom_type & 0x0F) >= 5 and
         (map_mode & 0x2F) == 0x2A and rom_type != 0xF5 and rom_type != 0xF9) return .spc7110;
+    if ((rom_type & 0xF0) == 0x10 and (rom_type & 0x0F) >= 3 and
+        ((map_mode & 0x2F) == 0x20) and
+        rom_type != 0x13 and rom_type != 0x14 and rom_type != 0x15 and rom_type != 0x1A) return .super_fx;
     return null;
 }
 
@@ -131,11 +135,16 @@ pub const Board = struct {
     }
 
     pub fn romIndex(self: Board, address: u32, rom_size: usize) ?usize {
+        if (self.capability.enhancement == .super_fx) return decodeSuperFxCpuRomIndex(address, rom_size);
         return decodeRomIndex(self.mapping, address, rom_size);
     }
 
     pub fn sramIndex(self: Board, address: u32) ?usize {
         if (self.sram_bytes == 0) return null;
+        // The GSU owns its non-LoROM 6000-7fff and 70-71/F0-F1 mappings.
+        // Cartridge routes those windows through the device before reaching
+        // this generic mapper.
+        if (self.capability.enhancement == .super_fx) return null;
         const bank: u8 = @truncate(address >> 16);
         const offset: u16 = @truncate(address);
         const logical: usize = switch (self.mapping) {
@@ -205,6 +214,19 @@ pub fn decodeRomIndex(mapping: Mapping, address: u32, rom_size: usize) ?usize {
         },
     };
     return mirrorIndex(logical, rom_size);
+}
+
+pub fn decodeSuperFxCpuRomIndex(address: u32, rom_size: usize) ?usize {
+    if (rom_size == 0 or address > 0x00FF_FFFF) return null;
+    const bank: u8 = @truncate(address >> 16);
+    const offset: u16 = @truncate(address);
+    if ((bank <= 0x3F or (bank >= 0x80 and bank <= 0xBF)) and offset >= 0x8000) {
+        return mirrorIndex((@as(usize, bank & 0x3F) << 15) | @as(usize, offset & 0x7FFF), rom_size);
+    }
+    if ((bank >= 0x40 and bank <= 0x5F) or (bank >= 0xC0 and bank <= 0xDF)) {
+        return mirrorIndex((@as(usize, bank & 0x1F) << 16) | @as(usize, offset), rom_size);
+    }
+    return null;
 }
 
 fn romWindow(mapping: Mapping, bank: u8, offset: u16) bool {
