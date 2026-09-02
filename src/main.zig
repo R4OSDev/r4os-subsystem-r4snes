@@ -48,7 +48,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         sys.println("R4SNES: cartridge is too large for this host.");
         return error_size;
     };
-    _ = core.cartridge.inspectCandidateSize(size) catch {
+    _ = core.cartridge.inspectContainerSize(size) catch {
         sys.println("R4SNES: unsupported cartridge geometry.");
         return error_cartridge;
     };
@@ -57,7 +57,10 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         sys.println("R4SNES: cartridge buffer could not be allocated.");
         return error_allocator;
     };
-    defer allocator.free(source);
+    defer {
+        @memset(source, 0);
+        allocator.free(source);
+    }
     var offset: usize = 0;
     while (offset < source.len) {
         const count = switch (files.readAt(path.asZ(), @intCast(offset), source[offset..])) {
@@ -73,7 +76,72 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         }
         offset += count;
     }
-    var cartridge = core.cartridge.Cartridge.parse(allocator, source) catch |fault| {
+    const requirement = core.cartridge.inspectNecDspRequirement(source, null) catch |fault| {
+        sys.println(cartridgeError(fault));
+        return error_cartridge;
+    };
+    var separate_firmware: ?[]u8 = null;
+    defer if (separate_firmware) |firmware| {
+        @memset(firmware, 0);
+        allocator.free(firmware);
+    };
+    if (requirement) |needed| {
+        if (needed.appended) {
+            const appended = source[source.len - core.nec_dsp.firmware_bytes ..];
+            _ = core.nec_dsp.validateFirmware(needed.revision, appended, .known_only) catch |fault| {
+                printNecDspFirmwareError(sys, needed, fault);
+                return error_firmware;
+            };
+        } else {
+            var firmware_path = r4os.AbsoluteFilePath.parse(needed.firmwarePath()) catch {
+                printNecDspFirmwareError(sys, needed, error.InvalidNecDspFirmwarePath);
+                return error_firmware;
+            };
+            const firmware_info = switch (files.info(firmware_path.asZ())) {
+                .missing => {
+                    printNecDspFirmwareError(sys, needed, error.MissingNecDspFirmware);
+                    return error_firmware;
+                },
+                .failure => {
+                    printNecDspFirmwareError(sys, needed, error.NecDspFirmwareMetadataFailure);
+                    return error_firmware;
+                },
+                .value => |value| value,
+            };
+            if (firmware_info.is_dir != 0 or firmware_info.size != core.nec_dsp.firmware_bytes) {
+                printNecDspFirmwareError(sys, needed, error.InvalidNecDspFirmwareSize);
+                return error_firmware;
+            }
+            const firmware = allocator.alloc(u8, core.nec_dsp.firmware_bytes) catch {
+                sys.println("R4SNES: NEC-DSP firmware buffer could not be allocated.");
+                return error_allocator;
+            };
+            separate_firmware = firmware;
+            var firmware_offset: usize = 0;
+            while (firmware_offset < firmware.len) {
+                const count = switch (files.readAt(firmware_path.asZ(), @intCast(firmware_offset), firmware[firmware_offset..])) {
+                    .bytes => |value| value,
+                    .end, .failure => {
+                        printNecDspFirmwareError(sys, needed, error.NecDspFirmwareReadFailure);
+                        return error_firmware;
+                    },
+                };
+                if (count == 0) {
+                    printNecDspFirmwareError(sys, needed, error.NecDspFirmwareReadFailure);
+                    return error_firmware;
+                }
+                firmware_offset += count;
+            }
+            _ = core.nec_dsp.validateFirmware(needed.revision, firmware, .known_only) catch |fault| {
+                printNecDspFirmwareError(sys, needed, fault);
+                return error_firmware;
+            };
+        }
+    }
+    var cartridge = core.cartridge.Cartridge.parseWithOptions(allocator, source, .{
+        .nec_dsp_revision = if (requirement) |needed| needed.revision else null,
+        .nec_dsp_firmware = separate_firmware,
+    }) catch |fault| {
         sys.println(cartridgeError(fault));
         return error_cartridge;
     };
@@ -131,8 +199,27 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     // 5A22, DMA/HDMA, PPU, S-SMP and S-DSP are qualified independently;
     // productive execution is rejected until the runtime-machine/window-host
     // stage composes those owners.
-    sys.println("R4SNES: cartridge, OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.15.0.");
+    sys.println("R4SNES: cartridge, OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.16.0.");
     return error_not_implemented;
+}
+
+fn printNecDspFirmwareError(sys: anytype, needed: core.cartridge.NecDspRequirement, fault: anyerror) void {
+    sys.write("R4SNES: ");
+    sys.write(needed.chipName());
+    sys.write(" firmware ");
+    sys.write(needed.fileName());
+    switch (fault) {
+        error.MissingNecDspFirmware => sys.write(" is missing"),
+        error.InvalidNecDspFirmwareSize => sys.write(" has the wrong size"),
+        error.InvalidNecDspFirmwareDigest => sys.write(" does not match the required chip revision"),
+        error.InvalidNecDspFirmwarePath => sys.write(" has an invalid configured path"),
+        error.NecDspFirmwareMetadataFailure => sys.write(" metadata could not be read"),
+        error.NecDspFirmwareReadFailure => sys.write(" could not be read completely"),
+        else => sys.write(" failed validation"),
+    }
+    sys.write("; expected exactly 8192 bytes at ");
+    sys.write(needed.firmwarePath());
+    sys.println(".");
 }
 
 fn cartridgeError(fault: anyerror) []const u8 {
@@ -148,6 +235,12 @@ fn cartridgeError(fault: anyerror) []const u8 {
         error.UnsupportedSuperFxRevision => "R4SNES: cartridge declares an unsupported Super FX revision.",
         error.UnsupportedSa1Revision => "R4SNES: cartridge declares an unsupported SA-1 revision.",
         error.UnsupportedCx4Revision => "R4SNES: cartridge declares an unsupported CX4 revision.",
+        error.MissingNecDspFirmware => "R4SNES: required NEC-DSP firmware is missing.",
+        error.InvalidNecDspFirmwareSize => "R4SNES: NEC-DSP firmware has the wrong size.",
+        error.InvalidNecDspFirmwareDigest => "R4SNES: NEC-DSP firmware digest does not match its chip revision.",
+        error.NecDspFirmwareRevisionMismatch => "R4SNES: appended NEC-DSP firmware contradicts the detected board revision.",
+        error.AmbiguousNecDspFirmwareSource => "R4SNES: NEC-DSP firmware was supplied both appended and separately.",
+        error.UnexpectedNecDspFirmware, error.UnexpectedAppendedFirmware => "R4SNES: firmware was supplied for a cartridge without a matching NEC-DSP board.",
         error.ContradictoryOBC1Board => "R4SNES: OBC-1 header contradicts its LoROM, battery or 8-KiB RAM profile.",
         error.ContradictorySrtcBoard => "R4SNES: S-RTC header contradicts its ExHiROM, battery or save-RAM profile.",
         error.ContradictorySdd1Board => "R4SNES: S-DD1 header contradicts its LoROM, battery or 32-KiB RAM profile.",
@@ -155,6 +248,7 @@ fn cartridgeError(fault: anyerror) []const u8 {
         error.ContradictorySuperFxBoard => "R4SNES: Super FX header contradicts its LoROM, GSU revision, ROM or 32/64/128-KiB work-RAM profile.",
         error.ContradictorySa1Board => "R4SNES: SA-1 header contradicts its LoROM, ROM or BW-RAM profile.",
         error.ContradictoryCx4Board => "R4SNES: CX4 header contradicts its LoROM, ROM or no-save-RAM profile.",
+        error.ContradictoryNecDspBoard => "R4SNES: NEC-DSP revision contradicts the cartridge mapping or header identity.",
         error.UnaddressableBoardGeometry => "R4SNES: cartridge board geometry exceeds its implemented address space.",
         error.OutOfMemory => "R4SNES: cartridge memory could not be allocated.",
         else => "R4SNES: cartridge validation failed.",
@@ -218,10 +312,16 @@ fn selfTest(app: *r4os.App) i32 {
         !cx4.negative or !cx4.overflow or cx4.carry or
         core.cx4.dataRomWord(0x240) != 0xb504f3)
         return error_not_implemented;
+    var nec = core.nec_dsp.Device{};
+    nec.firmware_installed = true;
+    nec.program_rom[0] = 0xc48d06; // LD DR,$1234: asserts RQM through the real decoder.
+    nec.step();
+    if (nec.dr != 0x1234 or !nec.requestForMaster() or nec.cycles != 1)
+        return error_not_implemented;
     machine.close();
     machine.close();
     if (!machine.closed or machine.smp.dsp.capture_enabled or machine.smp.dsp.queuedFrames() != 0) return error_not_implemented;
-    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
+    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
     return 0;
 }
 

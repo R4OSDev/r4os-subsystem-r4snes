@@ -105,6 +105,30 @@ pub fn build(b: *std.Build) void {
     run_cx4_programs.addArg(cx4_output);
     run_cx4_programs.step.dependOn(&assemble_cx4.step);
 
+    const nec_dsp_output = b.option([]const u8, "nec-dsp-firmware-output", "Generated open NEC-DSP firmware directory") orelse "../../../Temp/R4SNES-NECDSP";
+    const assemble_nec_dsp = b.addSystemCommand(&.{ "pwsh", "-NoLogo", "-NoProfile", "-File" });
+    assemble_nec_dsp.addFileArg(b.path("Tests/Build-NecDspFirmware.ps1"));
+    assemble_nec_dsp.addArg("-ReferenceRoot");
+    assemble_nec_dsp.addArg(snes_reference_root);
+    assemble_nec_dsp.addArg("-OutputDirectory");
+    assemble_nec_dsp.addArg(nec_dsp_output);
+    const nec_dsp_firmware_root = b.createModule(.{
+        .root_source_file = b.path("Tests/nec_dsp_firmware_harness.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    nec_dsp_firmware_root.addImport("core", core);
+    const nec_dsp_firmware_harness = b.addExecutable(.{
+        .name = "r4snes-nec-dsp-firmware-harness",
+        .root_module = nec_dsp_firmware_root,
+    });
+    const run_nec_dsp_firmware = b.addRunArtifact(nec_dsp_firmware_harness);
+    run_nec_dsp_firmware.setCwd(b.path("."));
+    run_nec_dsp_firmware.addArg(nec_dsp_output);
+    if (b.option([]const u8, "nec-dsp-private-root", "Optional private user-provided DSP firmware directory")) |root|
+        run_nec_dsp_firmware.addArg(root);
+    run_nec_dsp_firmware.step.dependOn(&assemble_nec_dsp.step);
+
     const coverage_root = b.createModule(.{
         .root_source_file = b.path("Tests/cpu_coverage.zig"),
         .target = b.graph.host,
@@ -130,10 +154,13 @@ pub fn build(b: *std.Build) void {
     reference_step.dependOn(&run_superfx_programs.step);
     reference_step.dependOn(&run_sa1_references.step);
     reference_step.dependOn(&run_cx4_programs.step);
+    reference_step.dependOn(&run_nec_dsp_firmware.step);
     const superfx_reference_step = b.step("superfx-reference-test", "Rebuild and execute pinned OpenSNES and owner GSU programs");
     superfx_reference_step.dependOn(&run_superfx_programs.step);
     const sa1_reference_step = b.step("sa1-reference-test", "Execute six pinned SA-1 hardware tests and two-start BW-RAM persistence");
     sa1_reference_step.dependOn(&run_sa1_references.step);
     const cx4_reference_step = b.step("cx4-reference-test", "Rebuild and execute pinned and owner HG51B169 programs");
     cx4_reference_step.dependOn(&run_cx4_programs.step);
+    const nec_dsp_reference_step = b.step("nec-dsp-reference-test", "Rebuild and execute open uPD7725 firmware; optionally validate private user firmware");
+    nec_dsp_reference_step.dependOn(&run_nec_dsp_firmware.step);
 }

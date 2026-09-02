@@ -32,6 +32,10 @@ follows:
   complete PLOT/RPIX pipeline.
 - `sa1.zig`: private W65C816, Super MMC, I-/BW-RAM, DMA/conversion, arithmetic,
   timers, vectors and dual-processor arbitration.
+- `cx4.zig`: HG51B169 ISA, caches, mathematical ROM, DMA and asynchronous
+  cartridge-bus ownership.
+- `nec_dsp.zig`: common uPD7725 ISA, multiplier, host handshake and exact
+  DSP-1/1A/1B/2/3/4 board windows; firmware policy remains outside the core.
 - `persistence.zig`: normalized identity policy, exact SRAM/BW-RAM payloads,
   checksummed S-RTC/Epson records and forward-only offline-time policy.
 - `persistence_r4os.zig`: thin configuration of the SDK's compiled-in lease,
@@ -81,9 +85,10 @@ pull no more than 2048 48 kHz S16LE frames into a caller-owned buffer.
 tracks transport ownership and disables capture on mute or backend failure
 without stalling or accelerating the guest. Reset and repeated close clear the
 same queue and resampler state. Generic pause, resync and backend policy remain
-owned by the shared SDK runtime. Version 0.14.0 still does not start a parsed
+owned by the shared SDK runtime. Version 0.16.0 still does not start a parsed
 cartridge in the R4OS application because the productive machine and window
-host are deliberately scheduled for a later milestone.
+host are deliberately scheduled for a later milestone. It adds no host-owned
+scheduling or firmware lookup to these component owners.
 
 Persistence is keyed only by the normalized 32-byte cartridge digest. A
 battery board acquires one generation-bound lease and loads exactly its
@@ -122,3 +127,20 @@ unit at a time. Reset, WAI/STP, bidirectional IRQ/NMI, vectors, arithmetic,
 variable-bit reads and timers remain instance-local. Only physical BW-RAM dirty
 ranges can reach cartridge persistence, and only on a battery board; I-RAM is
 always volatile.
+
+The NEC-DSP owner has 2048 24-bit program words, 1024 16-bit data-ROM words,
+256 private data-RAM words and a four-word stack. Every instruction advances
+exactly one DSP cycle and updates the signed multiplier pipeline after the
+operation. OP/RT/JP/LD, both accumulators, all flags, DP/RP modifiers, serial
+acknowledge conditions and RQM/DRS/DRC byte sequencing follow one bounded
+state machine. A recognized RQM self-loop yields to the host without consuming
+unbounded cycles; any slice partition produces the same complete state.
+
+Cartridge parsing first separates a possible 8192-byte appended firmware tail
+and only then validates the normalized ROM. Separate and appended firmware are
+mutually exclusive. The immutable cartridge SHA-256 never includes firmware,
+while the device retains its own revision digest. Product validation accepts
+only the exact known revision digest from the fixed private path; the relaxed
+policy is explicitly named `allow_open_test` and is used solely by generated
+owner fixtures. Close is idempotent and erases program ROM, data ROM, RAM,
+stack and digest.

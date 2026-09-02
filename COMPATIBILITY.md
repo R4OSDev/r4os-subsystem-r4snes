@@ -1,6 +1,6 @@
 ﻿# Compatibility
 
-The 0.14.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
+The 0.16.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
 normalizes an optional 512-byte copier header and requires one unambiguous
 LoROM, HiROM, ExLoROM or ExHiROM header. Region, board capability, declared
 sizes, reset vector, startup opcode and checksum/complement contribute to a
@@ -41,10 +41,11 @@ and wrong stereo balance. Audible quality remains a final-stage manual check.
 OBC-1 and S-RTC are executable capabilities. OBC-1 requires the exact LoROM,
 battery and 8192-byte object-RAM profile. S-RTC requires its ExHiROM, battery
 and save-RAM profile. Recognizable but unknown revisions and contradictory
-profiles have separate rejection classes. The capability table continues to
-name every later enhancement family and the user-firmware sizes for NEC-DSP/ST
-hardware without claiming those devices are already executable. MSU-1 and
-adapter systems remain explicit exclusions.
+profiles have separate rejection classes. The capability table exposes NEC
+DSP-1/1A/1B/2/3/4 as executable with an exact 8192-byte user-firmware
+requirement and continues to name the later ST010/011 and ST018 firmware sizes
+without claiming those devices are already executable. MSU-1 and adapter
+systems remain explicit exclusions.
 
 The S-PPU owner now covers modes 0-7, native hires and interlace geometries,
 Mode 7, windows, main/subscreen composition, color math, fixed color, mosaic,
@@ -83,3 +84,16 @@ masked rather than invented. The backup utility proves a cold/warm two-start
 protocol in which exact battery BW-RAM persists but I-RAM and all other device
 state restart. Unknown revisions and contradictory SA-1 geometries fail with
 dedicated diagnostics.
+
+NEC-DSP qualification covers OP, RT, JP and LD; all 16 ALU operations, source
+and destination selectors; both accumulators and flag chains; DP/RP wrapping;
+the signed multiplier pipeline; four-entry stack; every defined branch and a
+bounded reserved branch; RQM/DRS/DRC handshakes; reset, arbitrary slices,
+parallel CPU access and instance isolation. Exact DSP-1/1A/1B/2/3/4 mappings
+are selected from header fields or explicit board metadata. Separate firmware
+uses `DSP1.ROM`, `DSP1A.ROM`, `DSP1B.ROM`, `DSP2.ROM`, `DSP3.ROM` or
+`DSP4.ROM`; appended firmware is recognized by geometry and known digest. A
+missing, wrong-size, wrong-revision or duplicate source fails before execution
+with the chip, file and expected size. Six generated open images are the
+public gate; locally owned known images are optional and never enter an
+artifact.

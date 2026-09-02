@@ -29,6 +29,10 @@ const Expected = struct {
     cx4_independent_implementations: usize,
     cx4_data_rom_sha256: []const u8,
     cx4_aggregate_fnv1a64: []const u8,
+    nec_dsp_open_firmware_variants: usize,
+    nec_dsp_matrix_words: usize,
+    nec_dsp_independent_implementations: usize,
+    nec_dsp_aggregate_fnv1a64: []const u8,
     spc700_files: usize,
     spc700_records: usize,
 };
@@ -47,6 +51,9 @@ const Corpus = struct {
     sa1_hardware_roms: usize,
     cx4_programs: usize,
     cx4_independent_implementations: usize,
+    nec_dsp_open_firmware_variants: usize,
+    nec_dsp_matrix_words: usize,
+    nec_dsp_independent_implementations: usize,
     commercial_roms: usize,
     proprietary_firmware_images: usize,
 };
@@ -75,11 +82,34 @@ const Cx4ReferenceCases = struct {
     independent_sources: []const std.json.Value,
 };
 
+const NecDspReferenceCases = struct {
+    release: []const u8,
+    core: []const u8,
+    frequency_hz: u32,
+    program_words: usize,
+    data_words: usize,
+    data_ram_words: usize,
+    stack_words: usize,
+    open_firmware_variants: usize,
+    emitted_matrix_words: usize,
+    instruction_classes: usize,
+    alu_modes: usize,
+    source_selectors: usize,
+    destination_selectors: usize,
+    defined_branch_modes: usize,
+    reserved_branch_modes: usize,
+    aggregate_state_fnv1a64: []const u8,
+    independent_sources: []const std.json.Value,
+    firmware_paths: []const []const u8,
+    firmware_bytes_each: usize,
+};
+
 const Matrix = struct {
     schema: u32,
     release: []const u8,
     corpus: Corpus,
     cx4_reference_cases: Cx4ReferenceCases,
+    nec_dsp_reference_cases: NecDspReferenceCases,
     suites: []const MatrixSuite,
     enhancement_chips: []const MatrixEnhancement,
 };
@@ -213,13 +243,16 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.16")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.17")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
         matrix.corpus.sa1_hardware_roms != expected.sa1_hardware_roms or
         matrix.corpus.cx4_programs != expected.cx4_programs or
         matrix.corpus.cx4_independent_implementations != expected.cx4_independent_implementations or
+        matrix.corpus.nec_dsp_open_firmware_variants != expected.nec_dsp_open_firmware_variants or
+        matrix.corpus.nec_dsp_matrix_words != expected.nec_dsp_matrix_words or
+        matrix.corpus.nec_dsp_independent_implementations != expected.nec_dsp_independent_implementations or
         matrix.corpus.commercial_roms != 0 or matrix.corpus.proprietary_firmware_images != 0)
     {
         return error.QualificationMatrixMismatch;
@@ -235,6 +268,12 @@ fn run(init: std.process.Init) !void {
     try expectImplementedEnhancement(matrix.enhancement_chips, "superfx-gsu1-gsu2", "0.73.14");
     try expectImplementedEnhancement(matrix.enhancement_chips, "sa1", "0.73.15");
     try expectImplementedEnhancement(matrix.enhancement_chips, "cx4", "0.73.16");
+    try expectImplementedFirmwareEnhancement(
+        matrix.enhancement_chips,
+        "dsp1-dsp1a-dsp1b-dsp2-dsp3-dsp4",
+        "0.73.17",
+        "exact 8192-byte user image required and never distributed",
+    );
     const cx4_cases = matrix.cx4_reference_cases;
     if (!std.mem.eql(u8, cx4_cases.release, "0.73.16") or
         cx4_cases.programs != expected.cx4_programs or
@@ -246,6 +285,24 @@ fn run(init: std.process.Init) !void {
         cx4_cases.independent_sources.len != expected.cx4_independent_implementations)
     {
         return error.Cx4QualificationMismatch;
+    }
+    const nec_dsp_cases = matrix.nec_dsp_reference_cases;
+    if (!std.mem.eql(u8, nec_dsp_cases.release, "0.73.17") or
+        !std.mem.eql(u8, nec_dsp_cases.core, "NEC uPD7725/uPD77C25") or
+        nec_dsp_cases.frequency_hz != 7_600_000 or
+        nec_dsp_cases.program_words != 2_048 or nec_dsp_cases.data_words != 1_024 or
+        nec_dsp_cases.data_ram_words != 256 or nec_dsp_cases.stack_words != 4 or
+        nec_dsp_cases.open_firmware_variants != expected.nec_dsp_open_firmware_variants or
+        nec_dsp_cases.emitted_matrix_words != expected.nec_dsp_matrix_words or
+        nec_dsp_cases.instruction_classes != 4 or nec_dsp_cases.alu_modes != 16 or
+        nec_dsp_cases.source_selectors != 16 or nec_dsp_cases.destination_selectors != 16 or
+        nec_dsp_cases.defined_branch_modes != 39 or nec_dsp_cases.reserved_branch_modes != 1 or
+        !std.mem.eql(u8, nec_dsp_cases.aggregate_state_fnv1a64, expected.nec_dsp_aggregate_fnv1a64) or
+        nec_dsp_cases.independent_sources.len != expected.nec_dsp_independent_implementations or
+        nec_dsp_cases.firmware_paths.len != expected.nec_dsp_open_firmware_variants or
+        nec_dsp_cases.firmware_bytes_each != 8_192)
+    {
+        return error.NecDspQualificationMismatch;
     }
 
     const dma_cases_bytes = try cwd.readFileAlloc(io, "Tests/dma_reference_cases.json", allocator, .limited(max_manifest_bytes));
@@ -566,6 +623,25 @@ fn expectImplementedEnhancement(chips: []const MatrixEnhancement, id: []const u8
         if (!std.mem.eql(u8, chip.status, "implemented") or
             chip.version == null or !std.mem.eql(u8, chip.version.?, version) or
             chip.firmware == null or !std.mem.eql(u8, chip.firmware.?, "none"))
+        {
+            return error.QualificationEnhancementMismatch;
+        }
+        return;
+    }
+    return error.QualificationEnhancementMissing;
+}
+
+fn expectImplementedFirmwareEnhancement(
+    chips: []const MatrixEnhancement,
+    id: []const u8,
+    version: []const u8,
+    firmware: []const u8,
+) !void {
+    for (chips) |chip| {
+        if (!std.mem.eql(u8, chip.id, id)) continue;
+        if (!std.mem.eql(u8, chip.status, "implemented") or
+            chip.version == null or !std.mem.eql(u8, chip.version.?, version) or
+            chip.firmware == null or !std.mem.eql(u8, chip.firmware.?, firmware))
         {
             return error.QualificationEnhancementMismatch;
         }

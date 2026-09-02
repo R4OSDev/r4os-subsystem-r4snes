@@ -7,6 +7,7 @@ const srtc = @import("srtc.zig");
 const superfx = @import("superfx.zig");
 const sa1 = @import("sa1.zig");
 const cx4 = @import("cx4.zig");
+const nec_dsp = @import("nec_dsp.zig");
 
 pub const copier_header_size: usize = 512;
 pub const mapping_granularity: usize = 32 * 1024;
@@ -31,6 +32,7 @@ pub const Header = struct {
     rom_size_code: u8,
     ram_size_code: u8,
     region_code: u8,
+    licensee_code: u8,
     version: u8,
     expansion_ram_size_code: u8 = 0,
     cartridge_subtype: u8 = 0,
@@ -51,6 +53,29 @@ pub const ParseOptions = struct {
     /// that distinguishes GSU-1 from GSU-2.  GSU-2 is the compatible default
     /// used by open homebrew; callers with board metadata may select GSU-1.
     superfx_revision: ?superfx.Revision = null,
+    /// DSP-2/3/4 are inferred from non-title header fields. DSP-1B is the
+    /// default for the otherwise indistinguishable DSP-1 package revisions;
+    /// exact board metadata may select DSP-1 or DSP-1A explicitly.
+    nec_dsp_revision: ?nec_dsp.Revision = null,
+    nec_dsp_firmware: ?[]const u8 = null,
+    nec_dsp_firmware_validation: nec_dsp.FirmwareValidation = .known_only,
+};
+
+pub const NecDspRequirement = struct {
+    revision: nec_dsp.Revision,
+    appended: bool,
+
+    pub fn chipName(self: NecDspRequirement) []const u8 {
+        return self.revision.chipName();
+    }
+
+    pub fn fileName(self: NecDspRequirement) []const u8 {
+        return self.revision.fileName();
+    }
+
+    pub fn firmwarePath(self: NecDspRequirement) []const u8 {
+        return self.revision.firmwarePath();
+    }
 };
 
 pub const Cartridge = struct {
@@ -71,18 +96,25 @@ pub const Cartridge = struct {
     superfx_device: ?superfx.Device = null,
     sa1_device: ?sa1.Device = null,
     cx4_device: ?cx4.Device = null,
+    nec_dsp_device: ?nec_dsp.Device = null,
+    had_appended_firmware: bool = false,
 
     pub fn parse(allocator: std.mem.Allocator, source: []const u8) !Cartridge {
         return parseWithOptions(allocator, source, .{});
     }
 
     pub fn parseWithOptions(allocator: std.mem.Allocator, source: []const u8, options: ParseOptions) !Cartridge {
-        const geometry = try inspectCandidateSize(source.len);
+        const parts = try splitSource(source);
+        const geometry = parts.geometry;
         const normalized_start: usize = if (geometry.copier_header) copier_header_size else 0;
-        const normalized = source[normalized_start..];
+        const normalized = parts.cartridge[normalized_start..];
         const header = try selectHeader(normalized);
         const enhancement = board.enhancementForHeader(header.rom_type, header.map_mode);
         const capability = board.capability(enhancement);
+        if (parts.appended_firmware != null and enhancement != .dsp1_family)
+            return error.UnexpectedAppendedFirmware;
+        if (parts.appended_firmware != null and options.nec_dsp_firmware != null)
+            return error.AmbiguousNecDspFirmwareSource;
         if (enhancement == .unknown) {
             if (board.unsupportedRevisionFamily(header.rom_type, header.map_mode)) |family| {
                 return switch (family) {
@@ -113,6 +145,10 @@ pub const Cartridge = struct {
             if (header.declared_sram_bytes != 0) break :blk header.declared_sram_bytes;
             break :blk superfx.default_ram_bytes;
         } else header.declared_sram_bytes;
+        const nec_revision = if (enhancement == .dsp1_family)
+            try selectNecDspRevision(header, parts.appended_firmware, options.nec_dsp_revision)
+        else
+            null;
         switch (enhancement) {
             .obc1 => if (header.mapping != .lo_rom or header.declared_sram_bytes != obc1.ram_bytes or !battery)
                 return error.ContradictoryOBC1Board,
@@ -140,6 +176,12 @@ pub const Cartridge = struct {
                 cx4.validateGeometry(normalized.len, cartridge_ram_bytes) catch
                     return error.ContradictoryCx4Board;
             },
+            .dsp1_family => {
+                validateNecDspHeader(nec_revision.?, header) catch
+                    return error.ContradictoryNecDspBoard;
+                _ = nec_dsp.selectHostMap(nec_revision.?, header.mapping, normalized.len, cartridge_ram_bytes) catch
+                    return error.ContradictoryNecDspBoard;
+            },
             else => {},
         }
 
@@ -149,6 +191,30 @@ pub const Cartridge = struct {
         const sram_copy = try allocator.alloc(u8, cartridge_ram_bytes);
         errdefer allocator.free(sram_copy);
         @memset(sram_copy, 0);
+
+        var nec_device: ?nec_dsp.Device = null;
+        errdefer if (nec_device) |*device| device.close();
+        if (nec_revision) |revision| {
+            const firmware = parts.appended_firmware orelse options.nec_dsp_firmware orelse
+                return error.MissingNecDspFirmware;
+            const firmware_source: nec_dsp.FirmwareSource = if (options.nec_dsp_firmware_validation == .allow_open_test)
+                .open_test
+            else if (parts.appended_firmware != null)
+                .appended
+            else
+                .separate;
+            nec_device = try nec_dsp.Device.init(
+                revision,
+                header.mapping,
+                normalized.len,
+                cartridge_ram_bytes,
+                firmware,
+                options.nec_dsp_firmware_validation,
+                firmware_source,
+            );
+        } else if (options.nec_dsp_firmware != null) {
+            return error.UnexpectedNecDspFirmware;
+        }
 
         var identity: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(normalized, &identity, .{});
@@ -167,6 +233,7 @@ pub const Cartridge = struct {
                 .battery = battery,
             },
             .had_copier_header = geometry.copier_header,
+            .had_appended_firmware = parts.appended_firmware != null,
             .obc1_device = if (enhancement == .obc1) .{} else null,
             .srtc_device = if (enhancement == .srtc) .{} else null,
             .sdd1_device = if (enhancement == .sdd1) .{} else null,
@@ -177,6 +244,7 @@ pub const Cartridge = struct {
             .superfx_device = if (superfx_revision) |revision| superfx.Device.init(revision) else null,
             .sa1_device = if (enhancement == .sa1) .{} else null,
             .cx4_device = if (enhancement == .cx4) .{} else null,
+            .nec_dsp_device = nec_device,
         };
         if (result.obc1_device) |*device| try device.power(result.sram_storage);
         if (result.srtc_device) |*device| device.power();
@@ -193,6 +261,7 @@ pub const Cartridge = struct {
     }
 
     pub fn deinit(self: *Cartridge) void {
+        if (self.nec_dsp_device) |*device| device.close();
         self.allocator.free(self.sram_storage);
         self.allocator.free(self.rom_storage);
         self.sram_storage = &.{};
@@ -207,6 +276,8 @@ pub const Cartridge = struct {
         self.superfx_device = null;
         self.sa1_device = null;
         self.cx4_device = null;
+        self.nec_dsp_device = null;
+        self.had_appended_firmware = false;
     }
 
     pub fn rom(self: *const Cartridge) []const u8 {
@@ -241,6 +312,7 @@ pub const Cartridge = struct {
         if (self.superfx_device) |*device| return device.readCpu(self.rom_storage, self.sram_storage, address, open_bus);
         if (self.sa1_device) |*device| return device.readCpu(self.rom_storage, self.sram_storage, address, open_bus);
         if (self.cx4_device) |*device| return device.readCpu(self.rom_storage, self.sram_storage, address, open_bus);
+        if (self.nec_dsp_device) |*device| return device.readCpu(address, open_bus);
         return null;
     }
 
@@ -290,6 +362,7 @@ pub const Cartridge = struct {
         if (self.cx4_device) |*device| {
             return device.writeCpu(self.rom_storage, self.sram_storage, address, value).handled;
         }
+        if (self.nec_dsp_device) |*device| return device.writeCpu(address, value);
         return false;
     }
 
@@ -337,6 +410,11 @@ pub const Cartridge = struct {
         return false;
     }
 
+    pub fn runNecDspSlice(self: *Cartridge, maximum_instructions: usize) ?nec_dsp.RunResult {
+        if (self.nec_dsp_device) |*device| return device.runSlice(maximum_instructions);
+        return null;
+    }
+
     fn collectSa1Dirty(self: *Cartridge, device: *sa1.Device) void {
         if (device.takeDirtyRange()) |dirty| {
             if (self.board.battery) self.markSramDirty(dirty.first, dirty.end);
@@ -371,6 +449,118 @@ pub const Cartridge = struct {
         return result;
     }
 };
+
+pub const ContainerGeometry = struct {
+    cartridge: CandidateGeometry,
+    appended_firmware: bool,
+};
+
+const SourceParts = struct {
+    geometry: CandidateGeometry,
+    cartridge: []const u8,
+    appended_firmware: ?[]const u8,
+};
+
+/// Size-only preflight. The appended case remains provisional until parsing
+/// proves that the normalized cartridge actually declares a NEC-DSP board.
+pub fn inspectContainerSize(file_size: usize) !ContainerGeometry {
+    if (inspectCandidateSize(file_size)) |geometry| {
+        return .{ .cartridge = geometry, .appended_firmware = false };
+    } else |ordinary_fault| {
+        if (file_size < nec_dsp.firmware_bytes) return ordinary_fault;
+        const cartridge_size = file_size - nec_dsp.firmware_bytes;
+        const geometry = inspectCandidateSize(cartridge_size) catch return ordinary_fault;
+        return .{ .cartridge = geometry, .appended_firmware = true };
+    }
+}
+
+pub fn inspectNecDspRequirement(source: []const u8, revision_override: ?nec_dsp.Revision) !?NecDspRequirement {
+    const parts = try splitSource(source);
+    const normalized_start: usize = if (parts.geometry.copier_header) copier_header_size else 0;
+    const normalized = parts.cartridge[normalized_start..];
+    const header = try selectHeader(normalized);
+    const enhancement = board.enhancementForHeader(header.rom_type, header.map_mode);
+    if (enhancement != .dsp1_family) {
+        if (parts.appended_firmware != null) return error.UnexpectedAppendedFirmware;
+        return null;
+    }
+    const revision = try selectNecDspRevision(header, parts.appended_firmware, revision_override);
+    try validateNecDspHeader(revision, header);
+    return .{ .revision = revision, .appended = parts.appended_firmware != null };
+}
+
+fn splitSource(source: []const u8) !SourceParts {
+    const container = try inspectContainerSize(source.len);
+    if (!container.appended_firmware) {
+        return .{ .geometry = container.cartridge, .cartridge = source, .appended_firmware = null };
+    }
+    const split_at = source.len - nec_dsp.firmware_bytes;
+    return .{
+        .geometry = container.cartridge,
+        .cartridge = source[0..split_at],
+        .appended_firmware = source[split_at..],
+    };
+}
+
+fn selectNecDspRevision(
+    header: Header,
+    appended_firmware: ?[]const u8,
+    revision_override: ?nec_dsp.Revision,
+) !nec_dsp.Revision {
+    if (revision_override) |revision| {
+        try validateNecDspHeader(revision, header);
+        return revision;
+    }
+    const detected = detectNecDspRevision(header);
+    if (appended_firmware) |firmware| {
+        if (revisionFromKnownFirmware(firmware)) |firmware_revision| {
+            const detected_is_dsp1 = detected == .dsp1 or detected == .dsp1a or detected == .dsp1b;
+            const firmware_is_dsp1 = firmware_revision == .dsp1 or firmware_revision == .dsp1a or firmware_revision == .dsp1b;
+            if (detected_is_dsp1 and firmware_is_dsp1) return firmware_revision;
+            if (detected != firmware_revision) return error.NecDspFirmwareRevisionMismatch;
+        }
+    }
+    return detected;
+}
+
+fn detectNecDspRevision(header: Header) nec_dsp.Revision {
+    const mode = header.map_mode & 0x3f;
+    if (header.rom_type == 0x03 and mode == 0x30) return .dsp4;
+    if (header.rom_type == 0x05 and mode == 0x20) return .dsp2;
+    if (header.rom_type == 0x05 and mode == 0x30 and header.licensee_code == 0xb2) return .dsp3;
+    return .dsp1b;
+}
+
+fn validateNecDspHeader(revision: nec_dsp.Revision, header: Header) !void {
+    const mode = header.map_mode & 0x3f;
+    switch (revision) {
+        .dsp1, .dsp1a, .dsp1b => {
+            // The standard header is ambiguous: explicit board metadata may
+            // override the common DSP-2/3/4 heuristics for a DSP-1 package.
+            if ((header.mapping != .lo_rom and header.mapping != .hi_rom) or
+                (header.rom_type != 0x03 and header.rom_type != 0x05))
+                return error.ContradictoryNecDspBoard;
+        },
+        .dsp2 => if (header.rom_type != 0x05 or mode != 0x20)
+            return error.ContradictoryNecDspBoard,
+        .dsp3 => if (header.rom_type != 0x05 or mode != 0x30 or header.licensee_code != 0xb2)
+            return error.ContradictoryNecDspBoard,
+        .dsp4 => if (header.rom_type != 0x03 or mode != 0x30)
+            return error.ContradictoryNecDspBoard,
+    }
+}
+
+fn revisionFromKnownFirmware(bytes: []const u8) ?nec_dsp.Revision {
+    if (bytes.len != nec_dsp.firmware_bytes) return null;
+    var actual: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &actual, .{});
+    const revisions = [_]nec_dsp.Revision{ .dsp1a, .dsp1b, .dsp2, .dsp3, .dsp4 };
+    for (revisions) |revision| {
+        const known = revision.knownDigest();
+        if (std.mem.eql(u8, &actual, &known)) return revision;
+    }
+    return null;
+}
 
 /// Performs bounds and copier-header geometry validation without reading or
 /// mutating cartridge bytes.
@@ -483,6 +673,7 @@ fn parseHeaderCandidate(rom: []const u8, location: HeaderLocation) ?Header {
         .rom_size_code = bytes[0x17],
         .ram_size_code = bytes[0x18],
         .region_code = bytes[0x19],
+        .licensee_code = bytes[0x1A],
         .version = bytes[0x1B],
         .expansion_ram_size_code = rom[location.offset - 3],
         .cartridge_subtype = rom[location.offset - 1],

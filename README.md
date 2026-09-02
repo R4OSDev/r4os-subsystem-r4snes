@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.14.0 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.16.0 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
 color math, fixed color, mosaic, VMAIN, hires, overscan and interlace. It
@@ -105,6 +105,32 @@ Every phase also writes a raw tilemap and 256x224 PPM evidence image below
 `Temp/R4SNES-SA1`; the full corpus is bound to aggregate digest
 `62D2B8ACD2C164B6`.
 
+CX4 is an executable, firmware-free HG51B169 owner with complete instruction
+decoding, two program caches, 3 KiB data RAM, DMA, asynchronous bus access,
+IRQ/reset/suspend and a generated fixed-point mathematical ROM. Four programs
+are rebuilt with WLA-DX and bind exact register, RAM, geometry and pixel
+oracles without title data or command HLE.
+
+The NEC uPD7725 owner executes DSP-1, DSP-1A, DSP-1B, DSP-2, DSP-3 and DSP-4
+through one complete instruction core and revision-specific LoROM/HiROM host
+windows. R4SNES never distributes their 8192-byte programs. A separate image
+must use the exact fixed name below
+`C:\R4OS\SUBSYSTEMS\r4os.snes\FIRMWARE\`, or a legacy image may append the
+same 8192 bytes. Size and known revision SHA-256 are mandatory; there is no
+download or HLE fallback. DSP-1/DSP-1A code is identical, DSP-1B is the safe
+default when the standard header has no exact board metadata, and an appended
+known image can disambiguate the package. Firmware is excluded from the
+normalized cartridge identity and is cleared from temporary and device memory
+on close.
+
+`Tests/Build-NecDspFirmware.ps1` reproducibly emits six original open firmware
+images covering all four instruction classes, 16 ALUs, 16 sources, 16
+destinations, pointer modes and all 39 defined branch modes plus a reserved
+case. The public harness binds exact Ares and Mesen2 source revisions and the
+aggregate digest `B281EE2EAAA5F878`. An optional private gate validates all six
+revisions against known firmware hashes and proves a real DSP-1B Q15 multiply;
+private bytes are neither copied nor emitted.
+
 The only connected controller is port 1 and it uses physical keyboard usages:
 
 - D-pad: arrow keys
@@ -130,3 +156,6 @@ Use `./Build.sh superfx-reference-test` for the focused reproducible GSU source,
 binary, completion, state and pixel-frame gate.
 Use `./Build.sh sa1-reference-test` for the focused six-ROM SA-1 completion,
 defined-field, evidence-artifact and two-start BW-RAM gate.
+Use `./Build.sh nec-dsp-reference-test` for the six open uPD7725 firmware
+variants. Supplying `-Dnec-dsp-private-root=<directory>` additionally validates
+locally owned firmware without making it a build prerequisite.

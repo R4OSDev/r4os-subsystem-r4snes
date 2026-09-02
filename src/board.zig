@@ -52,7 +52,7 @@ pub const capability_table = [_]Capability{
     .{ .enhancement = .super_fx, .disposition = .base_implemented, .planned_version = "0.73.14" },
     .{ .enhancement = .sa1, .disposition = .base_implemented, .planned_version = "0.73.15" },
     .{ .enhancement = .cx4, .disposition = .base_implemented, .planned_version = "0.73.16" },
-    .{ .enhancement = .dsp1_family, .disposition = .planned_user_firmware, .planned_version = "0.73.17", .firmware_bytes = 0x2000 },
+    .{ .enhancement = .dsp1_family, .disposition = .base_implemented, .planned_version = "0.73.17", .firmware_bytes = 0x2000 },
     .{ .enhancement = .st010_st011, .disposition = .planned_user_firmware, .planned_version = "0.73.18", .firmware_bytes = 0xD000 },
     .{ .enhancement = .st018, .disposition = .planned_user_firmware, .planned_version = "0.73.19", .firmware_bytes = 0x28000 },
     .{ .enhancement = .msu1, .disposition = .excluded, .planned_version = null },
@@ -189,7 +189,8 @@ pub fn mappingForMode(map_mode: u8) ?Mapping {
 
 pub fn mappingForHeader(map_mode: u8, enhancement: Enhancement) ?Mapping {
     return switch (enhancement) {
-        .sa1, .super_fx, .sdd1, .cx4, .obc1, .dsp1_family, .st010_st011, .st018 => .lo_rom,
+        .sa1, .super_fx, .sdd1, .cx4, .obc1, .st010_st011, .st018 => .lo_rom,
+        .dsp1_family => mappingForMode(map_mode),
         .srtc => .ex_hi_rom,
         .spc7110_epson_rtc => .hi_rom,
         else => mappingForMode(map_mode),

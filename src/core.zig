@@ -9,6 +9,7 @@ pub const dma = @import("dma.zig");
 pub const epson_rtc = @import("epson_rtc.zig");
 pub const host_adapter = @import("host_adapter.zig");
 pub const machine = @import("machine.zig");
+pub const nec_dsp = @import("nec_dsp.zig");
 pub const opcode = @import("opcode.zig");
 pub const obc1 = @import("obc1.zig");
 pub const persistence = @import("persistence.zig");

@@ -9,3 +9,8 @@ Design evidence is consulted in this order:
 No leaked Nintendo documentation, proprietary firmware, Nintendo boot ROM or
 commercial game ROM is a distributable dependency. Optional local test inputs
 remain outside this public repository and outside every R4OS image.
+
+NEC-DSP firmware SHA-256 identifiers and fixed file names are interoperability
+metadata, not embedded firmware. Public tests generate original uPD7725 code;
+the optional private gate reads user-owned images in place, emits no bytes and
+clears its buffers after each case.
