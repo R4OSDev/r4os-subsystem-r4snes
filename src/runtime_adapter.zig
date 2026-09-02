@@ -33,6 +33,8 @@ pub const Adapter = struct {
     audio_prefill_released: bool = false,
     audio_render_calls: u64 = 0,
     audio_feedback_calls: u64 = 0,
+    last_step_guest_ns: u64 = 0,
+    maximum_step_gap_ns: u64 = 0,
     transport_pending_bytes: u64 = 0,
     source_finished: bool = false,
     source_exit_code: i32 = 0,
@@ -65,6 +67,10 @@ pub const Adapter = struct {
 fn step(context: *anyopaque, budget: u32, guest_now_ns: u64) runtime.StepResult {
     const self: *Adapter = @ptrCast(@alignCast(context));
     if (self.closed) return runtime.StepResult.fail(guest_closed);
+    if (self.last_step_guest_ns != 0) {
+        self.maximum_step_gap_ns = @max(self.maximum_step_gap_ns, guest_now_ns -| self.last_step_guest_ns);
+    }
+    self.last_step_guest_ns = guest_now_ns;
     if (!self.source_finished) {
         const result = self.source.step(budget, guest_now_ns);
         switch (result.status) {
@@ -96,6 +102,7 @@ fn reset(context: *anyopaque) i32 {
     self.transport_pending_bytes = 0;
     self.source_finished = false;
     self.source_exit_code = 0;
+    self.last_step_guest_ns = 0;
     return 0;
 }
 

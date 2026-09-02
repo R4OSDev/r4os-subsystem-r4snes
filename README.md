@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.19.0 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.20.0 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU in a productive
 `R4SUBSYS1` application host. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
@@ -47,7 +47,15 @@ caller-owned 48-kHz PCM through App-Audio. Reset creates fresh machine, save,
 video and audio generations. Close and every open-error path unwind in reverse
 order and are repeat-idempotent. This establishes automatic product-host
 operation without making a commercial-ROM playability claim before the final
-manual acceptance.
+manual acceptance. Four deterministic cartridges generated exclusively from
+R4OS source now drive the installed Explorer/Desktop path: `.sfc`, `.smc`
+with SRAM and Epson RTC, an invalid header, and a firmware-required DSP-1
+board. Two productive instances run concurrently for at least 60 seconds of
+pause-corrected guest time, exercise all twelve physical keyboard controls,
+native video, App-Audio, reset and separate completion/close paths, while the
+two failures remain visible until cooperatively closed. SNES probing reads no
+content because the format has no universal fixed-position magic; R4SNES alone
+loads and validates the complete cartridge.
 
 Battery-backed SRAM and SA-1 BW-RAM persist as one exact
 board-sized `HASH.SAV` below

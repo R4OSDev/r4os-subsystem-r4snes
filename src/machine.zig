@@ -57,7 +57,10 @@ const SystemMmio = struct {
 
     pub fn onMasterTick(self: *SystemMmio, clock: *const timing.Clock) void {
         self.display.onMasterTick(clock);
-        _ = self.audio.advanceOscillator(clock.profile().master_hz, 1);
+    }
+
+    pub fn filteredMasterTickRequired(self: *const SystemMmio, clock: *const timing.Clock) bool {
+        return self.display.masterTickRequired(clock);
     }
 
     pub fn synchronizeClock(self: *const SystemMmio, clock: *timing.Clock) void {
@@ -87,8 +90,11 @@ pub const Machine = struct {
         return .{ .instance_id = instance_id };
     }
 
-    pub fn power(instance_id: u64, cart: *const cartridge.Cartridge, exact_ipl: ?[]const u8) !Machine {
-        var result = Machine.init(instance_id);
+    /// Powers a caller-owned machine at its final address. Product hosts use
+    /// this entry so the roughly two-megabyte PPU/SMP state is never returned
+    /// through an app-stack temporary.
+    pub fn powerInPlace(result: *Machine, instance_id: u64, cart: *const cartridge.Cartridge, exact_ipl: ?[]const u8) !void {
+        result.* = .{ .instance_id = instance_id };
         result.board = cart.board;
         result.coprocessors.selected = cart.board.capability.enhancement;
         result.clock = timing.Clock.init(if (cart.board.region == .pal) .pal else .ntsc);
@@ -98,6 +104,11 @@ pub const Machine = struct {
             try result.smp.installExactIpl(firmware);
             result.smp.reset();
         }
+    }
+
+    pub fn power(instance_id: u64, cart: *const cartridge.Cartridge, exact_ipl: ?[]const u8) !Machine {
+        var result: Machine = undefined;
+        try powerInPlace(&result, instance_id, cart, exact_ipl);
         return result;
     }
 
@@ -128,7 +139,9 @@ pub const Machine = struct {
         const start = self.clock.master_cycles;
         const start_frame = self.ppu.frame_generation;
         while (self.clock.master_cycles -% start < granted) {
-            if (self.runOperation(cart)) |fault| {
+            const consumed = self.clock.master_cycles -% start;
+            const remaining: u32 = @intCast(@as(u64, granted) - consumed);
+            if (self.runOperation(cart, remaining)) |fault| {
                 const executed = self.clock.master_cycles -% start;
                 self.host_budget.reconcile(granted, executed);
                 return .{
@@ -161,7 +174,7 @@ pub const Machine = struct {
         self.smp.removeExactIpl();
     }
 
-    fn runOperation(self: *Machine, cart: *cartridge.Cartridge) ?RunFault {
+    fn runOperation(self: *Machine, cart: *cartridge.Cartridge, maximum_master_cycles: u32) ?RunFault {
         self.cpu.setIrqLine(self.scpu.irq_flag or cart.sa1CpuIrqPending() or cart.cx4CpuIrqPending());
         var mmio = SystemMmio{ .display = &self.ppu, .audio = &self.smp };
         var port = scpu.TimedPortWithDevice(*SystemMmio){
@@ -175,13 +188,26 @@ pub const Machine = struct {
         };
         const before = self.clock.master_cycles;
         if (port.cpuReady()) {
-            _ = self.cpu.step(&port) catch return .cpu;
+            if (self.cpu.canFastForwardWaiting() and
+                self.scpu.math_operation == .none and
+                self.scpu.dma_enable == 0 and self.scpu.hdma_enable == 0)
+            {
+                _ = port.fastForwardWaiting(maximum_master_cycles);
+            } else {
+                _ = self.cpu.step(&port) catch return .cpu;
+            }
         } else {
             const result = port.serviceDmaStep();
             if (!result.progressed) return .dma_stalled;
         }
+        const elapsed = self.clock.master_cycles -% before;
+        // S-SMP execution is already synchronized only at complete S-CPU or
+        // DMA operations. Accumulating its oscillator phase once for that
+        // exact span is arithmetically identical to one division per master
+        // clock and removes the dominant product-host hot path.
+        _ = self.smp.advanceOscillator(self.clock.profile().master_hz, elapsed);
         if (self.serviceSmp()) return .smp;
-        return self.serviceCoprocessors(cart, self.clock.master_cycles -% before);
+        return self.serviceCoprocessors(cart, elapsed);
     }
 
     fn serviceSmp(self: *Machine) bool {

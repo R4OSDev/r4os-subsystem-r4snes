@@ -187,34 +187,50 @@ pub const Ppu = struct {
         self.frame = beam_frame;
     }
 
+    /// True only for clocks which can change rendered or published PPU state.
+    /// The production machine uses this predicate to avoid entering the full
+    /// renderer on blank clocks; direct timing harnesses still observe every
+    /// clock through `onMasterTick`.
+    pub fn masterTickRequired(self: *const Ppu, clock: *const timing.Clock) bool {
+        if (clock.h_counter == 0) return true;
+        const height = self.visibleHeight();
+        if (clock.v_counter < 1 or clock.v_counter > height or clock.h_counter < visible_h_start) return false;
+        const width = self.nativeWidth();
+        const clocks_per_pixel: u16 = if (width == hires_width) 2 else 4;
+        const relative = clock.h_counter - visible_h_start;
+        return relative < width * clocks_per_pixel and relative % clocks_per_pixel == 0;
+    }
+
     /// Observe one physical master clock. Register changes affect the first
     /// not-yet-produced pixel; OAM evaluation remains scanline-latched.
     pub fn onMasterTick(self: *Ppu, clock: *const timing.Clock) void {
         self.setBeam(clock.h_counter, clock.v_counter, clock.frame);
         self.region = clock.region;
-        if (clock.h_counter == 0 and clock.v_counter == 0) self.beginField(clock.field);
-        const height = self.visibleHeight();
-        if (clock.h_counter == 0 and clock.v_counter >= 1 and clock.v_counter <= height) {
-            self.prepareSpriteLine(clock.v_counter - 1);
+        // Beam-line events are the only non-pixel work. Keep the overwhelmingly
+        // common clocks out of geometry and modulo calculations while retaining
+        // the same physical event order and continuously observable beam state.
+        if (clock.h_counter == 0) {
+            if (clock.v_counter == 0) self.beginField(clock.field);
+            const height = self.visibleHeight();
+            if (clock.v_counter >= 1 and clock.v_counter <= height) {
+                self.prepareSpriteLine(clock.v_counter - 1);
+            } else if (clock.v_counter == height + 1 and self.last_published_beam_frame != clock.frame) {
+                if (!self.interlace or (clock.field and self.interlace_pair_started)) {
+                    self.publishFrame(clock.frame);
+                    self.interlace_pair_started = false;
+                }
+                self.last_published_beam_frame = clock.frame;
+            }
+            return;
         }
+
+        const height = self.visibleHeight();
+        if (clock.v_counter < 1 or clock.v_counter > height or clock.h_counter < visible_h_start) return;
         const width = self.nativeWidth();
         const clocks_per_pixel: u16 = if (width == hires_width) 2 else 4;
-        if (clock.v_counter >= 1 and clock.v_counter <= height and
-            clock.h_counter >= visible_h_start and clock.h_counter < visible_h_start + width * clocks_per_pixel and
-            (clock.h_counter - visible_h_start) % clocks_per_pixel == 0)
-        {
-            const x: u16 = (clock.h_counter - visible_h_start) / clocks_per_pixel;
-            self.renderPixel(x, clock.v_counter - 1, clock.field);
-        }
-        if (clock.h_counter == 0 and clock.v_counter == height + 1 and
-            self.last_published_beam_frame != clock.frame)
-        {
-            if (!self.interlace or (clock.field and self.interlace_pair_started)) {
-                self.publishFrame(clock.frame);
-                self.interlace_pair_started = false;
-            }
-            self.last_published_beam_frame = clock.frame;
-        }
+        const relative = clock.h_counter - visible_h_start;
+        if (relative >= width * clocks_per_pixel or relative % clocks_per_pixel != 0) return;
+        self.renderPixel(relative / clocks_per_pixel, clock.v_counter - 1, clock.field);
     }
 
     pub fn renderScanline(self: *Ppu, y: u16) void {
@@ -534,6 +550,15 @@ pub const Ppu = struct {
         if (self.forced_blank) {
             self.working_frame[index] = 0xff000000;
             self.sub_line[x] = 0xff000000;
+            return;
+        }
+        // With no main/sub layers, clipping or colour math the hardware emits
+        // the backdrop on both paths. This common boot/menu state needs no
+        // candidate construction or window composition.
+        if (self.main_enable == 0 and self.sub_enable == 0 and self.clip_mode == 0 and self.colour_math_enable == 0) {
+            const backdrop = self.toXrgb(self.colour(0));
+            self.working_frame[index] = backdrop;
+            self.sub_line[x] = backdrop;
             return;
         }
         const logical_x: u16 = if (self.nativeWidth() == hires_width) x >> 1 else x;

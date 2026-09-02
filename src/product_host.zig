@@ -107,6 +107,11 @@ pub const GuestStats = struct {
     input_events: u64 = 0,
 };
 
+pub const CompletionWitness = struct {
+    wram_index: usize,
+    value: u8,
+};
+
 /// Owns every mutable object belonging to one R4SUBSYS1 launch. `openOwned`
 /// is called only after this value reached its final address because the
 /// runtime source keeps a pointer to the Guest itself.
@@ -133,6 +138,9 @@ pub const Guest = struct {
     focused: bool = false,
     last_host_tick: u64 = 0,
     close_result: i32 = 0,
+    completion_witness: ?CompletionWitness = null,
+    guest_time_limit_ns: ?u64 = null,
+    last_effective_guest_ns: u64 = 0,
     stats: GuestStats = .{},
 
     pub fn init(
@@ -165,7 +173,7 @@ pub const Guest = struct {
         errdefer parsed.deinit();
         const created = try self.allocator.create(machine_module.Machine);
         errdefer self.allocator.destroy(created);
-        created.* = try machine_module.Machine.power(self.instance_id, &parsed, self.exactIpl());
+        try machine_module.Machine.powerInPlace(created, self.instance_id, &parsed, self.exactIpl());
         errdefer created.close();
         const point = self.time.now();
         var session = try persistence.Session.open(
@@ -212,6 +220,21 @@ pub const Guest = struct {
         const cart = if (self.cartridge) |*value| value else return "Cartridge";
         const value = std.mem.trimEnd(u8, cart.header.title[0..], " \x00");
         return if (value.len == 0) "Cartridge" else value;
+    }
+
+    pub fn setCompletionWitness(self: *Guest, witness: CompletionWitness) !void {
+        if (witness.wram_index >= self.busWramLength()) return error.InvalidCompletionWitnessAddress;
+        self.completion_witness = witness;
+    }
+
+    pub fn setGuestTimeLimit(self: *Guest, guest_nanoseconds: u64) !void {
+        if (guest_nanoseconds == 0 or self.state != .running) return error.InvalidGuestTimeLimit;
+        self.guest_time_limit_ns = guest_nanoseconds;
+        self.last_effective_guest_ns = 0;
+    }
+
+    pub fn effectiveGuestNanoseconds(self: *const Guest) u64 {
+        return self.last_effective_guest_ns;
     }
 
     pub fn driver(self: *Guest) runtime_api.GuestDriver {
@@ -282,7 +305,8 @@ pub const Guest = struct {
         const replacement_machine = self.allocator.create(machine_module.Machine) catch return reset_error_machine;
         var replacement_machine_owned = true;
         defer if (replacement_machine_owned) self.allocator.destroy(replacement_machine);
-        replacement_machine.* = machine_module.Machine.power(
+        machine_module.Machine.powerInPlace(
+            replacement_machine,
             self.instance_id,
             &replacement_cart,
             self.exactIpl(),
@@ -328,6 +352,7 @@ pub const Guest = struct {
         });
         self.runtime_guest_ready = true;
         self.focused = false;
+        self.last_effective_guest_ns = 0;
         _ = host_adapter.applyInput(&replacement_machine.controllers, 0, .reset);
         if (self.presenter) |presenter| {
             self.video.bind(&replacement_machine.ppu, presenter, self.generation) catch return reset_error_video;
@@ -427,7 +452,9 @@ pub const Guest = struct {
         if (self.state != .running) return runtime_api.StepResult.fail(runtime_error_closed);
         const machine = self.machine orelse return runtime_api.StepResult.fail(runtime_error_closed);
         const cart = if (self.cartridge) |*value| value else return runtime_api.StepResult.fail(runtime_error_closed);
-        const result = machine.runHostSlice(cart, budget, guest_now_ns);
+        const effective_guest_ns = if (self.guest_time_limit_ns) |limit| @min(guest_now_ns, limit) else guest_now_ns;
+        self.last_effective_guest_ns = effective_guest_ns;
+        const result = machine.runHostSlice(cart, budget, effective_guest_ns);
         self.stats.slices +%= 1;
         self.stats.maximum_slice_grant = @max(self.stats.maximum_slice_grant, result.granted_master_cycles);
         self.stats.maximum_slice_execution = @max(self.stats.maximum_slice_execution, result.executed_master_cycles);
@@ -444,12 +471,25 @@ pub const Guest = struct {
                 .withOperations(result.granted_master_cycles);
             if (flushed) self.stats.flushes +%= 1;
         }
+        if (self.completion_witness) |witness| {
+            if (machine.bus.wram[witness.wram_index] == witness.value and
+                machine.host_budget.pending_master_cycles == 0)
+            {
+                return runtime_api.StepResult.complete(0, result.frame_ready)
+                    .withOperations(result.granted_master_cycles);
+            }
+        }
         if (result.granted_master_cycles == 0) {
             return runtime_api.StepResult.waitUntil(guest_now_ns +| idle_interval_ns, result.frame_ready)
                 .withOperations(0);
         }
         return runtime_api.StepResult.progress(result.frame_ready)
             .withOperations(result.granted_master_cycles);
+    }
+
+    fn busWramLength(self: *const Guest) usize {
+        if (self.machine) |machine| return machine.bus.wram.len;
+        return 128 * 1024;
     }
 
     fn step(context: *anyopaque, budget: u32, guest_now_ns: u64) runtime_api.StepResult {

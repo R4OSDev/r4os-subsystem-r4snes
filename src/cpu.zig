@@ -1,3 +1,4 @@
+const std = @import("std");
 const opcode = @import("opcode.zig");
 
 pub const Operation = opcode.Operation;
@@ -104,6 +105,23 @@ pub const Cpu = struct {
 
     pub fn setIrqLine(self: *Cpu, asserted: bool) void {
         self.irq_line = asserted;
+    }
+
+    /// A WAI loop has no CPU-side work until an interrupt edge arrives.  The
+    /// machine may account a clock span in one operation only while no edge is
+    /// already pending; the next scanline boundary remains an explicit
+    /// scheduling point so NMI timing is not delayed.
+    pub fn canFastForwardWaiting(self: *const Cpu) bool {
+        return self.waiting and !self.stopped and !self.reset_pending and
+            !self.abort_pending and !self.nmi_pending and !self.irq_line;
+    }
+
+    pub fn accountWaitingMasterCycles(self: *Cpu, elapsed: u32) void {
+        // An NMI may become pending inside the accounted span; WAI remains
+        // set until the following CPU operation acknowledges that edge.
+        std.debug.assert(self.waiting and elapsed != 0);
+        self.trace_len = 0;
+        self.master_cycles +%= elapsed;
     }
 
     pub fn requestAbort(self: *Cpu, restart_address: u32) void {

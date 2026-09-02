@@ -1,3 +1,4 @@
+const std = @import("std");
 const bus_mod = @import("bus.zig");
 const cartridge_mod = @import("cartridge.zig");
 const controller_mod = @import("controller.zig");
@@ -232,18 +233,30 @@ pub const Scpu = struct {
         if (refresh_start) self.mixEvent(0x52454652455348);
         if (refresh_wait and clock.refresh_active_remaining % 8 == 0) self.aluEdge();
 
-        const vblank = clock.inVblank();
-        if (vblank and !self.last_vblank) {
-            self.nmi_flag = true;
-            if (self.nmi_enabled) cpu.requestNmi();
-            self.mixEvent(0x4e4d49);
-        } else if (!vblank and self.last_vblank) {
-            self.nmi_flag = false;
-            self.auto_joy_counter = 33;
+        // Vblank can only change at a scanline boundary. Evaluating it on all
+        // 1,364 clocks of the line is redundant and particularly expensive
+        // under an instruction-translating host such as QEMU TCG.
+        if (clock.h_counter == 0) {
+            const vblank = clock.inVblank();
+            if (vblank and !self.last_vblank) {
+                self.nmi_flag = true;
+                if (self.nmi_enabled) cpu.requestNmi();
+                self.mixEvent(0x4e4d49);
+            } else if (!vblank and self.last_vblank) {
+                self.nmi_flag = false;
+                self.auto_joy_counter = 33;
+            }
+            self.last_vblank = vblank;
         }
-        self.last_vblank = vblank;
 
-        if ((clock.master_cycles & 3) == 0) self.pollInterrupts(clock, cpu);
+        if ((clock.master_cycles & 3) == 0) {
+            if (self.h_irq_enabled or self.v_irq_enabled) {
+                self.pollInterrupts(clock, cpu);
+            } else {
+                self.interrupt_polls +%= 1;
+                self.irq_match = false;
+            }
+        }
         if ((clock.master_cycles & 127) == 0) self.joypadEdge(clock, ports);
         if (clock.v_counter == 0 and clock.h_counter == 12) self.dma.beginFrame();
         if (clock.v_counter < clock.profile().vblank_start and clock.h_counter == 1_104) self.dma.beginHblank();
@@ -394,7 +407,32 @@ fn EventSink(comptime Device: type) type {
 
         pub fn onMasterTick(self: *Self, clock: *const timing.Clock, refresh_start: bool, refresh_wait: bool) void {
             self.scpu.onMasterTick(clock, self.ports, self.cpu, refresh_start, refresh_wait);
-            if (comptime deviceObservesMasterClock(Device)) self.device.onMasterTick(clock);
+            if (comptime deviceObservesMasterClock(Device)) {
+                if (comptime deviceFiltersMasterClock(Device)) {
+                    if (self.device.filteredMasterTickRequired(clock)) self.device.onMasterTick(clock);
+                } else {
+                    self.device.onMasterTick(clock);
+                }
+            }
+        }
+
+        /// Product devices may prove that a physical clock has no observable
+        /// S-CPU or device event. The Clock still advances every master tick;
+        /// only the expensive device dispatch is elided.
+        pub fn filteredMasterTickRequired(self: *const Self, clock: *const timing.Clock, refresh_start: bool, refresh_wait: bool) bool {
+            if (comptime !deviceFiltersMasterClock(Device)) return true;
+            if (refresh_start or (refresh_wait and clock.refresh_active_remaining % 8 == 0)) return true;
+            if (clock.h_counter == 0 or clock.h_counter == 12) return true;
+            if (clock.v_counter < clock.profile().vblank_start and clock.h_counter == 1_104) return true;
+            if ((clock.master_cycles & 127) == 0) return true;
+            if ((self.scpu.h_irq_enabled or self.scpu.v_irq_enabled) and (clock.master_cycles & 3) == 0) return true;
+            return self.device.filteredMasterTickRequired(clock);
+        }
+
+        pub fn onSkippedMasterTick(self: *Self, clock: *const timing.Clock) void {
+            // With IRQ comparison disabled, a poll has no behavioural effect;
+            // preserve its diagnostic counter without entering Scpu.
+            if ((clock.master_cycles & 3) == 0) self.scpu.interrupt_polls +%= 1;
         }
     };
 }
@@ -405,6 +443,14 @@ fn deviceObservesMasterClock(comptime Device: type) bool {
         else => Device,
     };
     return @hasDecl(Owner, "onMasterTick");
+}
+
+fn deviceFiltersMasterClock(comptime Device: type) bool {
+    const Owner = switch (@typeInfo(Device)) {
+        .pointer => |pointer| pointer.child,
+        else => Device,
+    };
+    return @hasDecl(Owner, "filteredMasterTickRequired");
 }
 
 fn deviceSynchronizesClock(comptime Device: type) bool {
@@ -450,6 +496,25 @@ pub fn TimedPortWithDevice(comptime Device: type) type {
             var events = self.makeSink();
             const elapsed = self.clock.advanceCpuCycle(6, &events);
             self.scpu.aluEdge();
+            return elapsed;
+        }
+
+        /// Advance an interrupt-free WAI interval without repeatedly entering
+        /// the instruction decoder.  A span ends after observing at most the
+        /// next scanline-start event, where vblank may assert NMI.  Every
+        /// physical clock still passes through Clock and the normal event
+        /// sink, so PPU, joypad, refresh and diagnostic ordering are retained.
+        pub fn fastForwardWaiting(self: *Self, maximum_master_cycles: u32) u32 {
+            std.debug.assert(maximum_master_cycles != 0);
+            std.debug.assert(self.cpu.canFastForwardWaiting());
+            const until_scanline_event: u32 = if (self.clock.h_counter == 0)
+                1
+            else
+                @as(u32, self.clock.lineMasterCycles() - self.clock.h_counter) + 1;
+            const requested = @min(maximum_master_cycles, until_scanline_event);
+            var events = self.makeSink();
+            const elapsed = self.clock.runSlice(requested, &events);
+            self.cpu.accountWaitingMasterCycles(elapsed);
             return elapsed;
         }
 

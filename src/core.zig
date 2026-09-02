@@ -8,6 +8,7 @@ pub const coprocessors = @import("coprocessors.zig");
 pub const cpu = @import("cpu.zig");
 pub const dma = @import("dma.zig");
 pub const epson_rtc = @import("epson_rtc.zig");
+pub const fixture_rom = @import("fixture_rom.zig");
 pub const host_adapter = @import("host_adapter.zig");
 pub const machine = @import("machine.zig");
 pub const nec_dsp = @import("nec_dsp.zig");

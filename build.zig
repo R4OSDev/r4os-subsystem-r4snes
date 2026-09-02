@@ -27,6 +27,25 @@ pub fn build(b: *std.Build) void {
     run_wav_analyzer.addFileArg(b.path("Tests/Analyze-SdspWav.ps1"));
     run_wav_analyzer.addArg("-SelfTest");
 
+    const performance_r4os = sdk.createR4osModule(b.graph.host, .ReleaseFast);
+    const performance_core = b.createModule(.{
+        .root_source_file = b.path("src/core.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    performance_core.addImport("r4os", performance_r4os);
+    const performance_root = b.createModule(.{
+        .root_source_file = b.path("Tests/performance_harness.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    performance_root.addImport("core", performance_core);
+    const performance_harness = b.addExecutable(.{
+        .name = "r4snes-performance-harness",
+        .root_module = performance_root,
+    });
+    const run_performance = b.addRunArtifact(performance_harness);
+
     const reference_root = b.createModule(.{
         .root_source_file = b.path("Tests/reference_harness.zig"),
         .target = b.graph.host,
@@ -172,6 +191,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_wav_analyzer.step);
+
+    const performance_step = b.step("performance-test", "Measure one deterministic NTSC guest second in ReleaseFast");
+    performance_step.dependOn(&run_performance.step);
 
     const reference_step = b.step("reference-test", "Execute pinned SNES qualification ROMs, models and all SPC700 vectors");
     reference_step.dependOn(&run_references.step);

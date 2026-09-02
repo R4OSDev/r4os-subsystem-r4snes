@@ -266,8 +266,13 @@ test "WAI wakes on masked IRQ while STP only leaves through reset" {
 
     _ = try cpu.step(&port);
     try std.testing.expect(cpu.waiting);
+    try std.testing.expect(cpu.canFastForwardWaiting());
+    const cycles_before_fast_forward = cpu.master_cycles;
+    cpu.accountWaitingMasterCycles(1_364);
+    try std.testing.expectEqual(cycles_before_fast_forward + 1_364, cpu.master_cycles);
     try std.testing.expectEqual(core.cpu.StepState.waiting, (try cpu.step(&port)).state);
     cpu.setIrqLine(true);
+    try std.testing.expect(!cpu.canFastForwardWaiting());
     try std.testing.expectEqual(core.cpu.StepState.awakened, (try cpu.step(&port)).state);
     try std.testing.expect(!cpu.waiting);
     cpu.setIrqLine(false);

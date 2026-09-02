@@ -189,7 +189,15 @@ pub const Clock = struct {
 
         // Fixed order at each physical clock: refresh edge, S-CPU consumers,
         // APU phase accumulator, then the beam/canonical master timestamp.
-        sink.onMasterTick(self, refresh_start, refresh_wait);
+        if (comptime sinkFiltersMasterClock(@TypeOf(sink))) {
+            if (sink.filteredMasterTickRequired(self, refresh_start, refresh_wait)) {
+                sink.onMasterTick(self, refresh_start, refresh_wait);
+            } else {
+                sink.onSkippedMasterTick(self);
+            }
+        } else {
+            sink.onMasterTick(self, refresh_start, refresh_wait);
+        }
         self.apu_phase += apu_bus_hz;
         while (self.apu_phase >= self.profile().master_hz) {
             self.apu_phase -= self.profile().master_hz;
@@ -214,3 +222,11 @@ pub const Clock = struct {
         return refresh_start;
     }
 };
+
+fn sinkFiltersMasterClock(comptime Sink: type) bool {
+    const Owner = switch (@typeInfo(Sink)) {
+        .pointer => |pointer| pointer.child,
+        else => Sink,
+    };
+    return @hasDecl(Owner, "filteredMasterTickRequired") and @hasDecl(Owner, "onSkippedMasterTick");
+}

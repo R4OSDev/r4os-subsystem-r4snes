@@ -43,18 +43,29 @@ const error_save_open: i32 = 77;
 const error_save_close: i32 = 78;
 const error_host_video: i32 = 79;
 const error_runtime: i32 = 80;
+const error_host_selftest: i32 = 96;
+const error_e2e_trace: i32 = 97;
+const e2e_guest_duration_ns: u64 = 60 * std.time.ns_per_s;
 const audio_service_timeout_ns: u64 = 50 * std.time.ns_per_ms;
 const audio_close_timeout_ns: u64 = 500 * std.time.ns_per_ms;
 const product_audio_target_quanta: u16 = 2;
 const product_audio_max_catchup_quanta: u16 = 16;
+const host_selftest_marker_path = "C:\\TEMP\\R4SNES.HOST";
+const host_selftest_marker = "R4SNES fixture generation: OK origin=R4OS-original formats=.sfc+.smc cases=rom-only+battery-rtc+invalid+firmware-required private-rom=excluded\r\n";
+const e2e_fixture_a_path = "C:\\TEMP\\R4SNES-E2E-A.SFC";
+const e2e_fixture_b_path = "C:\\TEMP\\R4SNES-E2E-B.SMC";
+const e2e_fixture_invalid_path = "C:\\TEMP\\R4SNES-INVALID.SFC";
+const e2e_fixture_firmware_path = "C:\\TEMP\\R4SNES-DSP-REQUIRED.SFC";
+const e2e_end_key = "end";
 
 pub fn r4_app_main(app: *r4os.App) i32 {
     if (std.mem.indexOf(u8, app.args(), "/PERSISTTEST") != null) return persistenceSelfTest(app);
+    if (std.mem.indexOf(u8, app.args(), "/HOSTTEST") != null) return hostSelfTest(app);
     if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
     return runProduct(app);
 }
 
-fn runProduct(app: *r4os.App) i32 {
+noinline fn runProduct(app: *r4os.App) i32 {
     if (app.profile != .desktop) return error_profile;
     const sys = app.system();
     const allocator = app.allocator() orelse return error_allocator;
@@ -69,6 +80,7 @@ fn runProduct(app: *r4os.App) i32 {
             "Eine SFC-/SMC-Datei muss ueber Explorer oder Open With gestartet werden.",
         }, error_launch);
     };
+    const e2e_trace = E2eTrace.parse(launch);
     var path = r4os.AbsoluteFilePath.parse(launch.guest_path) catch {
         sys.println("R4SNES: invalid absolute cartridge path.");
         return showStatus(allocator, sys, desk, draw, "R4SNES - Startfehler", &.{
@@ -94,10 +106,19 @@ fn runProduct(app: *r4os.App) i32 {
     defer if (source) |bytes| secureFree(allocator, bytes);
 
     const requirement = core.cartridge.inspectNecDspRequirement(source.?, null) catch |fault| {
-        return showStatus(allocator, sys, desk, draw, "R4SNES - Cartridgefehler", &.{
+        const code = showStatus(allocator, sys, desk, draw, "R4SNES - Cartridgefehler", &.{
             cartridgeError(fault),
             launch.guest_path,
         }, error_cartridge);
+        if (e2e_trace.active) {
+            if (e2e_trace.expected_end != .reject_invalid or
+                !writeE2eRejection(&sys, e2e_trace, "invalid", fault))
+            {
+                _ = writeE2eFailure(&sys, e2e_trace, "inspect", fault, "none", 0);
+                return error_e2e_trace;
+            }
+        }
+        return code;
     };
     const st018_requirement = core.cartridge.inspectSt018Requirement(source.?) catch |fault| {
         return showStatus(allocator, sys, desk, draw, "R4SNES - Cartridgefehler", &.{
@@ -121,11 +142,20 @@ fn runProduct(app: *r4os.App) i32 {
         } else {
             separate_firmware = loadExactOwned(allocator, &files, needed.firmwarePath(), needed.firmwareBytes()) catch |fault| {
                 printNecDspFirmwareError(sys, needed, fault);
-                return showStatus(allocator, sys, desk, draw, "R4SNES - Firmwarefehler", &.{
+                const code = showStatus(allocator, sys, desk, draw, "R4SNES - Firmwarefehler", &.{
                     "Die benoetigte NEC-DSP-Firmware fehlt oder ist nicht lesbar.",
                     needed.firmwarePath(),
                     @errorName(fault),
                 }, error_firmware);
+                if (e2e_trace.active) {
+                    if (e2e_trace.expected_end != .reject_firmware or
+                        !writeE2eRejection(&sys, e2e_trace, "firmware", fault))
+                    {
+                        _ = writeE2eFailure(&sys, e2e_trace, "firmware", fault, "none", 0);
+                        return error_e2e_trace;
+                    }
+                }
+                return code;
             };
             _ = core.nec_dsp.validateFirmware(needed.revision, separate_firmware.?, .known_only) catch |fault| {
                 printNecDspFirmwareError(sys, needed, fault);
@@ -184,12 +214,32 @@ fn runProduct(app: *r4os.App) i32 {
         sys.write("R4SNES: cartridge rejected: ");
         sys.println(@errorName(fault));
         const code = openFailureCode(fault);
-        return showStatus(allocator, sys, desk, draw, "R4SNES - Cartridgefehler", &.{
+        const shown = showStatus(allocator, sys, desk, draw, "R4SNES - Cartridgefehler", &.{
             openFailureMessage(fault),
             launch.guest_path,
             @errorName(fault),
         }, code);
+        if (e2e_trace.active) {
+            _ = writeE2eFailure(&sys, e2e_trace, "open", fault, save_store.failureStageName(), save_store.failureCode());
+            return error_e2e_trace;
+        }
+        return shown;
     };
+    if (e2e_trace.active and (e2e_trace.expected_end == .witness or e2e_trace.expected_end == .close)) {
+        guest.setGuestTimeLimit(e2e_guest_duration_ns) catch {
+            _ = writeE2eFailure(&sys, e2e_trace, "time-limit", error.InvalidGuestTimeLimit, "none", 0);
+            return error_e2e_trace;
+        };
+    }
+    if (e2e_trace.active and e2e_trace.expected_end == .witness) {
+        guest.setCompletionWitness(.{
+            .wram_index = core.fixture_rom.completion_wram_index,
+            .value = core.fixture_rom.completion_witness_value,
+        }) catch {
+            _ = writeE2eFailure(&sys, e2e_trace, "witness", error.InvalidCompletionWitnessAddress, "none", 0);
+            return error_e2e_trace;
+        };
+    }
 
     const surface = guest.initialSurface() catch {
         return showStatus(allocator, sys, desk, draw, "R4SNES - Hostfehler", &.{
@@ -256,8 +306,82 @@ fn runProduct(app: *r4os.App) i32 {
     const exit_code = runtime.run(&sys, guest.driver(), runtime_host.driver());
     const runtime_state = runtime.state;
     const audio_degraded = runtime.audio.state == .degraded;
+    const runtime_stats = runtime.stats;
+    const audio_stats = runtime.audio.stats;
+    const guest_ns = if (e2e_trace.active) guest.effectiveGuestNanoseconds() else runtime.clock.guest_ns;
+    const machine = guest.machine.?;
+    const guest_cycles = machine.clock.master_cycles;
+    const master_hz = machine.clock.profile().master_hz;
+    const expected_cycles: u64 = @intCast((@as(u128, guest_ns) * master_hz) / std.time.ns_per_s);
+    const drift_cycles = if (guest_cycles >= expected_cycles) guest_cycles - expected_cycles else expected_cycles - guest_cycles;
+    const pending_cycles = machine.host_budget.pending_master_cycles;
+    const ppu_frames = machine.clock.frame;
+    const dsp_stats = machine.smp.dsp.stats;
+    const dsp_queued_frames = machine.smp.dsp.queuedFrames();
+    const maximum_step_gap_ns = guest.runtime_guest.maximum_step_gap_ns;
+    const controller_witness = @as(u16, machine.bus.wram[core.fixture_rom.controller_low_wram_index]) |
+        (@as(u16, machine.bus.wram[core.fixture_rom.controller_high_wram_index]) << 8);
+    const completion_seen = machine.bus.wram[core.fixture_rom.completion_wram_index] == core.fixture_rom.completion_witness_value;
+    const battery = guest.cartridge.?.board.battery;
+    const rtc = guest.save_session.?.rtc_record != null;
+    const save_bytes = guest.cartridge.?.sram_storage.len;
+    const identity = guest.cartridge.?.identity;
+    const guest_stats = guest.stats;
+    const published_frames = window.video.stats.published_frames;
     runtime.shutdown();
     const close_result = guest.close();
+    const persistence_stats = save_store.stats;
+    const save_files = persistenceFilesPresent(&files, &identity, save_bytes, rtc);
+    if (e2e_trace.active) {
+        const expected_state: runtime_api.LifecycleState = switch (e2e_trace.expected_end) {
+            .witness => .completed,
+            .close => .closed,
+            .reject_invalid, .reject_firmware => runtime_state,
+        };
+        const end_ok = runtime_state == expected_state and switch (e2e_trace.expected_end) {
+            .witness => completion_seen,
+            .close => true,
+            .reject_invalid, .reject_firmware => false,
+        };
+        const persistence_ok = !battery or (save_files and persistence_stats.errors == 0 and persistence_stats.started != 0 and persistence_stats.completed != 0);
+        const e2e_ok = exit_code == 0 and end_ok and close_result == 0 and !guest.resourcesOpen() and
+            guest_ns != 0 and guest_cycles != 0 and ppu_frames != 0 and published_frames != 0 and
+            drift_cycles <= product_host.slice_budget_master_cycles + 64 and
+            pending_cycles <= product_host.slice_budget_master_cycles and
+            guest_stats.maximum_slice_grant <= product_host.slice_budget_master_cycles and
+            guest_stats.maximum_slice_execution <= product_host.slice_budget_master_cycles + 64 and
+            controller_witness != 0 and runtime_stats.input_events != 0 and
+            audio_stats.writes != 0 and audio_stats.write_failures == 0 and
+            dsp_stats.frames_rendered != 0 and dsp_stats.frames_dropped == 0 and
+            dsp_stats.frames_rendered > dsp_stats.silence_frames and persistence_ok and !audio_degraded;
+        if (!writeE2eRuntimeReport(
+            &sys,
+            e2e_trace,
+            launch.guest_path,
+            e2e_ok,
+            battery,
+            rtc,
+            save_files,
+            guest_cycles,
+            guest_ns,
+            drift_cycles,
+            pending_cycles,
+            master_hz,
+            ppu_frames,
+            runtime_stats,
+            audio_stats,
+            dsp_stats,
+            dsp_queued_frames,
+            maximum_step_gap_ns,
+            controller_witness,
+            completion_seen,
+            guest_stats,
+            persistence_stats,
+            published_frames,
+            close_result,
+        )) return error_e2e_trace;
+        if (!e2e_ok) return error_e2e_trace;
+    }
     if (close_result != 0) {
         var storage_text: [128]u8 = undefined;
         const rendered = std.fmt.bufPrint(storage_text[0..], "Speicherstufe: {s}, Dateisystemcode: {d}", .{
@@ -278,6 +402,198 @@ fn runProduct(app: *r4os.App) i32 {
         rendered,
         if (audio_degraded) "Audio war degradiert; Video und Eingabe liefen unabhaengig weiter." else "Alle Instanzressourcen wurden freigegeben.",
     }, if (exit_code == 0) error_runtime else exit_code);
+}
+
+const E2eTrace = struct {
+    const ExpectedEnd = enum { close, witness, reject_invalid, reject_firmware };
+
+    active: bool = false,
+    id: []const u8 = "",
+    expected_end: ExpectedEnd = .close,
+
+    fn parse(request: r4os.subsystem_launch.Request) E2eTrace {
+        const mode = (request.option(r4os.subsystem_launch.trace_mode_key) catch null) orelse return .{};
+        if (!std.ascii.eqlIgnoreCase(mode, r4os.subsystem_launch.trace_mode_headless)) return .{};
+        const id = (request.option(r4os.subsystem_launch.trace_key) catch null) orelse return .{};
+        if (id.len != 16) return .{};
+        for (id) |byte| if (!std.ascii.isHex(byte)) return .{};
+        const end_text = (request.option(e2e_end_key) catch null) orelse return .{};
+        const expected_end: ExpectedEnd = if (std.ascii.eqlIgnoreCase(end_text, "close"))
+            .close
+        else if (std.ascii.eqlIgnoreCase(end_text, "witness"))
+            .witness
+        else if (std.ascii.eqlIgnoreCase(end_text, "reject-invalid"))
+            .reject_invalid
+        else if (std.ascii.eqlIgnoreCase(end_text, "reject-firmware"))
+            .reject_firmware
+        else
+            return .{};
+        return .{ .active = true, .id = id, .expected_end = expected_end };
+    }
+
+    fn endName(self: E2eTrace) []const u8 {
+        return switch (self.expected_end) {
+            .reject_invalid => "reject-invalid",
+            .reject_firmware => "reject-firmware",
+            else => @tagName(self.expected_end),
+        };
+    }
+};
+
+fn e2eReportPath(trace: E2eTrace, storage: *[96]u8) ?[*:0]const u8 {
+    const path = std.fmt.bufPrintZ(storage[0..], "C:\\TEMP\\R4SNES-{s}.REPORT", .{trace.id}) catch return null;
+    return path.ptr;
+}
+
+fn writeE2eRejection(
+    sys: *const r4os.r4sys.Context,
+    trace: E2eTrace,
+    class: []const u8,
+    fault: anyerror,
+) bool {
+    var path_storage: [96]u8 = undefined;
+    const path = e2eReportPath(trace, &path_storage) orelse return false;
+    var report_storage: [256]u8 = undefined;
+    const report = std.fmt.bufPrint(
+        report_storage[0..],
+        "R4SNES E2E rejection: OK id={s} class={s} error={s} window=closed resources=closed\r\n",
+        .{ trace.id, class, @errorName(fault) },
+    ) catch return false;
+    return sys.fileWrite(path, report) == @as(i32, @intCast(report.len));
+}
+
+fn writeE2eFailure(
+    sys: *const r4os.r4sys.Context,
+    trace: E2eTrace,
+    phase: []const u8,
+    fault: anyerror,
+    storage_stage: []const u8,
+    storage_code: i32,
+) bool {
+    var path_storage: [96]u8 = undefined;
+    const path = e2eReportPath(trace, &path_storage) orelse return false;
+    var report_storage: [320]u8 = undefined;
+    const report = std.fmt.bufPrint(
+        report_storage[0..],
+        "R4SNES E2E diagnostic: FAILED id={s} phase={s} error={s} storage_stage={s} storage_code={d}\r\n",
+        .{ trace.id, phase, @errorName(fault), storage_stage, storage_code },
+    ) catch return false;
+    return sys.fileWrite(path, report) == @as(i32, @intCast(report.len));
+}
+
+fn writeE2eRuntimeReport(
+    sys: *const r4os.r4sys.Context,
+    trace: E2eTrace,
+    guest_path: []const u8,
+    ok: bool,
+    battery: bool,
+    rtc: bool,
+    save_files: bool,
+    guest_cycles: u64,
+    guest_ns: u64,
+    drift_cycles: u64,
+    pending_cycles: u64,
+    master_hz: u64,
+    ppu_frames: u64,
+    runtime_stats: runtime_api.RuntimeStats,
+    audio_stats: runtime_api.AudioStats,
+    dsp_stats: core.sdsp.AudioStats,
+    dsp_queued_frames: usize,
+    maximum_step_gap_ns: u64,
+    controller_witness: u16,
+    completion_seen: bool,
+    guest_stats: product_host.GuestStats,
+    persistence_stats: core.persistence_r4os.AsyncStats,
+    published_frames: u64,
+    close_result: i32,
+) bool {
+    var path_storage: [96]u8 = undefined;
+    const path = e2eReportPath(trace, &path_storage) orelse return false;
+    var report_storage: [1536]u8 = undefined;
+    const extension = if (endsWithIgnoreCase(guest_path, ".smc")) ".smc" else ".sfc";
+    const non_silent_frames = dsp_stats.frames_rendered -| dsp_stats.silence_frames;
+    const prefix_len = (std.fmt.bufPrint(
+        report_storage[0..],
+        "R4SNES E2E runtime: {s} id={s} extension={s} end={s} battery={d} rtc={d} guest_ns={d} guest_cycles={d} master_hz={d} drift_cycles={d} pending_cycles={d} ppu_frames={d} slices={d} max_slice_grant={d} max_slice_execution={d} max_step_gap_ns={d} input={d} controller=0x{x:0>4} completion={d} frames={d} dropped_presents={d} audio_writes={d} audio_busy={d} audio_failures={d} audio_late={d} audio_discarded={d} audio_suppressed={d}",
+        .{
+            if (ok) "OK" else "FAILED",
+            trace.id,
+            extension,
+            trace.endName(),
+            @intFromBool(battery),
+            @intFromBool(rtc),
+            guest_ns,
+            guest_cycles,
+            master_hz,
+            drift_cycles,
+            pending_cycles,
+            ppu_frames,
+            runtime_stats.slices,
+            guest_stats.maximum_slice_grant,
+            guest_stats.maximum_slice_execution,
+            maximum_step_gap_ns,
+            runtime_stats.input_events,
+            controller_witness,
+            @intFromBool(completion_seen),
+            published_frames,
+            runtime_stats.dropped_presents,
+            audio_stats.writes,
+            audio_stats.busy_writes,
+            audio_stats.write_failures,
+            audio_stats.late_resyncs,
+            audio_stats.discarded_bytes,
+            audio_stats.suppressed_bytes,
+        },
+    ) catch return false).len;
+    const suffix_len = (std.fmt.bufPrint(
+        report_storage[prefix_len..],
+        " dsp_native={d} dsp_resampled={d} dsp_rendered={d} dsp_non_silent={d} dsp_dropped={d} dsp_queued={d} save_async_started={d} save_async_completed={d} save_async_coalesced={d} save_async_errors={d} save_async_max_queued={d} pauses={d} resumes={d} resets={d} save_files={d} close={d} resources=closed\r\n",
+        .{
+            dsp_stats.native_frames,
+            dsp_stats.resampled_frames,
+            dsp_stats.frames_rendered,
+            non_silent_frames,
+            dsp_stats.frames_dropped,
+            dsp_queued_frames,
+            persistence_stats.started,
+            persistence_stats.completed,
+            persistence_stats.coalesced,
+            persistence_stats.errors,
+            persistence_stats.maximum_queued,
+            runtime_stats.pauses,
+            runtime_stats.resumes,
+            runtime_stats.resets,
+            @intFromBool(save_files),
+            close_result,
+        },
+    ) catch return false).len;
+    const report = report_storage[0 .. prefix_len + suffix_len];
+    return sys.fileWrite(path, report) == @as(i32, @intCast(report.len));
+}
+
+fn persistenceFilesPresent(
+    files: *const r4os.Files,
+    digest: *const [core.persistence.digest_bytes]u8,
+    ram_bytes: usize,
+    has_rtc: bool,
+) bool {
+    if (ram_bytes != 0) {
+        const path = core.persistence_r4os.dataPath(digest, .sram) catch return false;
+        const info = switch (files.info(path.asZ())) {
+            .value => |value| value,
+            .missing, .failure => return false,
+        };
+        if (info.is_dir != 0 or info.size != ram_bytes) return false;
+    }
+    if (has_rtc) {
+        const path = core.persistence_r4os.dataPath(digest, .rtc) catch return false;
+        const info = switch (files.info(path.asZ())) {
+            .value => |value| value,
+            .missing, .failure => return false,
+        };
+        if (info.is_dir != 0 or info.size != core.persistence.rtc_record_bytes) return false;
+    }
+    return true;
 }
 
 const ProductTimeContext = struct {
@@ -571,7 +887,62 @@ fn cartridgeError(fault: anyerror) []const u8 {
     };
 }
 
-fn selfTest(app: *r4os.App) i32 {
+noinline fn hostSelfTest(app: *r4os.App) i32 {
+    const sys = app.system();
+    const allocator = app.allocator() orelse return error_allocator;
+    const fixtures = [_]struct {
+        path: [*:0]const u8,
+        kind: core.fixture_rom.Kind,
+    }{
+        .{ .path = e2e_fixture_a_path, .kind = .rom_only },
+        .{ .path = e2e_fixture_b_path, .kind = .battery_rtc },
+        .{ .path = e2e_fixture_invalid_path, .kind = .invalid },
+        .{ .path = e2e_fixture_firmware_path, .kind = .firmware_required },
+    };
+    for (fixtures) |fixture| {
+        const image = allocator.alloc(u8, core.fixture_rom.imageBytes(fixture.kind)) catch {
+            sys.println("R4SNES fixture generation: FAILED allocation");
+            return error_host_selftest;
+        };
+        defer allocator.free(image);
+        core.fixture_rom.build(image, fixture.kind) catch {
+            sys.println("R4SNES fixture generation: FAILED build");
+            return error_host_selftest;
+        };
+        if (fixture.kind == .invalid) {
+            if (core.cartridge.inspectNecDspRequirement(image, null)) |_| {
+                sys.println("R4SNES fixture generation: FAILED invalid-accepted");
+                return error_host_selftest;
+            } else |fault| {
+                if (fault != error.NoValidHeader) {
+                    sys.println("R4SNES fixture generation: FAILED invalid-classification");
+                    return error_host_selftest;
+                }
+            }
+        } else {
+            const requirement = core.cartridge.inspectNecDspRequirement(image, null) catch {
+                sys.println("R4SNES fixture generation: FAILED header");
+                return error_host_selftest;
+            };
+            if ((fixture.kind == .firmware_required) != (requirement != null)) {
+                sys.println("R4SNES fixture generation: FAILED firmware-classification");
+                return error_host_selftest;
+            }
+        }
+        if (sys.fileWrite(fixture.path, image) != @as(i32, @intCast(image.len))) {
+            sys.println("R4SNES fixture generation: FAILED write");
+            return error_host_selftest;
+        }
+    }
+    if (sys.fileWrite(host_selftest_marker_path, host_selftest_marker) != @as(i32, @intCast(host_selftest_marker.len))) {
+        sys.println("R4SNES fixture generation: FAILED marker-write");
+        return error_host_selftest;
+    }
+    sys.write(host_selftest_marker);
+    return 0;
+}
+
+noinline fn selfTest(app: *r4os.App) i32 {
     const sys = app.system();
     var machine = core.machine.Machine.init(1);
     if (!machine.foundationReady() or core.cpu.opcode_table.len != 256 or !machine.scpu.cpuMayRun()) return error_not_implemented;
@@ -677,7 +1048,7 @@ fn selfTest(app: *r4os.App) i32 {
     return 0;
 }
 
-fn persistenceSelfTest(app: *r4os.App) i32 {
+noinline fn persistenceSelfTest(app: *r4os.App) i32 {
     runPersistenceSelfTest(app) catch |fault| {
         const sys = app.system();
         sys.write("R4SNES persistence runtime: FAILED ");

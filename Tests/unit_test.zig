@@ -17,6 +17,7 @@ test {
     _ = @import("st018_test.zig");
     _ = @import("video_host_test.zig");
     _ = @import("product_host_test.zig");
+    _ = @import("fixture_rom_test.zig");
     _ = @import("system_test.zig");
 }
 
