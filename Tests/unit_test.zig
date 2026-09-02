@@ -12,6 +12,7 @@ test {
     _ = @import("smp_test.zig");
     _ = @import("superfx_test.zig");
     _ = @import("sa1_test.zig");
+    _ = @import("cx4_test.zig");
     _ = @import("video_host_test.zig");
     _ = @import("system_test.zig");
 }
@@ -234,7 +235,7 @@ test "capability matrix names every planned firmware and excluded family without
         .{ .kind = .spc7110_epson_rtc, .disposition = .base_implemented },
         .{ .kind = .super_fx, .disposition = .base_implemented },
         .{ .kind = .sa1, .disposition = .base_implemented },
-        .{ .kind = .cx4, .disposition = .planned },
+        .{ .kind = .cx4, .disposition = .base_implemented },
         .{ .kind = .dsp1_family, .disposition = .planned_user_firmware },
         .{ .kind = .st010_st011, .disposition = .planned_user_firmware },
         .{ .kind = .st018, .disposition = .planned_user_firmware },
@@ -247,7 +248,7 @@ test "capability matrix names every planned firmware and excluded family without
         const capability = core.board.capability(entry.kind);
         try std.testing.expectEqual(entry.disposition, capability.disposition);
         if (entry.kind != .none and entry.kind != .obc1 and entry.kind != .srtc and
-            entry.kind != .sdd1 and entry.kind != .spc7110_epson_rtc and entry.kind != .super_fx and entry.kind != .sa1)
+            entry.kind != .sdd1 and entry.kind != .spc7110_epson_rtc and entry.kind != .super_fx and entry.kind != .sa1 and entry.kind != .cx4)
         {
             try std.testing.expect(capability.disposition != .base_implemented);
         }

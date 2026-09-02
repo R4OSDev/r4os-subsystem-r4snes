@@ -51,7 +51,7 @@ pub const capability_table = [_]Capability{
     .{ .enhancement = .spc7110_epson_rtc, .disposition = .base_implemented, .planned_version = "0.73.13" },
     .{ .enhancement = .super_fx, .disposition = .base_implemented, .planned_version = "0.73.14" },
     .{ .enhancement = .sa1, .disposition = .base_implemented, .planned_version = "0.73.15" },
-    .{ .enhancement = .cx4, .disposition = .planned, .planned_version = "0.73.16" },
+    .{ .enhancement = .cx4, .disposition = .base_implemented, .planned_version = "0.73.16" },
     .{ .enhancement = .dsp1_family, .disposition = .planned_user_firmware, .planned_version = "0.73.17", .firmware_bytes = 0x2000 },
     .{ .enhancement = .st010_st011, .disposition = .planned_user_firmware, .planned_version = "0.73.18", .firmware_bytes = 0xD000 },
     .{ .enhancement = .st018, .disposition = .planned_user_firmware, .planned_version = "0.73.19", .firmware_bytes = 0x28000 },
@@ -103,6 +103,7 @@ pub const RevisionFamily = enum {
     spc7110,
     super_fx,
     sa1,
+    cx4,
 };
 
 /// Classifies only recognizable but unsupported revisions. It is deliberately
@@ -123,6 +124,7 @@ pub fn unsupportedRevisionFamily(rom_type: u8, map_mode: u8) ?RevisionFamily {
     if ((rom_type & 0xF0) == 0x30 and (rom_type & 0x0F) >= 3 and
         ((map_mode & 0x2F) == 0x23 or (map_mode & 0x2F) == 0x20) and
         rom_type != 0x33 and rom_type != 0x34 and rom_type != 0x35) return .sa1;
+    if ((rom_type & 0xF0) == 0xF0 and (map_mode & 0x2F) == 0x20 and rom_type != 0xF3) return .cx4;
     return null;
 }
 
@@ -140,6 +142,7 @@ pub const Board = struct {
 
     pub fn romIndex(self: Board, address: u32, rom_size: usize) ?usize {
         if (self.capability.enhancement == .super_fx) return decodeSuperFxCpuRomIndex(address, rom_size);
+        if (self.capability.enhancement == .cx4) return decodeCx4RomIndex(address, rom_size);
         // SA-1 Super MMC registers dynamically select the four ROM quadrants;
         // the cartridge device therefore owns every SA-1 ROM lookup.
         if (self.capability.enhancement == .sa1) return null;
@@ -152,6 +155,7 @@ pub const Board = struct {
         // Cartridge routes those windows through the device before reaching
         // this generic mapper.
         if (self.capability.enhancement == .super_fx or self.capability.enhancement == .sa1) return null;
+        if (self.capability.enhancement == .cx4) return decodeCx4SramIndex(address, self.sram_bytes);
         const bank: u8 = @truncate(address >> 16);
         const offset: u16 = @truncate(address);
         const logical: usize = switch (self.mapping) {
@@ -234,6 +238,25 @@ pub fn decodeSuperFxCpuRomIndex(address: u32, rom_size: usize) ?usize {
         return mirrorIndex((@as(usize, bank & 0x1F) << 16) | @as(usize, offset), rom_size);
     }
     return null;
+}
+
+pub fn decodeCx4RomIndex(address: u32, rom_size: usize) ?usize {
+    if (rom_size == 0 or address > 0x00ff_ffff) return null;
+    const bank: u8 = @truncate(address >> 16);
+    const offset: u16 = @truncate(address);
+    if (!(((bank <= 0x3f or (bank >= 0x80 and bank <= 0xbf)) and offset >= 0x8000) or bank >= 0xc0))
+        return null;
+    const logical = (@as(usize, bank & 0x3f) << 15) | @as(usize, offset & 0x7fff);
+    return mirrorIndex(logical, rom_size);
+}
+
+pub fn decodeCx4SramIndex(address: u32, ram_size: usize) ?usize {
+    if (ram_size == 0 or address > 0x00ff_ffff) return null;
+    const bank: u8 = @truncate(address >> 16);
+    const offset: u16 = @truncate(address);
+    if (!((bank >= 0x70 and bank <= 0x77) or (bank >= 0xf0 and bank <= 0xf7)) or offset >= 0x8000)
+        return null;
+    return mirrorIndex((@as(usize, bank & 7) << 15) | offset, ram_size);
 }
 
 fn romWindow(mapping: Mapping, bank: u8, offset: u16) bool {

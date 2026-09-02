@@ -113,6 +113,7 @@ fn enhancementCycles(cart: *const cartridge.Cartridge) u8 {
         .spc7110_epson_rtc => @import("spc7110.zig").access_master_cycles,
         .super_fx => @import("superfx.zig").access_master_cycles,
         .sa1 => @import("sa1.zig").access_master_cycles,
+        .cx4 => @import("cx4.zig").access_master_cycles,
         else => 8,
     };
 }

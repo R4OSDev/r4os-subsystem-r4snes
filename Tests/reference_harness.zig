@@ -25,6 +25,10 @@ const Expected = struct {
     enhancement_oracles: usize,
     enhancement_oracle_cases: usize,
     sa1_hardware_roms: usize,
+    cx4_programs: usize,
+    cx4_independent_implementations: usize,
+    cx4_data_rom_sha256: []const u8,
+    cx4_aggregate_fnv1a64: []const u8,
     spc700_files: usize,
     spc700_records: usize,
 };
@@ -41,6 +45,8 @@ const Corpus = struct {
     spc700_single_step_files: usize,
     spc700_single_step_records: usize,
     sa1_hardware_roms: usize,
+    cx4_programs: usize,
+    cx4_independent_implementations: usize,
     commercial_roms: usize,
     proprietary_firmware_images: usize,
 };
@@ -56,10 +62,24 @@ const MatrixEnhancement = struct {
     firmware: ?[]const u8 = null,
 };
 
+const Cx4ReferenceCases = struct {
+    release: []const u8,
+    programs: usize,
+    opcode_encodings_classified: usize,
+    defined_encodings: usize,
+    reserved_nop_encodings: usize,
+    data_rom_words: usize,
+    data_rom_sha256: []const u8,
+    pixel_oracles: usize,
+    aggregate_state_fnv1a64: []const u8,
+    independent_sources: []const std.json.Value,
+};
+
 const Matrix = struct {
     schema: u32,
     release: []const u8,
     corpus: Corpus,
+    cx4_reference_cases: Cx4ReferenceCases,
     suites: []const MatrixSuite,
     enhancement_chips: []const MatrixEnhancement,
 };
@@ -193,11 +213,13 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.15")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.16")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
         matrix.corpus.sa1_hardware_roms != expected.sa1_hardware_roms or
+        matrix.corpus.cx4_programs != expected.cx4_programs or
+        matrix.corpus.cx4_independent_implementations != expected.cx4_independent_implementations or
         matrix.corpus.commercial_roms != 0 or matrix.corpus.proprietary_firmware_images != 0)
     {
         return error.QualificationMatrixMismatch;
@@ -212,6 +234,19 @@ fn run(init: std.process.Init) !void {
     try expectImplementedEnhancement(matrix.enhancement_chips, "spc7110-epson-rtc", "0.73.13");
     try expectImplementedEnhancement(matrix.enhancement_chips, "superfx-gsu1-gsu2", "0.73.14");
     try expectImplementedEnhancement(matrix.enhancement_chips, "sa1", "0.73.15");
+    try expectImplementedEnhancement(matrix.enhancement_chips, "cx4", "0.73.16");
+    const cx4_cases = matrix.cx4_reference_cases;
+    if (!std.mem.eql(u8, cx4_cases.release, "0.73.16") or
+        cx4_cases.programs != expected.cx4_programs or
+        cx4_cases.opcode_encodings_classified != 65_536 or cx4_cases.defined_encodings != 55_808 or
+        cx4_cases.reserved_nop_encodings != 9_728 or cx4_cases.data_rom_words != 1_024 or
+        !std.mem.eql(u8, cx4_cases.data_rom_sha256, expected.cx4_data_rom_sha256) or
+        cx4_cases.pixel_oracles != 64 or
+        !std.mem.eql(u8, cx4_cases.aggregate_state_fnv1a64, expected.cx4_aggregate_fnv1a64) or
+        cx4_cases.independent_sources.len != expected.cx4_independent_implementations)
+    {
+        return error.Cx4QualificationMismatch;
+    }
 
     const dma_cases_bytes = try cwd.readFileAlloc(io, "Tests/dma_reference_cases.json", allocator, .limited(max_manifest_bytes));
     defer allocator.free(dma_cases_bytes);

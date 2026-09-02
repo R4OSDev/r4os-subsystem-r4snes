@@ -2,6 +2,7 @@ pub const board = @import("board.zig");
 pub const bus = @import("bus.zig");
 pub const cartridge = @import("cartridge.zig");
 pub const controller = @import("controller.zig");
+pub const cx4 = @import("cx4.zig");
 pub const coprocessors = @import("coprocessors.zig");
 pub const cpu = @import("cpu.zig");
 pub const dma = @import("dma.zig");

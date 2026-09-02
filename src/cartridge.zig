@@ -6,6 +6,7 @@ const spc7110 = @import("spc7110.zig");
 const srtc = @import("srtc.zig");
 const superfx = @import("superfx.zig");
 const sa1 = @import("sa1.zig");
+const cx4 = @import("cx4.zig");
 
 pub const copier_header_size: usize = 512;
 pub const mapping_granularity: usize = 32 * 1024;
@@ -69,6 +70,7 @@ pub const Cartridge = struct {
     spc7110_device: ?spc7110.Device = null,
     superfx_device: ?superfx.Device = null,
     sa1_device: ?sa1.Device = null,
+    cx4_device: ?cx4.Device = null,
 
     pub fn parse(allocator: std.mem.Allocator, source: []const u8) !Cartridge {
         return parseWithOptions(allocator, source, .{});
@@ -90,6 +92,7 @@ pub const Cartridge = struct {
                     .spc7110 => error.UnsupportedSpc7110Revision,
                     .super_fx => error.UnsupportedSuperFxRevision,
                     .sa1 => error.UnsupportedSa1Revision,
+                    .cx4 => error.UnsupportedCx4Revision,
                 };
             }
         }
@@ -132,6 +135,11 @@ pub const Cartridge = struct {
                 sa1.validateGeometry(normalized.len, cartridge_ram_bytes) catch
                     return error.ContradictorySa1Board;
             },
+            .cx4 => {
+                if (header.mapping != .lo_rom) return error.ContradictoryCx4Board;
+                cx4.validateGeometry(normalized.len, cartridge_ram_bytes) catch
+                    return error.ContradictoryCx4Board;
+            },
             else => {},
         }
 
@@ -168,6 +176,7 @@ pub const Cartridge = struct {
                 null,
             .superfx_device = if (superfx_revision) |revision| superfx.Device.init(revision) else null,
             .sa1_device = if (enhancement == .sa1) .{} else null,
+            .cx4_device = if (enhancement == .cx4) .{} else null,
         };
         if (result.obc1_device) |*device| try device.power(result.sram_storage);
         if (result.srtc_device) |*device| device.power();
@@ -179,6 +188,7 @@ pub const Cartridge = struct {
             result.rom_storage.len,
             result.sram_storage.len,
         );
+        if (result.cx4_device) |*device| try device.power(result.rom_storage.len, result.sram_storage.len);
         return result;
     }
 
@@ -196,6 +206,7 @@ pub const Cartridge = struct {
         self.spc7110_device = null;
         self.superfx_device = null;
         self.sa1_device = null;
+        self.cx4_device = null;
     }
 
     pub fn rom(self: *const Cartridge) []const u8 {
@@ -229,6 +240,7 @@ pub const Cartridge = struct {
         if (self.spc7110_device) |*device| return device.read(self.rom_storage, self.sram_storage, address, open_bus);
         if (self.superfx_device) |*device| return device.readCpu(self.rom_storage, self.sram_storage, address, open_bus);
         if (self.sa1_device) |*device| return device.readCpu(self.rom_storage, self.sram_storage, address, open_bus);
+        if (self.cx4_device) |*device| return device.readCpu(self.rom_storage, self.sram_storage, address, open_bus);
         return null;
     }
 
@@ -275,6 +287,9 @@ pub const Cartridge = struct {
                 return true;
             }
         }
+        if (self.cx4_device) |*device| {
+            return device.writeCpu(self.rom_storage, self.sram_storage, address, value).handled;
+        }
         return false;
     }
 
@@ -309,6 +324,16 @@ pub const Cartridge = struct {
 
     pub fn sa1CpuIrqPending(self: *const Cartridge) bool {
         if (self.sa1_device) |*device| return device.cpuIrqPending();
+        return false;
+    }
+
+    pub fn runCx4Slice(self: *Cartridge, maximum_cycles: usize) ?cx4.RunResult {
+        if (self.cx4_device) |*device| return device.runSlice(self.rom_storage, self.sram_storage, maximum_cycles);
+        return null;
+    }
+
+    pub fn cx4CpuIrqPending(self: *const Cartridge) bool {
+        if (self.cx4_device) |*device| return device.irqPending();
         return false;
     }
 
@@ -405,7 +430,7 @@ fn parseHeaderCandidate(rom: []const u8, location: HeaderLocation) ?Header {
             .obc1, .sdd1 => .lo_rom,
             .srtc => .ex_hi_rom,
             .spc7110 => .hi_rom,
-            .super_fx, .sa1 => .lo_rom,
+            .super_fx, .sa1, .cx4 => .lo_rom,
         } else board.mappingForHeader(map_mode, enhancement)
     else
         board.mappingForHeader(map_mode, enhancement);

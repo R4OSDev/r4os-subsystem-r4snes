@@ -83,6 +83,28 @@ pub fn build(b: *std.Build) void {
         "../../../Temp/R4SNES-SA1");
     if (b.option([]const u8, "sa1-reference-case", "Run only one named SA-1 reference case")) |filter| run_sa1_references.addArg(filter);
 
+    const cx4_output = b.option([]const u8, "cx4-program-output", "Generated CX4 program directory") orelse "../../../Temp/R4SNES-CX4";
+    const assemble_cx4 = b.addSystemCommand(&.{ "pwsh", "-NoLogo", "-NoProfile", "-File" });
+    assemble_cx4.addFileArg(b.path("Tests/Build-Cx4Programs.ps1"));
+    assemble_cx4.addArg("-ReferenceRoot");
+    assemble_cx4.addArg(snes_reference_root);
+    assemble_cx4.addArg("-OutputDirectory");
+    assemble_cx4.addArg(cx4_output);
+    const cx4_program_root = b.createModule(.{
+        .root_source_file = b.path("Tests/cx4_program_harness.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    cx4_program_root.addImport("core", core);
+    const cx4_program_harness = b.addExecutable(.{
+        .name = "r4snes-cx4-program-harness",
+        .root_module = cx4_program_root,
+    });
+    const run_cx4_programs = b.addRunArtifact(cx4_program_harness);
+    run_cx4_programs.setCwd(b.path("."));
+    run_cx4_programs.addArg(cx4_output);
+    run_cx4_programs.step.dependOn(&assemble_cx4.step);
+
     const coverage_root = b.createModule(.{
         .root_source_file = b.path("Tests/cpu_coverage.zig"),
         .target = b.graph.host,
@@ -107,8 +129,11 @@ pub fn build(b: *std.Build) void {
     reference_step.dependOn(&run_references.step);
     reference_step.dependOn(&run_superfx_programs.step);
     reference_step.dependOn(&run_sa1_references.step);
+    reference_step.dependOn(&run_cx4_programs.step);
     const superfx_reference_step = b.step("superfx-reference-test", "Rebuild and execute pinned OpenSNES and owner GSU programs");
     superfx_reference_step.dependOn(&run_superfx_programs.step);
     const sa1_reference_step = b.step("sa1-reference-test", "Execute six pinned SA-1 hardware tests and two-start BW-RAM persistence");
     sa1_reference_step.dependOn(&run_sa1_references.step);
+    const cx4_reference_step = b.step("cx4-reference-test", "Rebuild and execute pinned and owner HG51B169 programs");
+    cx4_reference_step.dependOn(&run_cx4_programs.step);
 }
