@@ -17,13 +17,16 @@ follows:
 - `ppu.zig`: dot-observed S-PPU state and complete native frame production.
 - `spc700.zig` and `smp.zig`: complete bus-phased SPC700, ARAM, timers,
   CPU/APU latches, semantic IPL and optional exact user IPL.
-- `sdsp.zig`: S-DSP state, completed by the next audio milestone.
+- `sdsp.zig`: cycle-clocked S-DSP, native PCM, deterministic resampler and
+  bounded caller-buffered audio queue.
 - `controller.zig`: port-1 serial pad state; port 2 remains disconnected.
 - `coprocessors.zig`: explicit enhancement-chip registry without implicit
   fallbacks.
 - `persistence.zig`: canonical SRAM path and future atomic persistence policy.
 - `host_adapter.zig`: R4OS physical-key mapping and generation-safe XRGB32
   bridge into `r4os.subsystem_host`.
+- `runtime_adapter.zig`: bounded composition of the machine stepper and S-DSP
+  queue with `r4os.subsystem_runtime`; it owns no guest clock or backend.
 - `machine.zig`: instance-local composition and lifecycle boundary.
 
 No component stores a host pointer or global mutable guest state. Cartridge
@@ -54,7 +57,17 @@ upload protocol but never supplies arbitrary bytes at `$FFC0-$FFFF`; an exact
 path exists only for an optional 64-byte user file in the private firmware
 tree.
 
-Scheduling, guest-time admission and audio enter through the generic SDK
-runtime only in later milestones. Version 0.8.0 still does not start a parsed
-cartridge in the R4OS application because S-DSP output and the productive
-runtime host are not yet connected.
+The S-DSP advances one of its 32 hardware phases for every APU clock against
+the same ARAM used by SPC700. Its register file, eight voices, BRR history,
+envelopes, noise generator and echo/FIR state are instance-local. Complete
+native 32 kHz stereo samples feed a rational 3:2 streaming converter; it is
+partition invariant and writes only a fixed 8192-frame queue. The host can
+pull no more than 2048 48 kHz S16LE frames into a caller-owned buffer.
+
+`runtime_adapter.zig` is the sole audio/runtime boundary. It applies prefill,
+tracks transport ownership and disables capture on mute or backend failure
+without stalling or accelerating the guest. Reset and repeated close clear the
+same queue and resampler state. Generic pause, resync and backend policy remain
+owned by the shared SDK runtime. Version 0.9.0 still does not start a parsed
+cartridge in the R4OS application because the productive machine and window
+host are deliberately scheduled for a later milestone.

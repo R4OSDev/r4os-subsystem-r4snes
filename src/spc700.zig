@@ -1,4 +1,5 @@
 const std = @import("std");
+const sdsp = @import("sdsp.zig");
 
 pub const apu_bus_hz: u64 = 1_024_000;
 pub const aram_size: usize = 64 * 1024;
@@ -71,7 +72,6 @@ pub const Io = struct {
     smp_port_tick: [4]u64 = [_]u64{0} ** 4,
     port_epoch: u64 = 0,
     auxiliary: [2]u8 = [_]u8{0} ** 2,
-    dsp_registers: [128]u8 = [_]u8{0} ** 128,
 };
 
 const Alu = enum { adc, and_, asl, cmp, dec, eor, inc, ld, lsr, or_, rol, ror, sbc };
@@ -88,6 +88,7 @@ pub const Smp = struct {
     stopped: bool = false,
     waiting: bool = false,
     aram: [aram_size]u8 = [_]u8{0} ** aram_size,
+    dsp: sdsp.Dsp = .{},
     io: Io = .{},
     timers: [3]Timer = .{
         .{ .frequency = 128 },
@@ -127,6 +128,7 @@ pub const Smp = struct {
         self.cycles = 0;
         self.stopped = false;
         self.waiting = false;
+        self.dsp.reset();
         self.io = .{};
         self.timers = .{
             .{ .frequency = 128 },
@@ -332,6 +334,7 @@ pub const Smp = struct {
         if (internal or address == null or ((address.? & 0xfff0) == 0x00f0) or
             (address.? >= 0xffc0 and self.io.ipl_enabled)) selector = self.io.internal_wait_states;
         self.cycles +%= cycle_wait[selector];
+        self.dsp.runClocks(&self.aram, cycle_wait[selector]);
         const timers_active = self.io.timers_enabled and !self.io.timers_disabled;
         for (&self.timers) |*timer| timer.advance(timer_wait[selector], timers_active);
     }
@@ -474,7 +477,7 @@ pub const Smp = struct {
         return switch (address) {
             0xf0, 0xf1, 0xfa, 0xfb, 0xfc => 0,
             0xf2 => self.io.dsp_address,
-            0xf3 => self.io.dsp_registers[self.io.dsp_address & 0x7f],
+            0xf3 => self.dsp.read(self.io.dsp_address),
             0xf4...0xf7 => self.io.cpu_to_smp[address - 0xf4],
             0xf8, 0xf9 => self.io.auxiliary[address - 0xf8],
             0xfd...0xff => value: {
@@ -512,7 +515,7 @@ pub const Smp = struct {
             },
             0xf2 => self.io.dsp_address = value,
             0xf3 => if (self.io.dsp_address & 0x80 == 0) {
-                self.io.dsp_registers[self.io.dsp_address] = value;
+                self.dsp.write(self.io.dsp_address, value);
             },
             0xf4...0xf7 => {
                 const port = address - 0xf4;

@@ -12,6 +12,7 @@ const Expected = struct {
     dma_cases_sha256: []const u8,
     ppu_cases_sha256: []const u8,
     hdrv_cases_sha256: []const u8,
+    sdsp_cases_sha256: []const u8,
     repositories: usize,
     downloads: usize,
     trees: usize,
@@ -19,6 +20,7 @@ const Expected = struct {
     dma_reference_roms: usize,
     ppu_reference_roms: usize,
     hdrv_geometry_cases: usize,
+    sdsp_oracle_cases: usize,
     spc700_files: usize,
     spc700_records: usize,
 };
@@ -95,6 +97,29 @@ const HdrvGeometryCases = struct {
     cases: []const HdrvGeometryCase,
 };
 
+const SdspReferenceCases = struct {
+    schema: u32,
+    oracle: Oracle,
+    digest: Digest,
+    cases: []const Case,
+
+    const Oracle = struct {
+        name: []const u8,
+        revision: []const u8,
+        license: []const u8,
+    };
+    const Digest = struct {
+        algorithm: []const u8,
+        sample_encoding: []const u8,
+    };
+    const Case = struct {
+        name: []const u8,
+        native_frames: u64,
+        pcm_digest: []const u8,
+        echo_ram_digest: []const u8,
+    };
+};
+
 pub fn main(init: std.process.Init) void {
     run(init) catch |fault| {
         std.debug.print("R4SNES reference harness FAILED: {s}\n", .{@errorName(fault)});
@@ -123,7 +148,7 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.9")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.10")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
@@ -217,6 +242,30 @@ fn run(init: std.process.Init) !void {
         }
     }
 
+    const sdsp_cases_bytes = try cwd.readFileAlloc(io, "Tests/sdsp_reference_cases.json", allocator, .limited(max_manifest_bytes));
+    defer allocator.free(sdsp_cases_bytes);
+    try expectSha256(sdsp_cases_bytes, expected.sdsp_cases_sha256);
+    var parsed_sdsp_cases = try std.json.parseFromSlice(SdspReferenceCases, allocator, sdsp_cases_bytes, .{ .ignore_unknown_fields = true });
+    defer parsed_sdsp_cases.deinit();
+    const sdsp_cases = parsed_sdsp_cases.value;
+    if (sdsp_cases.schema != 1 or sdsp_cases.cases.len != expected.sdsp_oracle_cases or
+        !std.mem.eql(u8, sdsp_cases.oracle.name, "SNES-SPC") or
+        !std.mem.eql(u8, sdsp_cases.oracle.revision, "ec8ee2bbe30451614c1d02a83f7af1c97d497d45") or
+        !std.mem.eql(u8, sdsp_cases.oracle.license, "LGPL-2.1") or
+        !std.mem.eql(u8, sdsp_cases.digest.algorithm, "FNV-1a-64") or
+        !std.mem.eql(u8, sdsp_cases.digest.sample_encoding, "stereo signed 16-bit little-endian"))
+    {
+        return error.SdspReferenceManifestMismatch;
+    }
+    for (sdsp_cases.cases, 0..) |case, index| {
+        if (case.name.len == 0 or case.native_frames == 0 or case.pcm_digest.len != 16 or case.echo_ram_digest.len != 16) {
+            return error.SdspReferenceManifestMismatch;
+        }
+        for (sdsp_cases.cases[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.name, case.name)) return error.DuplicateSdspReferenceCase;
+        }
+    }
+
     cwd.access(io, root, .{}) catch {
         std.debug.print("R4SNES reference harness SKIP: optional root missing: {s}\n", .{root});
         return;
@@ -285,8 +334,8 @@ fn run(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} PPU-diagnostics={d} HDRV-geometries={d} Gilyon-basic={d} Gilyon-full={d} Gilyon-spc={d} IPL-speed-bytes={d} IPL-speed-first-divergence=none IPL-speed-steps={d} SPC700-files={d} vectors={d}\n",
-        .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, ppu_cases.foreign_roms.len, hdrv_cases.cases.len, basic_steps, full_steps, spc_steps, ipl_speed.bytes, ipl_speed.steps, vectors.files, vectors.records },
+        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} PPU-diagnostics={d} HDRV-geometries={d} S-DSP-oracles={d} Gilyon-basic={d} Gilyon-full={d} Gilyon-spc={d} IPL-speed-bytes={d} IPL-speed-first-divergence=none IPL-speed-steps={d} SPC700-files={d} vectors={d}\n",
+        .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, ppu_cases.foreign_roms.len, hdrv_cases.cases.len, sdsp_cases.cases.len, basic_steps, full_steps, spc_steps, ipl_speed.bytes, ipl_speed.steps, vectors.files, vectors.records },
     );
 }
 

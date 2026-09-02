@@ -10,6 +10,7 @@ pub const machine = @import("machine.zig");
 pub const opcode = @import("opcode.zig");
 pub const persistence = @import("persistence.zig");
 pub const ppu = @import("ppu.zig");
+pub const runtime_adapter = @import("runtime_adapter.zig");
 pub const sdsp = @import("sdsp.zig");
 pub const scpu = @import("scpu.zig");
 pub const smp = @import("smp.zig");

@@ -126,9 +126,10 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     }
 
     // Parsing owns a private normalized copy and exposes ROM as read-only. CPU,
-    // 5A22, DMA/HDMA, PPU and S-SMP are qualified independently; productive
-    // execution is rejected until S-DSP and runtime-machine stages complete.
-    sys.println("R4SNES: cartridge, CPU, 5A22, complete PPU and SPC700 recognized; S-DSP/runtime integration is not implemented in 0.8.0.");
+    // 5A22, DMA/HDMA, PPU, S-SMP and S-DSP are qualified independently;
+    // productive execution is rejected until the runtime-machine/window-host
+    // stage composes those owners.
+    sys.println("R4SNES: cartridge, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.9.0.");
     return error_not_implemented;
 }
 
@@ -147,13 +148,17 @@ fn selfTest(app: *r4os.App) i32 {
     const sys = app.system();
     var machine = core.machine.Machine.init(1);
     if (!machine.foundationReady() or core.cpu.opcode_table.len != 256 or !machine.scpu.cpuMayRun()) return error_not_implemented;
+    machine.smp.dsp.beginCapture();
+    machine.smp.dsp.runClocks(&machine.smp.aram, 64);
+    if (machine.smp.dsp.sample_counter != 2 or machine.smp.dsp.queuedFrames() != 2) return error_not_implemented;
     machine.smp.bus_mode = .vector_ram;
     machine.smp.pc = 0x0200;
     machine.smp.aram[0x0200] = 0x00;
     machine.smp.step() catch return error_not_implemented;
     if (machine.smp.pc != 0x0201) return error_not_implemented;
     machine.close();
-    if (!machine.closed) return error_not_implemented;
-    sys.println("R4SNES SELFTEST OK: CPU, timed 5A22, byte-bounded DMA, complete PPU and SPC700/S-SMP owners isolated; incomplete S-DSP/runtime execution safely rejected.");
+    machine.close();
+    if (!machine.closed or machine.smp.dsp.capture_enabled or machine.smp.dsp.queuedFrames() != 0) return error_not_implemented;
+    sys.println("R4SNES SELFTEST OK: CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
     return 0;
 }

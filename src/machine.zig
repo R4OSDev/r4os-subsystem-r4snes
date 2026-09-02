@@ -5,7 +5,6 @@ const coprocessors = @import("coprocessors.zig");
 const cpu = @import("cpu.zig");
 const persistence = @import("persistence.zig");
 const ppu = @import("ppu.zig");
-const sdsp = @import("sdsp.zig");
 const scpu = @import("scpu.zig");
 const smp = @import("smp.zig");
 const timing = @import("timing.zig");
@@ -18,7 +17,6 @@ pub const Machine = struct {
     scpu: scpu.Scpu = .{},
     ppu: ppu.Ppu = .{},
     smp: smp.Smp = .{},
-    dsp: sdsp.Dsp = .{},
     controllers: controller.Ports = .{},
     coprocessors: coprocessors.Registry = .{},
     persistence: persistence.State = .{},
@@ -36,8 +34,10 @@ pub const Machine = struct {
     }
 
     pub fn close(self: *Machine) void {
+        if (self.closed) return;
         self.closed = true;
         self.scpu.dma.abortAll();
         self.controllers.clearInput();
+        self.smp.dsp.endCapture();
     }
 };

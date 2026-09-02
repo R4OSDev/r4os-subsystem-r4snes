@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "oracle": {
+    "name": "SNES-SPC",
+    "revision": "ec8ee2bbe30451614c1d02a83f7af1c97d497d45",
+    "license": "LGPL-2.1",
+    "purpose": "Independent digital S-DSP sample and register comparison"
+  },
+  "digest": {
+    "algorithm": "FNV-1a-64",
+    "sample_encoding": "stereo signed 16-bit little-endian"
+  },
+  "cases": [
+    {
+      "name": "direct_loop",
+      "native_frames": 192,
+      "pcm_digest": "bf393f1b22f82069",
+      "endx": 1,
+      "envx0": 127,
+      "outx0": 144,
+      "echo_ram_digest": "28c31cf8df2ec325"
+    },
+    {
+      "name": "impulse",
+      "native_frames": 96,
+      "pcm_digest": "c86ec345c0ee8125",
+      "endx": 1,
+      "envx0": 0,
+      "outx0": 0,
+      "echo_ram_digest": "28c31cf8df2ec325"
+    },
+    {
+      "name": "adsr",
+      "native_frames": 256,
+      "pcm_digest": "32b7b949c6a1d7cd",
+      "endx": 1,
+      "envx0": 127,
+      "outx0": 23,
+      "echo_ram_digest": "28c31cf8df2ec325"
+    },
+    {
+      "name": "gain_modes",
+      "native_frames": 448,
+      "pcm_digest": "39fe5507541dbf8d",
+      "endx": 1,
+      "envx0": 127,
+      "outx0": 144,
+      "echo_ram_digest": "28c31cf8df2ec325"
+    },
+    {
+      "name": "brr_filters",
+      "native_frames": 384,
+      "pcm_digest": "6dddcc2af8d8f706",
+      "endx": 15,
+      "envx0": 127,
+      "outx0": 254,
+      "echo_ram_digest": "28c31cf8df2ec325"
+    },
+    {
+      "name": "noise",
+      "native_frames": 256,
+      "pcm_digest": "348805d80dd20c69",
+      "endx": 1,
+      "envx0": 127,
+      "outx0": 144,
+      "echo_ram_digest": "28c31cf8df2ec325"
+    },
+    {
+      "name": "pitch_modulation",
+      "native_frames": 384,
+      "pcm_digest": "77024e10d502dd83",
+      "endx": 3,
+      "envx0": 127,
+      "outx0": 216,
+      "echo_ram_digest": "28c31cf8df2ec325"
+    },
+    {
+      "name": "echo_fir",
+      "native_frames": 512,
+      "pcm_digest": "708e3fa9a5faee11",
+      "endx": 1,
+      "envx0": 127,
+      "outx0": 144,
+      "echo_ram_digest": "f930b6b5fc3e9f5b"
+    },
+    {
+      "name": "keyoff_release",
+      "native_frames": 192,
+      "pcm_digest": "08d2ccbb06b58d21",
+      "endx": 1,
+      "envx0": 64,
+      "outx0": 199,
+      "echo_ram_digest": "28c31cf8df2ec325"
+    }
+  ]
+}

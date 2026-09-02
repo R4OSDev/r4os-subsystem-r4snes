@@ -23,6 +23,9 @@ pub fn build(b: *std.Build) void {
     unit_root.addImport("r4os", host_r4os);
     const unit_tests = b.addTest(.{ .root_module = unit_root });
     const run_unit_tests = b.addRunArtifact(unit_tests);
+    const run_wav_analyzer = b.addSystemCommand(&.{ "pwsh", "-NoLogo", "-NoProfile", "-File" });
+    run_wav_analyzer.addFileArg(b.path("Tests/Analyze-SdspWav.ps1"));
+    run_wav_analyzer.addArg("-SelfTest");
 
     const reference_root = b.createModule(.{
         .root_source_file = b.path("Tests/reference_harness.zig"),
@@ -57,6 +60,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Build R4SNES and run deterministic owner tests");
     test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_wav_analyzer.step);
 
     const reference_step = b.step("reference-test", "Execute pinned SNES qualification ROMs, models and all SPC700 vectors");
     reference_step.dependOn(&run_references.step);

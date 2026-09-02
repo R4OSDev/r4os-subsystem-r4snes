@@ -1,13 +1,14 @@
 ﻿# Compatibility
 
-The 0.8.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
+The 0.9.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
 normalizes an optional 512-byte copier header and requires one unambiguous
 LoROM, HiROM, ExLoROM or ExHiROM header. Region, board capability, declared
 sizes, reset vector, startup opcode and checksum/complement contribute to a
 concrete result. Header checksum equality is evidence rather than a lone veto,
-so consistent homebrew remains representable. Execution still ends with a
-deterministic not-implemented error until 5A22 integration. No commercial
-cartridge is shipped, embedded or needed by the public build.
+so consistent homebrew remains representable. No commercial cartridge is
+shipped, embedded or needed by the public build. Execution ends
+with a deterministic not-implemented error until the productive runtime-machine
+and window host are connected.
 
 CPU qualification covers every legal opcode in emulation mode and all four
 native M/X combinations. Synthetic cases check register/flag widths, direct
@@ -25,6 +26,17 @@ phase. Gilyon spctest reaches Success through the real W65C816 bus, semantic
 IPL upload and directional port latches; the open IPL-speed ROM transfers
 32768 bytes without a first data divergence. Timer, SLEEP/STOP, port-order,
 oscillator partition and optional exact-IPL cases are separate owner gates.
+
+S-DSP qualification covers all eight voices, BRR filters and loop/end flags,
+Gaussian interpolation, pitch modulation, noise, every ADSR/GAIN family,
+KON/KOFF/ENDX/ENVX/OUTX, main/echo volume, echo RAM, feedback and all eight FIR
+taps. Nine synthetic cases, including a single BRR impulse, compare exact
+stereo PCM and register/RAM digests with SNES-SPC revision
+`ec8ee2bbe30451614c1d02a83f7af1c97d497d45`. Streaming tests require identical
+native and 32-to-48-kHz output across arbitrary clock partitions, bounded
+overflow/underflow behavior and guest progress during mute or backend failure.
+The PowerShell WAV gate independently rejects discontinuity, wrong frequency
+and wrong stereo balance. Audible quality remains a final-stage manual check.
 
 The capability table names every planned enhancement family and the
 user-firmware sizes for NEC-DSP/ST hardware without claiming those devices are
