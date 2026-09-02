@@ -46,6 +46,25 @@ pub fn build(b: *std.Build) void {
     });
     const run_performance = b.addRunArtifact(performance_harness);
 
+    const maturity_r4os = sdk.createR4osModule(b.graph.host, .ReleaseSafe);
+    const maturity_core = b.createModule(.{
+        .root_source_file = b.path("src/core.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    maturity_core.addImport("r4os", maturity_r4os);
+    const maturity_root = b.createModule(.{
+        .root_source_file = b.path("Tests/maturity_harness.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    maturity_root.addImport("core", maturity_core);
+    const maturity_harness = b.addExecutable(.{
+        .name = "r4snes-maturity-harness",
+        .root_module = maturity_root,
+    });
+    const run_maturity = b.addRunArtifact(maturity_harness);
+
     const reference_root = b.createModule(.{
         .root_source_file = b.path("Tests/reference_harness.zig"),
         .target = b.graph.host,
@@ -191,9 +210,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_wav_analyzer.step);
+    test_step.dependOn(&run_maturity.step);
 
     const performance_step = b.step("performance-test", "Measure one deterministic NTSC guest second in ReleaseFast");
     performance_step.dependOn(&run_performance.step);
+
+    const maturity_step = b.step("maturity-test", "Prove NTSC/PAL host-pacing, partition, restart and instance determinism");
+    maturity_step.dependOn(&run_maturity.step);
 
     const reference_step = b.step("reference-test", "Execute pinned SNES qualification ROMs, models and all SPC700 vectors");
     reference_step.dependOn(&run_references.step);

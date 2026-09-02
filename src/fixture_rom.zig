@@ -84,6 +84,13 @@ pub fn imageBytes(kind: Kind) usize {
 }
 
 pub fn build(out: []u8, kind: Kind) !void {
+    return buildForRegion(out, kind, .ntsc_u);
+}
+
+/// Build one owner cartridge for an explicit video standard. Keeping region
+/// selection in the generated public fixture makes NTSC/PAL runtime parity a
+/// product-machine test instead of a synthetic Clock-only assertion.
+pub fn buildForRegion(out: []u8, kind: Kind, region: board.Region) !void {
     if (out.len != imageBytes(kind)) return error.InvalidSize;
     if (kind == .invalid) {
         @memset(out, 0xff);
@@ -109,7 +116,11 @@ pub fn build(out: []u8, kind: Kind) !void {
     };
     header[0x17] = romSizeCode(out.len);
     header[0x18] = if (kind == .battery_rtc) 3 else 0;
-    header[0x19] = 1; // NTSC-U fixture; PAL is covered independently.
+    header[0x19] = switch (region) {
+        .ntsc_j => 0,
+        .ntsc_u => 1,
+        .pal => 2,
+    };
     header[0x1a] = 0x33;
     header[0x3c] = 0x00;
     header[0x3d] = 0x80;
@@ -334,7 +345,16 @@ test "open E2E fixtures are deterministic executable and reject firmware or head
     var plain = try cartridge.Cartridge.parse(allocator, first);
     defer plain.deinit();
     try std.testing.expectEqual(board.Mapping.lo_rom, plain.board.mapping);
+    try std.testing.expectEqual(board.Region.ntsc_u, plain.board.region);
     try std.testing.expect(!plain.board.battery);
+
+    const pal_image = try allocator.alloc(u8, imageBytes(.rom_only));
+    defer allocator.free(pal_image);
+    try buildForRegion(pal_image, .rom_only, .pal);
+    var pal = try cartridge.Cartridge.parse(allocator, pal_image);
+    defer pal.deinit();
+    try std.testing.expectEqual(board.Region.pal, pal.board.region);
+    try std.testing.expect(!std.mem.eql(u8, first, pal_image));
 
     const battery_image = try allocator.alloc(u8, imageBytes(.battery_rtc));
     defer allocator.free(battery_image);

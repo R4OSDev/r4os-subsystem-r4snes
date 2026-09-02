@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.20.0 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.21.0 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU in a productive
 `R4SUBSYS1` application host. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
@@ -36,6 +36,14 @@ ratio. The reference harness also
 integrity-checks 23 bounded PPU diagnostics without promoting visual output to
 truth.
 
+The ReleaseSafe maturity gate executes an original owner cartridge eleven
+times across NTSC and PAL, 1-ms, 17-ms and irregular host pacing, 4096- and
+32768-clock partitioning, a regressed host timestamp, a cold restart and a
+second instance identity. It requires byte-identical canonical machine and
+streamed PCM SHA-256 results within each region, region-correct beam state,
+one shared 32-kHz audio rate, no PCM loss or underflow, a disconnected port 2,
+and repeat-idempotent close. This gate is part of the normal owner test step.
+
 Every productive launch owns a private cartridge, `Machine`, persistence
 session, runtime adapter, video adapter and immutable source buffers. Host time
 is converted into NTSC or PAL master-clock debt, with one reported grant of at
@@ -44,7 +52,11 @@ edge only by its bounded remainder, which is credited against the next grant.
 The host exposes pause, resume, reset, mute and unmute, accepts physical port-1
 keys only while focused, publishes native XRGB32 generations and sends only
 caller-owned 48-kHz PCM through App-Audio. Reset creates fresh machine, save,
-video and audio generations. Close and every open-error path unwind in reverse
+video and audio generations. App-Audio writes use a bounded 200-ms service
+deadline, covering the measured SMP4 AUDSVC latency while remaining below the
+250-ms scheduling budget; an expired write is never retried because its remote
+completion is ambiguous, and degradation still cannot stall guest time or
+video. Close and every open-error path unwind in reverse
 order and are repeat-idempotent. This establishes automatic product-host
 operation without making a commercial-ROM playability claim before the final
 manual acceptance. Four deterministic cartridges generated exclusively from
@@ -172,6 +184,8 @@ parses all bound diagnostic cartridges, runs both
 Gilyon CPU ROMs and Gilyon SPC through the production ports, executes the IPL
 speed transfer, checks all 256000 SPC700 vectors including bus phases, and
 binds the nine exact S-DSP comparison cases.
+Use `./Build.sh maturity-test` for the focused NTSC/PAL host-pacing,
+partition, restart, time-regression, multi-instance, PCM and close gate.
 Use `./Build.sh superfx-reference-test` for the focused reproducible GSU source,
 binary, completion, state and pixel-frame gate.
 Use `./Build.sh sa1-reference-test` for the focused six-ROM SA-1 completion,

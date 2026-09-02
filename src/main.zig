@@ -46,7 +46,11 @@ const error_runtime: i32 = 80;
 const error_host_selftest: i32 = 96;
 const error_e2e_trace: i32 = 97;
 const e2e_guest_duration_ns: u64 = 60 * std.time.ns_per_s;
-const audio_service_timeout_ns: u64 = 50 * std.time.ns_per_ms;
+// Two simultaneous SNES streams can make a healthy AUDSVC write take close
+// to 200 ms under four-vCPU TCG. Keep the bounded synchronous call below the
+// 250-ms host-step gate, but do not degrade a healthy stream at the former
+// 50-ms budget merely because the service worker is contended.
+const audio_service_timeout_ns: u64 = 200 * std.time.ns_per_ms;
 const audio_close_timeout_ns: u64 = 500 * std.time.ns_per_ms;
 const product_audio_target_quanta: u16 = 2;
 const product_audio_max_catchup_quanta: u16 = 16;
