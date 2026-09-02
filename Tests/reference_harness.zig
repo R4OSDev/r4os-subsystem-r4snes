@@ -54,6 +54,8 @@ const Corpus = struct {
     nec_dsp_open_firmware_variants: usize,
     nec_dsp_matrix_words: usize,
     nec_dsp_independent_implementations: usize,
+    st01x_open_synthetic_profiles: usize,
+    st01x_private_firmware_boots: usize,
     commercial_roms: usize,
     proprietary_firmware_images: usize,
 };
@@ -104,12 +106,26 @@ const NecDspReferenceCases = struct {
     firmware_bytes_each: usize,
 };
 
+const St01xReferenceCases = struct {
+    release: []const u8,
+    core: []const u8,
+    revisions: []const []const u8,
+    frequency_hz: []const u32,
+    program_words: usize,
+    data_words: usize,
+    data_ram_words: usize,
+    stack_words: usize,
+    firmware_paths: []const []const u8,
+    firmware_bytes_each: usize,
+};
+
 const Matrix = struct {
     schema: u32,
     release: []const u8,
     corpus: Corpus,
     cx4_reference_cases: Cx4ReferenceCases,
     nec_dsp_reference_cases: NecDspReferenceCases,
+    st01x_reference_cases: St01xReferenceCases,
     suites: []const MatrixSuite,
     enhancement_chips: []const MatrixEnhancement,
 };
@@ -243,7 +259,7 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.17")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.18")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
@@ -253,6 +269,7 @@ fn run(init: std.process.Init) !void {
         matrix.corpus.nec_dsp_open_firmware_variants != expected.nec_dsp_open_firmware_variants or
         matrix.corpus.nec_dsp_matrix_words != expected.nec_dsp_matrix_words or
         matrix.corpus.nec_dsp_independent_implementations != expected.nec_dsp_independent_implementations or
+        matrix.corpus.st01x_open_synthetic_profiles != 2 or matrix.corpus.st01x_private_firmware_boots != 2 or
         matrix.corpus.commercial_roms != 0 or matrix.corpus.proprietary_firmware_images != 0)
     {
         return error.QualificationMatrixMismatch;
@@ -273,6 +290,12 @@ fn run(init: std.process.Init) !void {
         "dsp1-dsp1a-dsp1b-dsp2-dsp3-dsp4",
         "0.73.17",
         "exact 8192-byte user image required and never distributed",
+    );
+    try expectImplementedFirmwareEnhancement(
+        matrix.enhancement_chips,
+        "st010-st011",
+        "0.73.18",
+        "exact 53248-byte ST010.ROM or ST011.ROM required and never distributed",
     );
     const cx4_cases = matrix.cx4_reference_cases;
     if (!std.mem.eql(u8, cx4_cases.release, "0.73.16") or
@@ -303,6 +326,17 @@ fn run(init: std.process.Init) !void {
         nec_dsp_cases.firmware_bytes_each != 8_192)
     {
         return error.NecDspQualificationMismatch;
+    }
+    const st01x_cases = matrix.st01x_reference_cases;
+    if (!std.mem.eql(u8, st01x_cases.release, "0.73.18") or
+        !std.mem.eql(u8, st01x_cases.core, "NEC uPD96050 shared with the uPD7725/uPD77C25 decoder") or
+        st01x_cases.revisions.len != 2 or st01x_cases.frequency_hz.len != 2 or
+        st01x_cases.frequency_hz[0] != 11_000_000 or st01x_cases.frequency_hz[1] != 15_000_000 or
+        st01x_cases.program_words != 16_384 or st01x_cases.data_words != 2_048 or
+        st01x_cases.data_ram_words != 2_048 or st01x_cases.stack_words != 16 or
+        st01x_cases.firmware_paths.len != 2 or st01x_cases.firmware_bytes_each != 53_248)
+    {
+        return error.St01xQualificationMismatch;
     }
 
     const dma_cases_bytes = try cwd.readFileAlloc(io, "Tests/dma_reference_cases.json", allocator, .limited(max_manifest_bytes));

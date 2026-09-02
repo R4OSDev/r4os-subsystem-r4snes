@@ -10,8 +10,16 @@ pub const program_words: usize = program_bytes / 3;
 pub const data_words: usize = data_bytes / 2;
 pub const data_ram_words: usize = 0x100;
 pub const stack_words: usize = 4;
-const program_mask: u16 = @intCast(program_words - 1);
-const stack_mask: u8 = @intCast(stack_words - 1);
+pub const st_firmware_bytes: usize = 0xd000;
+pub const st_program_bytes: usize = 0xc000;
+pub const st_data_bytes: usize = 0x1000;
+pub const st_program_words: usize = st_program_bytes / 3;
+pub const st_data_words: usize = st_data_bytes / 2;
+pub const st_data_ram_words: usize = 0x800;
+pub const st_data_ram_bytes: usize = st_data_ram_words * 2;
+pub const st_stack_words: usize = 16;
+pub const st010_frequency_hz: u32 = 11_000_000;
+pub const st011_frequency_hz: u32 = 15_000_000;
 
 pub const Revision = enum {
     dsp1,
@@ -20,6 +28,8 @@ pub const Revision = enum {
     dsp2,
     dsp3,
     dsp4,
+    st010,
+    st011,
 
     pub fn chipName(self: Revision) []const u8 {
         return switch (self) {
@@ -29,6 +39,8 @@ pub const Revision = enum {
             .dsp2 => "DSP-2",
             .dsp3 => "DSP-3",
             .dsp4 => "DSP-4",
+            .st010 => "ST010",
+            .st011 => "ST011",
         };
     }
 
@@ -40,6 +52,8 @@ pub const Revision = enum {
             .dsp2 => "DSP2.ROM",
             .dsp3 => "DSP3.ROM",
             .dsp4 => "DSP4.ROM",
+            .st010 => "ST010.ROM",
+            .st011 => "ST011.ROM",
         };
     }
 
@@ -51,6 +65,8 @@ pub const Revision = enum {
             .dsp2 => firmware_root ++ "DSP2.ROM",
             .dsp3 => firmware_root ++ "DSP3.ROM",
             .dsp4 => firmware_root ++ "DSP4.ROM",
+            .st010 => firmware_root ++ "ST010.ROM",
+            .st011 => firmware_root ++ "ST011.ROM",
         };
     }
 
@@ -62,6 +78,44 @@ pub const Revision = enum {
             .dsp2 => digestFromHex("03ef4ef26c9f701346708cb5d07847b5203cf1b0818bf2930acd34510ffdd717"),
             .dsp3 => digestFromHex("0971b08f396c32e61989d1067dddf8e4b14649d548b2188f7c541b03d7c69e4e"),
             .dsp4 => digestFromHex("752d03b2d74441e430b7f713001fa241f8bbcfc1a0d890ed4143f174dbe031da"),
+            .st010 => digestFromHex("fa9bced838fedea11c6f6ace33d1878024bdd0d02cc9485899d0bdd4015ec24c"),
+            .st011 => digestFromHex("8b2b3f3f3e6e29f4d21d8bc736b400bc988b7d2214ebee15643f01c1fee2f364"),
+        };
+    }
+
+    pub fn isSt01x(self: Revision) bool {
+        return self == .st010 or self == .st011;
+    }
+
+    pub fn firmwareBytes(self: Revision) usize {
+        return if (self.isSt01x()) st_firmware_bytes else firmware_bytes;
+    }
+
+    pub fn programBytes(self: Revision) usize {
+        return if (self.isSt01x()) st_program_bytes else program_bytes;
+    }
+
+    pub fn programWords(self: Revision) usize {
+        return if (self.isSt01x()) st_program_words else program_words;
+    }
+
+    pub fn dataWords(self: Revision) usize {
+        return if (self.isSt01x()) st_data_words else data_words;
+    }
+
+    pub fn dataRamWords(self: Revision) usize {
+        return if (self.isSt01x()) st_data_ram_words else data_ram_words;
+    }
+
+    pub fn stackWords(self: Revision) usize {
+        return if (self.isSt01x()) st_stack_words else stack_words;
+    }
+
+    pub fn frequencyHz(self: Revision) u32 {
+        return switch (self) {
+            .st010 => st010_frequency_hz,
+            .st011 => st011_frequency_hz,
+            else => frequency_hz,
         };
     }
 };
@@ -89,6 +143,7 @@ pub const HostMap = enum {
     dsp2,
     dsp3,
     dsp4,
+    st01x,
 };
 
 pub const OpcodeClass = enum {
@@ -142,12 +197,13 @@ const status_rqm: u16 = 0x8000;
 const status_ld_preserve: u16 = 0x907c;
 
 pub const Device = struct {
+    allocator: ?std.mem.Allocator = null,
     revision: Revision = .dsp1b,
     host_map: HostMap = .dsp1_lo_small,
-    program_rom: [program_words]u24 = [_]u24{0} ** program_words,
-    data_rom: [data_words]u16 = [_]u16{0} ** data_words,
-    data_ram: [data_ram_words]u16 = [_]u16{0} ** data_ram_words,
-    stack: [stack_words]u16 = [_]u16{0} ** stack_words,
+    program_rom: []u24 = &.{},
+    data_rom: []u16 = &.{},
+    data_ram: []u16 = &.{},
+    stack: []u16 = &.{},
     firmware_digest: [32]u8 = [_]u8{0} ** 32,
     firmware_source: FirmwareSource = .separate,
     firmware_installed: bool = false,
@@ -182,8 +238,12 @@ pub const Device = struct {
     status_writes: u64 = 0,
     reserved_branches: u64 = 0,
     resets: u64 = 0,
+    data_ram_dirty: bool = false,
+    data_ram_dirty_first: usize = 0,
+    data_ram_dirty_end: usize = 0,
 
     pub fn init(
+        allocator: std.mem.Allocator,
         revision: Revision,
         mapping: board.Mapping,
         rom_size: usize,
@@ -193,29 +253,42 @@ pub const Device = struct {
         source: FirmwareSource,
     ) !Device {
         var result = Device{
+            .allocator = allocator,
             .revision = revision,
             .host_map = try selectHostMap(revision, mapping, rom_size, sram_size),
             .firmware_source = source,
         };
+        result.program_rom = try allocator.alloc(u24, revision.programWords());
+        errdefer allocator.free(result.program_rom);
+        result.data_rom = try allocator.alloc(u16, revision.dataWords());
+        errdefer allocator.free(result.data_rom);
+        result.data_ram = try allocator.alloc(u16, revision.dataRamWords());
+        errdefer allocator.free(result.data_ram);
+        result.stack = try allocator.alloc(u16, revision.stackWords());
+        errdefer allocator.free(result.stack);
+        @memset(result.program_rom, 0);
+        @memset(result.data_rom, 0);
+        @memset(result.data_ram, 0);
+        @memset(result.stack, 0);
         try result.installFirmware(bytes, validation);
         return result;
     }
 
     pub fn installFirmware(self: *Device, bytes: []const u8, validation: FirmwareValidation) !void {
-        if (bytes.len != firmware_bytes) return error.InvalidNecDspFirmwareSize;
+        if (bytes.len != self.revision.firmwareBytes()) return error.InvalidNecDspFirmwareSize;
         var actual: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &actual, .{});
         if (validation == .known_only and !std.mem.eql(u8, &actual, &self.revision.knownDigest()))
             return error.InvalidNecDspFirmwareDigest;
 
-        for (0..program_words) |index| {
+        for (0..self.revision.programWords()) |index| {
             const offset = index * 3;
             self.program_rom[index] = @as(u24, bytes[offset]) |
                 (@as(u24, bytes[offset + 1]) << 8) |
                 (@as(u24, bytes[offset + 2]) << 16);
         }
-        for (0..data_words) |index| {
-            const offset = program_bytes + index * 2;
+        for (0..self.revision.dataWords()) |index| {
+            const offset = self.revision.programBytes() + index * 2;
             self.data_rom[index] = @as(u16, bytes[offset]) |
                 (@as(u16, bytes[offset + 1]) << 8);
         }
@@ -225,8 +298,15 @@ pub const Device = struct {
     }
 
     pub fn power(self: *Device) void {
-        @memset(&self.data_ram, 0);
-        @memset(&self.stack, 0);
+        @memset(self.data_ram, 0);
+        self.resetExecutionState();
+        self.data_ram_dirty = false;
+        self.data_ram_dirty_first = 0;
+        self.data_ram_dirty_end = 0;
+    }
+
+    fn resetExecutionState(self: *Device) void {
+        @memset(self.stack, 0);
         self.pc = 0;
         self.rp = 0;
         self.dp = 0;
@@ -263,20 +343,44 @@ pub const Device = struct {
     pub fn reset(self: *Device) void {
         const reset_count = self.resets +% 1;
         const source = self.firmware_source;
-        self.power();
+        const dirty = self.data_ram_dirty;
+        const dirty_first = self.data_ram_dirty_first;
+        const dirty_end = self.data_ram_dirty_end;
+        if (self.revision.isSt01x()) {
+            self.resetExecutionState();
+            self.data_ram_dirty = dirty;
+            self.data_ram_dirty_first = dirty_first;
+            self.data_ram_dirty_end = dirty_end;
+        } else {
+            self.power();
+        }
         self.firmware_source = source;
         self.resets = reset_count;
     }
 
     pub fn close(self: *Device) void {
         if (self.closed) return;
-        @memset(&self.program_rom, 0);
-        @memset(&self.data_rom, 0);
-        @memset(&self.data_ram, 0);
-        @memset(&self.stack, 0);
+        @memset(self.program_rom, 0);
+        @memset(self.data_rom, 0);
+        @memset(self.data_ram, 0);
+        @memset(self.stack, 0);
         @memset(&self.firmware_digest, 0);
+        if (self.allocator) |allocator| {
+            allocator.free(self.program_rom);
+            allocator.free(self.data_rom);
+            allocator.free(self.data_ram);
+            allocator.free(self.stack);
+        }
+        self.program_rom = &.{};
+        self.data_rom = &.{};
+        self.data_ram = &.{};
+        self.stack = &.{};
+        self.allocator = null;
         self.firmware_installed = false;
         self.waiting_host = false;
+        self.data_ram_dirty = false;
+        self.data_ram_dirty_first = 0;
+        self.data_ram_dirty_end = 0;
         self.closed = true;
     }
 
@@ -298,6 +402,7 @@ pub const Device = struct {
 
     pub fn step(self: *Device) void {
         if (self.closed or !self.firmware_installed) return;
+        const program_mask = self.programMask();
         const opcode = self.program_rom[self.pc & program_mask];
         self.pc = (self.pc +% 1) & program_mask;
         _ = self.executeOpcode(opcode);
@@ -314,8 +419,8 @@ pub const Device = struct {
             },
             1 => blk: {
                 self.executeOperation(raw_opcode);
-                self.sp = (self.sp -% 1) & stack_mask;
-                self.pc = self.stack[self.sp] & program_mask;
+                self.sp = (self.sp -% 1) & self.stackMask();
+                self.pc = self.stack[self.sp] & self.programMask();
                 break :blk .operation_return;
             },
             2 => blk: {
@@ -332,6 +437,10 @@ pub const Device = struct {
 
     pub fn readCpu(self: *Device, address: u32, _: u8) ?u8 {
         if (self.closed or !self.firmware_installed) return null;
+        if (self.stRamByteIndex(address)) |index| {
+            self.host_reads +%= 1;
+            return self.readRamByte(index);
+        }
         const port = self.decodePort(address) orelse return null;
         self.host_reads +%= 1;
         self.waiting_host = false;
@@ -343,6 +452,11 @@ pub const Device = struct {
 
     pub fn writeCpu(self: *Device, address: u32, value: u8) bool {
         if (self.closed or !self.firmware_installed) return false;
+        if (self.stRamByteIndex(address)) |index| {
+            self.host_writes +%= 1;
+            self.writeRamByte(index, value);
+            return true;
+        }
         const port = self.decodePort(address) orelse return false;
         self.host_writes +%= 1;
         self.waiting_host = false;
@@ -365,6 +479,39 @@ pub const Device = struct {
 
     pub fn busy(self: *const Device) bool {
         return !self.requestForMaster();
+    }
+
+    pub fn frequencyHz(self: *const Device) u32 {
+        return self.revision.frequencyHz();
+    }
+
+    pub fn takeDirtyRange(self: *Device) ?struct { first: usize, end: usize } {
+        if (!self.data_ram_dirty) return null;
+        const first = self.data_ram_dirty_first;
+        const end = self.data_ram_dirty_end;
+        self.data_ram_dirty = false;
+        self.data_ram_dirty_first = 0;
+        self.data_ram_dirty_end = 0;
+        return .{ .first = first, .end = end };
+    }
+
+    pub fn restorePersistentRam(self: *Device, bytes: []const u8) !void {
+        if (!self.revision.isSt01x() or bytes.len != st_data_ram_bytes)
+            return error.InvalidNecDspPersistentRamSize;
+        for (self.data_ram, 0..) |*word, index| {
+            const offset = index * 2;
+            word.* = @as(u16, bytes[offset]) | (@as(u16, bytes[offset + 1]) << 8);
+        }
+        self.data_ram_dirty = false;
+        self.data_ram_dirty_first = 0;
+        self.data_ram_dirty_end = 0;
+    }
+
+    pub fn copyPersistentRamRange(self: *const Device, destination: []u8, first: usize, end: usize) !void {
+        if (!self.revision.isSt01x() or destination.len != st_data_ram_bytes or first > end or end > destination.len)
+            return error.InvalidNecDspPersistentRamSize;
+        var index = first;
+        while (index < end) : (index += 1) destination[index] = self.readRamByte(index);
     }
 
     pub fn stateDigest(self: *const Device) u64 {
@@ -417,13 +564,13 @@ pub const Device = struct {
             var next = self.dp;
             switch (dp_low) {
                 0 => {},
-                1 => next = (next & 0xf0) | ((next +% 1) & 0x0f),
-                2 => next = (next & 0xf0) | ((next -% 1) & 0x0f),
-                3 => next &= 0xf0,
+                1 => next = (next & 0x7f0) | ((next +% 1) & 0x0f),
+                2 => next = (next & 0x7f0) | ((next -% 1) & 0x0f),
+                3 => next &= 0x7f0,
             }
-            self.dp = (next ^ (@as(u16, dp_high) << 4)) & 0xff;
+            self.dp = (next ^ (@as(u16, dp_high) << 4)) & self.dataRamMask();
         }
-        if (destination != 5 and decrement_rp) self.rp = (self.rp -% 1) & 0x03ff;
+        if (destination != 5 and decrement_rp) self.rp = (self.rp -% 1) & self.dataRomMask();
     }
 
     fn sourceValue(self: *Device, source: u4) u16 {
@@ -434,7 +581,7 @@ pub const Device = struct {
             3 => self.tr,
             4 => self.dp,
             5 => self.rp,
-            6 => self.data_rom[self.rp & 0x03ff],
+            6 => self.data_rom[self.rp & self.dataRomMask()],
             7 => @as(u16, 0x8000) - @as(u16, @intFromBool(self.flags_a.sign1)),
             8 => blk: {
                 self.sr |= status_rqm;
@@ -445,7 +592,7 @@ pub const Device = struct {
             11, 12 => self.serial_input,
             13 => self.k,
             14 => self.l,
-            15 => self.data_ram[self.dp & 0xff],
+            15 => self.data_ram[self.dp & self.dataRamMask()],
         };
     }
 
@@ -455,8 +602,8 @@ pub const Device = struct {
             1 => self.a = value,
             2 => self.b = value,
             3 => self.tr = value,
-            4 => self.dp = value & 0xff,
-            5 => self.rp = value & 0x03ff,
+            4 => self.dp = value & self.dataRamMask(),
+            5 => self.rp = value & self.dataRomMask(),
             6 => {
                 self.dr = value;
                 self.sr |= status_rqm;
@@ -466,15 +613,15 @@ pub const Device = struct {
             10 => self.k = value,
             11 => {
                 self.k = value;
-                self.l = self.data_rom[self.rp & 0x03ff];
+                self.l = self.data_rom[self.rp & self.dataRomMask()];
             },
             12 => {
                 self.l = value;
-                self.k = self.data_ram[(self.dp | 0x40) & 0xff];
+                self.k = self.data_ram[(self.dp | 0x40) & self.dataRamMask()];
             },
             13 => self.l = value,
             14 => self.trb = value,
-            15 => self.data_ram[self.dp & 0xff] = value,
+            15 => self.writeRamWord(self.dp & self.dataRamMask(), value),
         }
     }
 
@@ -483,7 +630,7 @@ pub const Device = struct {
         const other_carry = if (select_b) self.flags_a.carry else self.flags_b.carry;
         const accumulator = if (select_b) self.b else self.a;
         var operand: u16 = switch (p_select) {
-            0 => self.data_ram[self.dp & 0xff],
+            0 => self.data_ram[self.dp & self.dataRamMask()],
             1 => source,
             2 => self.m,
             3 => self.n,
@@ -558,7 +705,9 @@ pub const Device = struct {
     fn executeJump(self: *Device, opcode: u24) void {
         const branch: u9 = @truncate(opcode >> 13);
         const next_address: u11 = @truncate(opcode >> 2);
-        const target: u16 = @as(u16, next_address) & program_mask;
+        const bank: u2 = @truncate(opcode);
+        const program_mask = self.programMask();
+        const target: u16 = ((self.pc & 0x2000) | (@as(u16, bank) << 11) | @as(u16, next_address)) & program_mask;
         var taken: ?bool = null;
         switch (branch) {
             0x000 => self.pc = self.serial_output & program_mask,
@@ -596,11 +745,16 @@ pub const Device = struct {
             0x0ba => taken = self.serial_output_ack,
             0x0bc => taken = !self.requestForMaster(),
             0x0be => taken = self.requestForMaster(),
-            0x100, 0x101 => self.pc = target,
+            0x100 => self.pc = target & ~@as(u16, 0x2000),
+            0x101 => self.pc = (target | 0x2000) & program_mask,
             0x140, 0x141 => {
+                const stack_mask = self.stackMask();
                 self.stack[self.sp & stack_mask] = self.pc;
                 self.sp = (self.sp +% 1) & stack_mask;
-                self.pc = target;
+                self.pc = if (branch == 0x140)
+                    target & ~@as(u16, 0x2000)
+                else
+                    (target | 0x2000) & program_mask;
             },
             else => self.reserved_branches +%= 1,
         }
@@ -693,15 +847,81 @@ pub const Device = struct {
                 if (offset < 0xc000) .data else .status
             else
                 null,
+            .st01x => if (((bank >= 0x60 and bank <= 0x67) or
+                (bank >= 0xe0 and bank <= 0xe7)) and offset < 0x4000)
+                if ((offset & 1) == 0) .data else .status
+            else
+                null,
         };
     }
 
     fn rqmConditionStillBlocks(self: *const Device) bool {
-        const opcode = self.program_rom[self.pc & program_mask];
+        const opcode = self.program_rom[self.pc & self.programMask()];
         if ((opcode >> 22) != 2) return false;
         const branch: u9 = @truncate(opcode >> 13);
         return (branch == 0x0bc and !self.requestForMaster()) or
             (branch == 0x0be and self.requestForMaster());
+    }
+
+    fn programMask(self: *const Device) u16 {
+        return @intCast(self.program_rom.len - 1);
+    }
+
+    fn dataRomMask(self: *const Device) u16 {
+        return @intCast(self.data_rom.len - 1);
+    }
+
+    fn dataRamMask(self: *const Device) u16 {
+        return @intCast(self.data_ram.len - 1);
+    }
+
+    fn stackMask(self: *const Device) u8 {
+        return @intCast(self.stack.len - 1);
+    }
+
+    fn stRamByteIndex(self: *const Device, address: u32) ?usize {
+        if (!self.revision.isSt01x() or address > 0x00ff_ffff) return null;
+        const bank: u8 = @truncate(address >> 16);
+        const offset: u16 = @truncate(address);
+        if (!((bank >= 0x68 and bank <= 0x6f) or (bank >= 0xe8 and bank <= 0xef)) or offset >= 0x8000)
+            return null;
+        return @as(usize, offset & 0x0fff);
+    }
+
+    fn readRamByte(self: *const Device, index: usize) u8 {
+        const word = self.data_ram[(index >> 1) & @as(usize, self.dataRamMask())];
+        return if ((index & 1) == 0) @truncate(word) else @truncate(word >> 8);
+    }
+
+    fn writeRamByte(self: *Device, index: usize, value: u8) void {
+        const word_index = (index >> 1) & @as(usize, self.dataRamMask());
+        const old = self.data_ram[word_index];
+        const next = if ((index & 1) == 0)
+            (old & 0xff00) | @as(u16, value)
+        else
+            (old & 0x00ff) | (@as(u16, value) << 8);
+        if (old == next) return;
+        self.data_ram[word_index] = next;
+        self.markRamDirty(index, index + 1);
+    }
+
+    fn writeRamWord(self: *Device, index: usize, value: u16) void {
+        const word_index = index & @as(usize, self.dataRamMask());
+        if (self.data_ram[word_index] == value) return;
+        self.data_ram[word_index] = value;
+        self.markRamDirty(word_index * 2, word_index * 2 + 2);
+    }
+
+    fn markRamDirty(self: *Device, first: usize, end: usize) void {
+        if (!self.revision.isSt01x()) return;
+        if (!self.data_ram_dirty) {
+            self.data_ram_dirty = true;
+            self.data_ram_dirty_first = first;
+            self.data_ram_dirty_end = end;
+            return;
+        }
+        self.data_ram_dirty_first = @min(self.data_ram_dirty_first, first);
+        self.data_ram_dirty_end = @max(self.data_ram_dirty_end, end);
     }
 };
 
@@ -720,11 +940,15 @@ pub fn selectHostMap(revision: Revision, mapping: board.Mapping, rom_size: usize
         .dsp2 => if (mapping == .lo_rom) .dsp2 else error.ContradictoryNecDspBoard,
         .dsp3 => if (mapping == .lo_rom) .dsp3 else error.ContradictoryNecDspBoard,
         .dsp4 => if (mapping == .lo_rom) .dsp4 else error.ContradictoryNecDspBoard,
+        .st010, .st011 => if (mapping == .lo_rom and sram_size == st_data_ram_bytes)
+            .st01x
+        else
+            error.ContradictoryNecDspBoard,
     };
 }
 
 pub fn validateFirmware(revision: Revision, bytes: []const u8, validation: FirmwareValidation) ![32]u8 {
-    if (bytes.len != firmware_bytes) return error.InvalidNecDspFirmwareSize;
+    if (bytes.len != revision.firmwareBytes()) return error.InvalidNecDspFirmwareSize;
     var actual: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &actual, .{});
     if (validation == .known_only and !std.mem.eql(u8, &actual, &revision.knownDigest()))

@@ -161,6 +161,52 @@ fn makeCart(
     return result;
 }
 
+fn makeStCart(allocator: std.mem.Allocator, identity_byte: u8) !core.cartridge.Cartridge {
+    var result = try makeCart(allocator, core.nec_dsp.st_data_ram_bytes, true, .st010_st011, identity_byte);
+    errdefer result.deinit();
+    const firmware = try allocator.alloc(u8, core.nec_dsp.st_firmware_bytes);
+    defer {
+        @memset(firmware, 0);
+        allocator.free(firmware);
+    }
+    @memset(firmware, 0);
+    result.nec_dsp_device = try core.nec_dsp.Device.init(
+        allocator,
+        .st010,
+        .lo_rom,
+        1024 * 1024,
+        core.nec_dsp.st_data_ram_bytes,
+        firmware,
+        .allow_open_test,
+        .open_test,
+    );
+    return result;
+}
+
+test "ST010 data RAM uses one exact canonical save and restores into the uPD96050 owner" {
+    const allocator = std.testing.allocator;
+    var fake = try FakeBackend.init(allocator);
+    defer fake.deinit();
+    var first = try makeStCart(allocator, 0x10);
+    defer first.deinit();
+    var second = try makeStCart(allocator, 0x10);
+    defer second.deinit();
+
+    var session = try core.persistence.Session.open(&first, fake.backend(), 61, 100, 200);
+    try std.testing.expect(first.writeEnhancement(0x680246, 0x5a));
+    try std.testing.expect(first.writeEnhancement(0xe80247, 0xc3));
+    try std.testing.expectEqual(@as(u16, 0xc35a), first.nec_dsp_device.?.data_ram[0x123]);
+    try std.testing.expect(first.sram_dirty);
+    try session.close(&first, 61, 101, 300);
+    try std.testing.expectEqual(@as(usize, core.nec_dsp.st_data_ram_bytes), fake.sram_len);
+
+    var reopened = try core.persistence.Session.open(&second, fake.backend(), 62, 101, 400);
+    try std.testing.expectEqual(@as(u16, 0xc35a), second.nec_dsp_device.?.data_ram[0x123]);
+    try std.testing.expectEqual(@as(?u8, 0x5a), second.readEnhancement(0x6f7246, 0));
+    try std.testing.expectEqual(@as(?u8, 0xc3), second.readEnhancement(0xef7247, 0));
+    try reopened.close(&second, 62, 101, 400);
+}
+
 test "battery-backed Super FX work RAM uses the canonical hash save and internal GSU writes survive reopen" {
     const allocator = std.testing.allocator;
     var fake = try FakeBackend.init(allocator);

@@ -1,6 +1,6 @@
 ﻿# Compatibility
 
-The 0.16.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
+The 0.17.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
 normalizes an optional 512-byte copier header and requires one unambiguous
 LoROM, HiROM, ExLoROM or ExHiROM header. Region, board capability, declared
 sizes, reset vector, startup opcode and checksum/complement contribute to a
@@ -43,9 +43,11 @@ battery and 8192-byte object-RAM profile. S-RTC requires its ExHiROM, battery
 and save-RAM profile. Recognizable but unknown revisions and contradictory
 profiles have separate rejection classes. The capability table exposes NEC
 DSP-1/1A/1B/2/3/4 as executable with an exact 8192-byte user-firmware
-requirement and continues to name the later ST010/011 and ST018 firmware sizes
-without claiming those devices are already executable. MSU-1 and adapter
-systems remain explicit exclusions.
+requirement. ST010 and ST011 are executable on the same dynamically sized NEC
+core with exact 53248-byte `ST010.ROM` or `ST011.ROM` user firmware, 4096-byte
+battery data RAM and their Setz LoROM windows. ST018 remains named without a
+false executability claim. MSU-1 and adapter systems remain explicit
+exclusions.
 
 The S-PPU owner now covers modes 0-7, native hires and interlace geometries,
 Mode 7, windows, main/subscreen composition, color math, fixed color, mosaic,
@@ -97,3 +99,14 @@ missing, wrong-size, wrong-revision or duplicate source fails before execution
 with the chip, file and expected size. Six generated open images are the
 public gate; locally owned known images are optional and never enter an
 artifact.
+
+ST010/ST011 qualification extends that decoder to the uPD96050 16384-word
+program ROM, 2048-word data ROM, 2048-word data RAM, 14-bit PC, 11-bit DP/RP
+and 16-entry stack. It covers banked jumps/calls, pointer preservation,
+11/15-MHz profiles, `$60-$67/$E0-$E7` even-DR/odd-SR registers and mirrored
+`$68-$6F/$E8-$EF` data RAM through the production cartridge bus. That RAM is
+the exact 4096-byte normalized-ROM `HASH.SAV`; reset preserves it and restart
+restores it before execution. Open synthetic images cover host, math, reset,
+slicing, contention and instance isolation, while the optional private gate
+validates and boots both known firmware digests in place without publishing
+bytes or command tables.

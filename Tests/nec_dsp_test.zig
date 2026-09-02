@@ -23,9 +23,92 @@ test "NEC-DSP firmware contract binds names sizes revisions and known digests" {
     _ = try ndsp.validateFirmware(.dsp1b, &open, .allow_open_test);
 }
 
+test "ST010 and ST011 bind exact uPD96050 firmware geometry identity and clocks" {
+    try std.testing.expectEqual(@as(usize, 0xd000), ndsp.st_firmware_bytes);
+    try std.testing.expectEqual(@as(usize, 0xc000), ndsp.st_program_bytes);
+    try std.testing.expectEqual(@as(usize, 0x1000), ndsp.st_data_bytes);
+    try std.testing.expectEqual(@as(usize, 0x1000), ndsp.st_data_ram_bytes);
+    try std.testing.expectEqual(@as(usize, 16), ndsp.st_stack_words);
+    try std.testing.expectEqual(@as(u32, 11_000_000), ndsp.Revision.st010.frequencyHz());
+    try std.testing.expectEqual(@as(u32, 15_000_000), ndsp.Revision.st011.frequencyHz());
+    try std.testing.expectEqualStrings("ST010.ROM", ndsp.Revision.st010.fileName());
+    try std.testing.expectEqualStrings("ST011.ROM", ndsp.Revision.st011.fileName());
+    try std.testing.expect(std.mem.endsWith(u8, ndsp.Revision.st010.firmwarePath(), "ST010.ROM"));
+    try std.testing.expect(std.mem.endsWith(u8, ndsp.Revision.st011.firmwarePath(), "ST011.ROM"));
+    try std.testing.expect(!std.mem.eql(u8, &ndsp.Revision.st010.knownDigest(), &ndsp.Revision.st011.knownDigest()));
+
+    const firmware = try makeStFirmware(std.testing.allocator, 0x10);
+    defer {
+        @memset(firmware, 0);
+        std.testing.allocator.free(firmware);
+    }
+    try std.testing.expectError(error.InvalidNecDspFirmwareDigest, ndsp.validateFirmware(.st010, firmware, .known_only));
+    try std.testing.expectError(error.InvalidNecDspFirmwareSize, ndsp.validateFirmware(.st010, firmware[0 .. firmware.len - 1], .allow_open_test));
+    _ = try ndsp.validateFirmware(.st010, firmware, .allow_open_test);
+}
+
+test "uPD96050 extends the shared decoder with 14-bit PC 11-bit pointers and 16-word stack" {
+    const firmware = try makeStFirmware(std.testing.allocator, 0x50);
+    defer {
+        @memset(firmware, 0);
+        std.testing.allocator.free(firmware);
+    }
+    var device = try ndsp.Device.init(
+        std.testing.allocator,
+        .st010,
+        .lo_rom,
+        1024 * 1024,
+        ndsp.st_data_ram_bytes,
+        firmware,
+        .allow_open_test,
+        .open_test,
+    );
+    defer device.close();
+    try std.testing.expectEqual(@as(usize, ndsp.st_program_words), device.program_rom.len);
+    try std.testing.expectEqual(@as(usize, ndsp.st_data_words), device.data_rom.len);
+    try std.testing.expectEqual(@as(usize, ndsp.st_data_ram_words), device.data_ram.len);
+    try std.testing.expectEqual(@as(usize, ndsp.st_stack_words), device.stack.len);
+    try std.testing.expectEqual(@as(u16, 0x084f), device.data_rom[0x7ff]);
+
+    device.dp = 0x72f;
+    _ = device.executeOpcode(operation(0, 0, false, 1, 0, false, 0, 0));
+    try std.testing.expectEqual(@as(u16, 0x720), device.dp);
+    device.dp = 0x620;
+    _ = device.executeOpcode(operation(0, 0, false, 0, 0x0f, false, 0, 0));
+    try std.testing.expectEqual(@as(u16, 0x6d0), device.dp);
+    device.rp = 0;
+    _ = device.executeOpcode(operation(0, 0, false, 0, 0, true, 0, 0));
+    try std.testing.expectEqual(@as(u16, 0x07ff), device.rp);
+
+    device.pc = 0x2000;
+    _ = device.executeOpcode(jumpBank(0x100, 0x123, 3));
+    try std.testing.expectEqual(@as(u16, 0x1923), device.pc);
+    device.pc = 0;
+    _ = device.executeOpcode(jumpBank(0x101, 0x155, 2));
+    try std.testing.expectEqual(@as(u16, 0x3155), device.pc);
+    device.sp = 0;
+    for (0..ndsp.st_stack_words) |index| {
+        device.pc = @intCast(index + 1);
+        _ = device.executeOpcode(jumpBank(0x140, 0x40, 0));
+    }
+    try std.testing.expectEqual(@as(u8, 0), device.sp);
+    try std.testing.expectEqual(@as(u16, 16), device.stack[15]);
+
+    device.dp = 0x321;
+    _ = device.executeOpcode(loadImmediate(0xbeef, 15));
+    const dirty = device.takeDirtyRange().?;
+    try std.testing.expectEqual(@as(usize, 0x642), dirty.first);
+    try std.testing.expectEqual(@as(usize, 0x644), dirty.end);
+    device.reset();
+    try std.testing.expectEqual(@as(u16, 0xbeef), device.data_ram[0x321]);
+    try std.testing.expectEqual(@as(u16, 0), device.pc);
+    try std.testing.expectEqual(@as(u64, 1), device.resets);
+}
+
 test "uPD7725 decodes every instruction class source destination ALU and pointer mode" {
     var firmware = makeFirmware(0x22);
     var device = try makeDevice(.dsp1b, .lo_rom, 1024 * 1024, 0, &firmware);
+    defer device.close();
 
     for (0..16) |raw_source| {
         device.trb = 0x1000;
@@ -53,6 +136,7 @@ test "uPD7725 decodes every instruction class source destination ALU and pointer
 
     for (0..16) |raw_destination| {
         var isolated = try makeDevice(.dsp1b, .lo_rom, 1024 * 1024, 0, &firmware);
+        defer isolated.close();
         isolated.rp = 7;
         isolated.dp = 8;
         isolated.data_rom[7] = 0x7654;
@@ -93,6 +177,7 @@ test "uPD7725 decodes every instruction class source destination ALU and pointer
     };
     for (1..16) |raw_alu| {
         var isolated = try makeDevice(.dsp1b, .lo_rom, 1024 * 1024, 0, &firmware);
+        defer isolated.close();
         isolated.a = 0x7f81;
         isolated.trb = 0x1357;
         isolated.flags_b.carry = true;
@@ -116,6 +201,7 @@ test "uPD7725 decodes every instruction class source destination ALU and pointer
 test "uPD7725 branches calls returns multiplier pipeline and reserved encodings are bounded" {
     var firmware = makeFirmware(0x33);
     var device = try makeDevice(.dsp1b, .lo_rom, 1024 * 1024, 0, &firmware);
+    defer device.close();
     const branch_pairs = [_]struct { clear: u9, set: u9 }{
         .{ .clear = 0x080, .set = 0x082 },
         .{ .clear = 0x084, .set = 0x086 },
@@ -190,6 +276,7 @@ test "uPD7725 branches calls returns multiplier pipeline and reserved encodings 
 test "NEC-DSP host handshake reset slices and close are deterministic" {
     var firmware = makeHandshakeFirmware();
     var one = try makeDevice(.dsp1b, .lo_rom, 1024 * 1024, 0, &firmware);
+    defer one.close();
     const first_wait = one.runSlice(16);
     try std.testing.expectEqual(ndsp.RunState.waiting_host, first_wait.state);
     try std.testing.expectEqual(@as(usize, 2), first_wait.executed);
@@ -226,7 +313,9 @@ test "NEC-DSP host handshake reset slices and close are deterministic" {
 
     var linear_firmware = makeLinearFirmware();
     var linear = try makeDevice(.dsp1b, .lo_rom, 1024 * 1024, 0, &linear_firmware);
+    defer linear.close();
     var partitioned = try makeDevice(.dsp1b, .lo_rom, 1024 * 1024, 0, &linear_firmware);
+    defer partitioned.close();
     _ = linear.runSlice(1000);
     var remaining: usize = 1000;
     var amount: usize = 1;
@@ -242,8 +331,8 @@ test "NEC-DSP host handshake reset slices and close are deterministic" {
     one.close();
     try std.testing.expect(one.closed);
     try std.testing.expect(!one.firmware_installed);
-    try std.testing.expectEqual(@as(u24, 0), one.program_rom[0]);
-    try std.testing.expectEqual(@as(u16, 0), one.data_rom[0]);
+    try std.testing.expectEqual(@as(usize, 0), one.program_rom.len);
+    try std.testing.expectEqual(@as(usize, 0), one.data_rom.len);
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &one.firmware_digest);
 }
 
@@ -294,6 +383,105 @@ test "all DSP boards parse with explicit firmware and expose exact canonical win
     defer large_cart.deinit();
     try std.testing.expect(large_cart.nec_dsp_device.?.readCpu(0x600000, 0) != null);
     try std.testing.expect(large_cart.nec_dsp_device.?.readCpu(0x604000, 0) != null);
+}
+
+test "ST010 and ST011 boards expose exact registers mirrored data RAM persistence and isolation" {
+    const allocator = std.testing.allocator;
+    const st010_firmware = try makeStFirmware(allocator, 0x10);
+    defer {
+        @memset(st010_firmware, 0);
+        allocator.free(st010_firmware);
+    }
+    const st011_firmware = try makeStFirmware(allocator, 0x11);
+    defer {
+        @memset(st011_firmware, 0);
+        allocator.free(st011_firmware);
+    }
+    const st010_image = try makeStImage(allocator, 1024 * 1024);
+    defer allocator.free(st010_image);
+    const st011_image = try makeStImage(allocator, 512 * 1024);
+    defer allocator.free(st011_image);
+
+    const st010_requirement = (try core.cartridge.inspectNecDspRequirement(st010_image, null)).?;
+    const st011_requirement = (try core.cartridge.inspectNecDspRequirement(st011_image, null)).?;
+    try std.testing.expectEqual(ndsp.Revision.st010, st010_requirement.revision);
+    try std.testing.expectEqual(ndsp.Revision.st011, st011_requirement.revision);
+    try std.testing.expectEqual(@as(usize, ndsp.st_firmware_bytes), st010_requirement.firmwareBytes());
+    try std.testing.expectError(error.MissingNecDspFirmware, core.cartridge.Cartridge.parse(allocator, st010_image));
+    try std.testing.expectError(error.InvalidNecDspFirmwareSize, core.cartridge.Cartridge.parseWithOptions(allocator, st010_image, .{
+        .nec_dsp_revision = .st010,
+        .nec_dsp_firmware = st010_firmware[0 .. st010_firmware.len - 1],
+        .nec_dsp_firmware_validation = .allow_open_test,
+    }));
+    try std.testing.expectError(error.InvalidNecDspFirmwareDigest, core.cartridge.Cartridge.parseWithOptions(allocator, st010_image, .{
+        .nec_dsp_revision = .st010,
+        .nec_dsp_firmware = st010_firmware,
+    }));
+
+    var st010 = try core.cartridge.Cartridge.parseWithOptions(allocator, st010_image, .{
+        .nec_dsp_revision = .st010,
+        .nec_dsp_firmware = st010_firmware,
+        .nec_dsp_firmware_validation = .allow_open_test,
+    });
+    defer st010.deinit();
+    var st011 = try core.cartridge.Cartridge.parseWithOptions(allocator, st011_image, .{
+        .nec_dsp_revision = .st011,
+        .nec_dsp_firmware = st011_firmware,
+        .nec_dsp_firmware_validation = .allow_open_test,
+    });
+    defer st011.deinit();
+    try std.testing.expect(st010.board.readyForExecution());
+    try std.testing.expect(st010.board.battery);
+    try std.testing.expectEqual(@as(usize, ndsp.st_data_ram_bytes), st010.sram().len);
+    try std.testing.expectEqual(@as(u32, ndsp.st010_frequency_hz), st010.nec_dsp_device.?.frequencyHz());
+    try std.testing.expectEqual(@as(u32, ndsp.st011_frequency_hz), st011.nec_dsp_device.?.frequencyHz());
+
+    var bus = core.bus.Bus{};
+    var mmio = core.bus.NullMmio{};
+    const st011_before = st011.nec_dsp_device.?.stateDigest();
+    const first_wait = st010.runNecDspSlice(16).?;
+    try std.testing.expectEqual(ndsp.RunState.waiting_host, first_wait.state);
+    const status = bus.read(&st010, &mmio, 0x600001);
+    try std.testing.expectEqual(core.bus.AccessClass.cartridge_chip, status.class);
+    try std.testing.expectEqual(@as(u8, ndsp.access_master_cycles), status.master_cycles);
+    try std.testing.expectEqual(@as(u8, 0x80), status.value);
+    try std.testing.expectEqual(@as(u8, 0x34), bus.read(&st010, &mmio, 0xe00000).value);
+    try std.testing.expectEqual(@as(u8, 0x12), bus.read(&st010, &mmio, 0x673ffe).value);
+
+    _ = bus.write(&st010, &mmio, 0x680642, 0xef);
+    _ = bus.write(&st010, &mmio, 0xe80643, 0xbe);
+    try std.testing.expectEqual(@as(u8, 0xef), bus.read(&st010, &mmio, 0x6f7642).value);
+    try std.testing.expectEqual(@as(u8, 0xbe), bus.read(&st010, &mmio, 0xef7643).value);
+    try std.testing.expectEqual(@as(u16, 0xbeef), st010.nec_dsp_device.?.data_ram[0x321]);
+    try std.testing.expectEqual(@as(u8, 0xef), st010.sram_storage[0x642]);
+    try std.testing.expectEqual(@as(u8, 0xbe), st010.sram_storage[0x643]);
+    const dirty = st010.dirtyRange().?;
+    try std.testing.expectEqual(@as(usize, 0x642), dirty.first);
+    try std.testing.expectEqual(@as(usize, 0x644), dirty.end);
+    try std.testing.expectEqual(st011_before, st011.nec_dsp_device.?.stateDigest());
+
+    st010.nec_dsp_device.?.reset();
+    try std.testing.expectEqual(@as(u16, 0xbeef), st010.nec_dsp_device.?.data_ram[0x321]);
+    st010.sram_storage[0x642] = 0x57;
+    st010.sram_storage[0x643] = 0x13;
+    try st010.restoreNecDspPersistentRam();
+    try std.testing.expectEqual(@as(u16, 0x1357), st010.nec_dsp_device.?.data_ram[0x321]);
+    try std.testing.expect(st010.board.sramIndex(0x700000) == null);
+
+    const appended = try allocator.alloc(u8, st010_image.len + st010_firmware.len);
+    defer allocator.free(appended);
+    @memcpy(appended[0..st010_image.len], st010_image);
+    @memcpy(appended[st010_image.len..], st010_firmware);
+    const geometry = try core.cartridge.inspectContainerSize(appended.len);
+    try std.testing.expect(geometry.appended_firmware);
+    try std.testing.expectEqual(@as(usize, ndsp.st_firmware_bytes), geometry.appended_firmware_bytes);
+    var appended_cart = try core.cartridge.Cartridge.parseWithOptions(allocator, appended, .{
+        .nec_dsp_revision = .st010,
+        .nec_dsp_firmware_validation = .allow_open_test,
+    });
+    defer appended_cart.deinit();
+    try std.testing.expect(appended_cart.had_appended_firmware);
+    try std.testing.expectEqualSlices(u8, &st010.identity, &appended_cart.identity);
 }
 
 test "separate appended and copier-header firmware normalize to one cartridge identity" {
@@ -403,7 +591,7 @@ fn makeDevice(
     ram_size: usize,
     firmware: []const u8,
 ) !ndsp.Device {
-    return ndsp.Device.init(revision, mapping, rom_size, ram_size, firmware, .allow_open_test, .open_test);
+    return ndsp.Device.init(std.testing.allocator, revision, mapping, rom_size, ram_size, firmware, .allow_open_test, .open_test);
 }
 
 fn operation(p: u2, alu: u4, select_b: bool, dp_low: u2, dp_high: u4, rp_dec: bool, source: u4, destination: u4) u24 {
@@ -427,6 +615,10 @@ fn loadImmediate(value: u16, destination: u4) u24 {
 
 fn jump(branch: u9, target: u11) u24 {
     return 0x800000 | (@as(u24, branch) << 13) | (@as(u24, target) << 2);
+}
+
+fn jumpBank(branch: u9, target: u11, bank: u2) u24 {
+    return jump(branch, target) | @as(u24, bank);
 }
 
 fn setAllFlags(device: *ndsp.Device, value: bool) void {
@@ -478,6 +670,30 @@ fn makeLinearFirmware() [ndsp.firmware_bytes]u8 {
     return result;
 }
 
+fn makeStFirmware(allocator: std.mem.Allocator, signature: u16) ![]u8 {
+    const result = try allocator.alloc(u8, ndsp.st_firmware_bytes);
+    @memset(result, 0);
+    const program = [_]u24{
+        loadImmediate(0x1234, 6),
+        jumpBank(0x0be, 1, 0),
+        loadImmediate(0x5678, 6),
+        jumpBank(0x0be, 3, 0),
+        jumpBank(0x100, 4, 0),
+    };
+    for (program, 0..) |opcode, index| {
+        result[index * 3] = @truncate(opcode);
+        result[index * 3 + 1] = @truncate(opcode >> 8);
+        result[index * 3 + 2] = @truncate(opcode >> 16);
+    }
+    for (0..ndsp.st_data_words) |index| {
+        const value: u16 = @as(u16, @truncate(index)) +% signature;
+        const offset = ndsp.st_program_bytes + index * 2;
+        result[offset] = @truncate(value);
+        result[offset + 1] = @truncate(value >> 8);
+    }
+    return result;
+}
+
 fn installProgram(firmware: *[ndsp.firmware_bytes]u8, program: []const u24) void {
     for (program, 0..) |opcode, index| {
         firmware[index * 3] = @truncate(opcode);
@@ -515,6 +731,14 @@ fn makeImage(
     header[0x3d] = 0x80;
     rom[0] = 0x78;
     finalizeChecksum(rom, header);
+    return image;
+}
+
+fn makeStImage(allocator: std.mem.Allocator, rom_size: usize) ![]u8 {
+    const image = try makeImage(allocator, rom_size, 0x30, 0xf6, 0, 0x33, false);
+    image[0x7fbf] = 0x01;
+    const header = image[0x7fc0 .. 0x7fc0 + core.cartridge.header_length];
+    finalizeChecksum(image, header);
     return image;
 }
 

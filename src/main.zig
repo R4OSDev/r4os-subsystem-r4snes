@@ -87,7 +87,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     };
     if (requirement) |needed| {
         if (needed.appended) {
-            const appended = source[source.len - core.nec_dsp.firmware_bytes ..];
+            const appended = source[source.len - needed.firmwareBytes() ..];
             _ = core.nec_dsp.validateFirmware(needed.revision, appended, .known_only) catch |fault| {
                 printNecDspFirmwareError(sys, needed, fault);
                 return error_firmware;
@@ -108,11 +108,11 @@ pub fn r4_app_main(app: *r4os.App) i32 {
                 },
                 .value => |value| value,
             };
-            if (firmware_info.is_dir != 0 or firmware_info.size != core.nec_dsp.firmware_bytes) {
+            if (firmware_info.is_dir != 0 or firmware_info.size != needed.firmwareBytes()) {
                 printNecDspFirmwareError(sys, needed, error.InvalidNecDspFirmwareSize);
                 return error_firmware;
             }
-            const firmware = allocator.alloc(u8, core.nec_dsp.firmware_bytes) catch {
+            const firmware = allocator.alloc(u8, needed.firmwareBytes()) catch {
                 sys.println("R4SNES: NEC-DSP firmware buffer could not be allocated.");
                 return error_allocator;
             };
@@ -199,7 +199,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     // 5A22, DMA/HDMA, PPU, S-SMP and S-DSP are qualified independently;
     // productive execution is rejected until the runtime-machine/window-host
     // stage composes those owners.
-    sys.println("R4SNES: cartridge, OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.16.0.");
+    sys.println("R4SNES: cartridge, OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4/ST010/ST011, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.17.0.");
     return error_not_implemented;
 }
 
@@ -217,7 +217,10 @@ fn printNecDspFirmwareError(sys: anytype, needed: core.cartridge.NecDspRequireme
         error.NecDspFirmwareReadFailure => sys.write(" could not be read completely"),
         else => sys.write(" failed validation"),
     }
-    sys.write("; expected exactly 8192 bytes at ");
+    sys.write(if (needed.firmwareBytes() == core.nec_dsp.st_firmware_bytes)
+        "; expected exactly 53248 bytes at "
+    else
+        "; expected exactly 8192 bytes at ");
     sys.write(needed.firmwarePath());
     sys.println(".");
 }
@@ -312,16 +315,34 @@ fn selfTest(app: *r4os.App) i32 {
         !cx4.negative or !cx4.overflow or cx4.carry or
         core.cx4.dataRomWord(0x240) != 0xb504f3)
         return error_not_implemented;
-    var nec = core.nec_dsp.Device{};
-    nec.firmware_installed = true;
-    nec.program_rom[0] = 0xc48d06; // LD DR,$1234: asserts RQM through the real decoder.
+    const allocator = app.allocator() orelse return error_allocator;
+    const nec_firmware = allocator.alloc(u8, core.nec_dsp.firmware_bytes) catch return error_allocator;
+    defer {
+        @memset(nec_firmware, 0);
+        allocator.free(nec_firmware);
+    }
+    @memset(nec_firmware, 0);
+    nec_firmware[0] = 0x06;
+    nec_firmware[1] = 0x8d;
+    nec_firmware[2] = 0xc4; // LD DR,$1234: asserts RQM through the real decoder.
+    var nec = core.nec_dsp.Device.init(
+        allocator,
+        .dsp1b,
+        .lo_rom,
+        1024 * 1024,
+        0,
+        nec_firmware,
+        .allow_open_test,
+        .open_test,
+    ) catch return error_not_implemented;
+    defer nec.close();
     nec.step();
     if (nec.dr != 0x1234 or !nec.requestForMaster() or nec.cycles != 1)
         return error_not_implemented;
     machine.close();
     machine.close();
     if (!machine.closed or machine.smp.dsp.capture_enabled or machine.smp.dsp.queuedFrames() != 0) return error_not_implemented;
-    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
+    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4/ST010/ST011, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
     return 0;
 }
 

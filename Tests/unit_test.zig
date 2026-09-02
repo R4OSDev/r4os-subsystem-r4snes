@@ -238,7 +238,7 @@ test "capability matrix names every planned firmware and excluded family without
         .{ .kind = .sa1, .disposition = .base_implemented },
         .{ .kind = .cx4, .disposition = .base_implemented },
         .{ .kind = .dsp1_family, .disposition = .base_implemented },
-        .{ .kind = .st010_st011, .disposition = .planned_user_firmware },
+        .{ .kind = .st010_st011, .disposition = .base_implemented },
         .{ .kind = .st018, .disposition = .planned_user_firmware },
         .{ .kind = .msu1, .disposition = .excluded },
         .{ .kind = .adapter_system, .disposition = .excluded },
@@ -249,7 +249,7 @@ test "capability matrix names every planned firmware and excluded family without
         const capability = core.board.capability(entry.kind);
         try std.testing.expectEqual(entry.disposition, capability.disposition);
         if (entry.kind != .none and entry.kind != .obc1 and entry.kind != .srtc and
-            entry.kind != .sdd1 and entry.kind != .spc7110_epson_rtc and entry.kind != .super_fx and entry.kind != .sa1 and entry.kind != .cx4 and entry.kind != .dsp1_family)
+            entry.kind != .sdd1 and entry.kind != .spc7110_epson_rtc and entry.kind != .super_fx and entry.kind != .sa1 and entry.kind != .cx4 and entry.kind != .dsp1_family and entry.kind != .st010_st011)
         {
             try std.testing.expect(capability.disposition != .base_implemented);
         }

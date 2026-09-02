@@ -118,7 +118,7 @@ fn run(init: std.process.Init) !void {
         }
         if (bytes.len != ndsp.firmware_bytes) return error.OpenNecDspFirmwareSizeMismatch;
         try expectSha256(bytes, expected.sha256);
-        try exerciseOpenFirmware(expected, bytes, &aggregate);
+        try exerciseOpenFirmware(allocator, expected, bytes, &aggregate);
     }
 
     if (aggregate != expected_aggregate) {
@@ -175,10 +175,10 @@ fn verifyOracle(actual: Manifest.Oracle, name: []const u8, revision: []const u8,
     }
 }
 
-fn exerciseOpenFirmware(expected: ExpectedFirmware, bytes: []const u8, aggregate: *u64) !void {
+fn exerciseOpenFirmware(allocator: std.mem.Allocator, expected: ExpectedFirmware, bytes: []const u8, aggregate: *u64) !void {
     const mapping: core.board.Mapping = if (expected.revision == .dsp1b) .hi_rom else .lo_rom;
     const ram_size: usize = if (expected.revision == .dsp1a or expected.revision == .dsp2) 8 * 1024 else 0;
-    var device = try ndsp.Device.init(expected.revision, mapping, 1024 * 1024, ram_size, bytes, .allow_open_test, .open_test);
+    var device = try ndsp.Device.init(allocator, expected.revision, mapping, 1024 * 1024, ram_size, bytes, .allow_open_test, .open_test);
     defer device.close();
     if (device.data_rom[0] != expected.signature) return error.OpenNecDspDataRomMismatch;
 
@@ -211,6 +211,7 @@ fn canonicalPorts(map: ndsp.HostMap) Ports {
         .dsp2 => .{ .data = 0x206000, .status = 0x20c000 },
         .dsp3 => .{ .data = 0x208000, .status = 0x20c000 },
         .dsp4 => .{ .data = 0x308000, .status = 0x30c000 },
+        .st01x => .{ .data = 0x600000, .status = 0x600001 },
     };
 }
 
@@ -232,7 +233,7 @@ fn exercisePrivateFirmware(
         }
         _ = try ndsp.validateFirmware(expected.revision, bytes, .known_only);
         const mapping: core.board.Mapping = if (expected.revision == .dsp1b) .hi_rom else .lo_rom;
-        var device = try ndsp.Device.init(expected.revision, mapping, 1024 * 1024, 0, bytes, .known_only, .separate);
+        var device = try ndsp.Device.init(allocator, expected.revision, mapping, 1024 * 1024, 0, bytes, .known_only, .separate);
         defer device.close();
         try runPrivateUntilReady(&device);
         if (expected.revision == .dsp1b) {
@@ -250,6 +251,36 @@ fn exercisePrivateFirmware(
             const high = device.readCpu(port, 0) orelse return error.PrivateNecDspHostReadFailure;
             if (low != 0x00 or high != 0x20) return error.PrivateNecDspMultiplyOracleMismatch;
         }
+        completed += 1;
+    }
+    const st_cases = [_]struct { revision: ndsp.Revision, file: []const u8 }{
+        .{ .revision = .st010, .file = "st010.rom" },
+        .{ .revision = .st011, .file = "st011.rom" },
+    };
+    for (st_cases) |case| {
+        const path = try std.fs.path.join(allocator, &.{ root, case.file });
+        defer allocator.free(path);
+        const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(ndsp.st_firmware_bytes + 1));
+        defer {
+            @memset(bytes, 0);
+            allocator.free(bytes);
+        }
+        _ = try ndsp.validateFirmware(case.revision, bytes, .known_only);
+        var device = try ndsp.Device.init(
+            allocator,
+            case.revision,
+            .lo_rom,
+            if (case.revision == .st011) 512 * 1024 else 1024 * 1024,
+            ndsp.st_data_ram_bytes,
+            bytes,
+            .known_only,
+            .separate,
+        );
+        defer device.close();
+        try runPrivateUntilReady(&device);
+        if (device.host_map != .st01x or device.program_rom.len != ndsp.st_program_words or
+            device.data_rom.len != ndsp.st_data_words or device.data_ram.len != ndsp.st_data_ram_words)
+            return error.PrivateSt01xGeometryMismatch;
         completed += 1;
     }
     return completed;

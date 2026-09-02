@@ -76,6 +76,10 @@ pub const NecDspRequirement = struct {
     pub fn firmwarePath(self: NecDspRequirement) []const u8 {
         return self.revision.firmwarePath();
     }
+
+    pub fn firmwareBytes(self: NecDspRequirement) usize {
+        return self.revision.firmwareBytes();
+    }
 };
 
 pub const Cartridge = struct {
@@ -111,7 +115,8 @@ pub const Cartridge = struct {
         const header = try selectHeader(normalized);
         const enhancement = board.enhancementForHeader(header.rom_type, header.map_mode);
         const capability = board.capability(enhancement);
-        if (parts.appended_firmware != null and enhancement != .dsp1_family)
+        const has_nec_dsp = enhancement == .dsp1_family or enhancement == .st010_st011;
+        if (parts.appended_firmware != null and !has_nec_dsp)
             return error.UnexpectedAppendedFirmware;
         if (parts.appended_firmware != null and options.nec_dsp_firmware != null)
             return error.AmbiguousNecDspFirmwareSource;
@@ -144,8 +149,11 @@ pub const Cartridge = struct {
             }
             if (header.declared_sram_bytes != 0) break :blk header.declared_sram_bytes;
             break :blk superfx.default_ram_bytes;
-        } else header.declared_sram_bytes;
-        const nec_revision = if (enhancement == .dsp1_family)
+        } else if (enhancement == .st010_st011)
+            nec_dsp.st_data_ram_bytes
+        else
+            header.declared_sram_bytes;
+        const nec_revision = if (has_nec_dsp)
             try selectNecDspRevision(header, parts.appended_firmware, options.nec_dsp_revision)
         else
             null;
@@ -182,6 +190,12 @@ pub const Cartridge = struct {
                 _ = nec_dsp.selectHostMap(nec_revision.?, header.mapping, normalized.len, cartridge_ram_bytes) catch
                     return error.ContradictoryNecDspBoard;
             },
+            .st010_st011 => {
+                validateNecDspHeader(nec_revision.?, header) catch
+                    return error.ContradictoryNecDspBoard;
+                _ = nec_dsp.selectHostMap(nec_revision.?, header.mapping, normalized.len, cartridge_ram_bytes) catch
+                    return error.ContradictoryNecDspBoard;
+            },
             else => {},
         }
 
@@ -204,6 +218,7 @@ pub const Cartridge = struct {
             else
                 .separate;
             nec_device = try nec_dsp.Device.init(
+                allocator,
                 revision,
                 header.mapping,
                 normalized.len,
@@ -362,7 +377,11 @@ pub const Cartridge = struct {
         if (self.cx4_device) |*device| {
             return device.writeCpu(self.rom_storage, self.sram_storage, address, value).handled;
         }
-        if (self.nec_dsp_device) |*device| return device.writeCpu(address, value);
+        if (self.nec_dsp_device) |*device| {
+            const handled = device.writeCpu(address, value);
+            if (handled) self.collectNecDspDirty(device);
+            return handled;
+        }
         return false;
     }
 
@@ -411,8 +430,24 @@ pub const Cartridge = struct {
     }
 
     pub fn runNecDspSlice(self: *Cartridge, maximum_instructions: usize) ?nec_dsp.RunResult {
-        if (self.nec_dsp_device) |*device| return device.runSlice(maximum_instructions);
+        if (self.nec_dsp_device) |*device| {
+            const result = device.runSlice(maximum_instructions);
+            self.collectNecDspDirty(device);
+            return result;
+        }
         return null;
+    }
+
+    pub fn restoreNecDspPersistentRam(self: *Cartridge) !void {
+        if (self.nec_dsp_device) |*device| {
+            if (device.revision.isSt01x()) try device.restorePersistentRam(self.sram_storage);
+        }
+    }
+
+    fn collectNecDspDirty(self: *Cartridge, device: *nec_dsp.Device) void {
+        const dirty = device.takeDirtyRange() orelse return;
+        device.copyPersistentRamRange(self.sram_storage, dirty.first, dirty.end) catch return;
+        if (self.board.battery) self.markSramDirty(dirty.first, dirty.end);
     }
 
     fn collectSa1Dirty(self: *Cartridge, device: *sa1.Device) void {
@@ -453,6 +488,7 @@ pub const Cartridge = struct {
 pub const ContainerGeometry = struct {
     cartridge: CandidateGeometry,
     appended_firmware: bool,
+    appended_firmware_bytes: usize = 0,
 };
 
 const SourceParts = struct {
@@ -467,10 +503,18 @@ pub fn inspectContainerSize(file_size: usize) !ContainerGeometry {
     if (inspectCandidateSize(file_size)) |geometry| {
         return .{ .cartridge = geometry, .appended_firmware = false };
     } else |ordinary_fault| {
-        if (file_size < nec_dsp.firmware_bytes) return ordinary_fault;
-        const cartridge_size = file_size - nec_dsp.firmware_bytes;
-        const geometry = inspectCandidateSize(cartridge_size) catch return ordinary_fault;
-        return .{ .cartridge = geometry, .appended_firmware = true };
+        const firmware_sizes = [_]usize{ nec_dsp.firmware_bytes, nec_dsp.st_firmware_bytes };
+        for (firmware_sizes) |firmware_size| {
+            if (file_size < firmware_size) continue;
+            const cartridge_size = file_size - firmware_size;
+            const geometry = inspectCandidateSize(cartridge_size) catch continue;
+            return .{
+                .cartridge = geometry,
+                .appended_firmware = true,
+                .appended_firmware_bytes = firmware_size,
+            };
+        }
+        return ordinary_fault;
     }
 }
 
@@ -480,7 +524,7 @@ pub fn inspectNecDspRequirement(source: []const u8, revision_override: ?nec_dsp.
     const normalized = parts.cartridge[normalized_start..];
     const header = try selectHeader(normalized);
     const enhancement = board.enhancementForHeader(header.rom_type, header.map_mode);
-    if (enhancement != .dsp1_family) {
+    if (enhancement != .dsp1_family and enhancement != .st010_st011) {
         if (parts.appended_firmware != null) return error.UnexpectedAppendedFirmware;
         return null;
     }
@@ -494,7 +538,7 @@ fn splitSource(source: []const u8) !SourceParts {
     if (!container.appended_firmware) {
         return .{ .geometry = container.cartridge, .cartridge = source, .appended_firmware = null };
     }
-    const split_at = source.len - nec_dsp.firmware_bytes;
+    const split_at = source.len - container.appended_firmware_bytes;
     return .{
         .geometry = container.cartridge,
         .cartridge = source[0..split_at],
@@ -525,6 +569,11 @@ fn selectNecDspRevision(
 
 fn detectNecDspRevision(header: Header) nec_dsp.Revision {
     const mode = header.map_mode & 0x3f;
+    if (header.rom_type == 0xf6 and mode == 0x30) {
+        // The only ST011 board uses a 512-KiB program ROM. Explicit board
+        // metadata or a known appended firmware digest remains authoritative.
+        return if (header.rom_size_code == 0x09) .st011 else .st010;
+    }
     if (header.rom_type == 0x03 and mode == 0x30) return .dsp4;
     if (header.rom_type == 0x05 and mode == 0x20) return .dsp2;
     if (header.rom_type == 0x05 and mode == 0x30 and header.licensee_code == 0xb2) return .dsp3;
@@ -547,15 +596,18 @@ fn validateNecDspHeader(revision: nec_dsp.Revision, header: Header) !void {
             return error.ContradictoryNecDspBoard,
         .dsp4 => if (header.rom_type != 0x03 or mode != 0x30)
             return error.ContradictoryNecDspBoard,
+        .st010, .st011 => if (header.mapping != .lo_rom or header.rom_type != 0xf6 or
+            mode != 0x30 or header.cartridge_subtype != 0x01)
+            return error.ContradictoryNecDspBoard,
     }
 }
 
 fn revisionFromKnownFirmware(bytes: []const u8) ?nec_dsp.Revision {
-    if (bytes.len != nec_dsp.firmware_bytes) return null;
     var actual: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &actual, .{});
-    const revisions = [_]nec_dsp.Revision{ .dsp1a, .dsp1b, .dsp2, .dsp3, .dsp4 };
+    const revisions = [_]nec_dsp.Revision{ .dsp1a, .dsp1b, .dsp2, .dsp3, .dsp4, .st010, .st011 };
     for (revisions) |revision| {
+        if (bytes.len != revision.firmwareBytes()) continue;
         const known = revision.knownDigest();
         if (std.mem.eql(u8, &actual, &known)) return revision;
     }
