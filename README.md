@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.9.0 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.10.0 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
 color math, fixed color, mosaic, VMAIN, hires, overscan and interlace. It
@@ -36,6 +36,18 @@ integrity-checks 23 bounded PPU diagnostics without promoting visual output to
 truth. Productive cartridge execution remains deliberately rejected until the
 runtime-machine and window-host stages are wired, so this version still makes no
 playability claim.
+
+Battery-backed SRAM and future SA-1 BW-RAM now persist as one exact
+board-sized `HASH.SAV` below
+`C:\R4OS\SUBSYSTEMS\r4os.snes\SAVE\`; the hash is calculated from the
+normalized ROM after copier-header removal. S-RTC and Epson state use one
+versioned, fixed-size and SHA-256-protected `HASH.RTC` record containing chip
+identity, live and latched registers, halt/overflow state and bounded
+forward-only catch-up. The R4OS backend is the SDK source helper shared with
+R4GB: one create-only writer lease, immutable snapshots, one coalescing worker,
+same-directory stage/target/last-good publication, bounded recovery and
+mandatory drain/join. Battery-less boards never access this namespace, and no
+legacy or host-specific path is probed.
 
 The only connected controller is port 1 and it uses physical keyboard usages:
 

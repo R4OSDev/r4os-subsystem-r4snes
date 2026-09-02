@@ -1,6 +1,6 @@
 ﻿# Compatibility
 
-The 0.9.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
+The 0.10.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
 normalizes an optional 512-byte copier header and requires one unambiguous
 LoROM, HiROM, ExLoROM or ExHiROM header. Region, board capability, declared
 sizes, reset vector, startup opcode and checksum/complement contribute to a
@@ -50,6 +50,13 @@ register scripts are automated gates. Twenty-three digest-pinned foreign ROMs
 remain diagnostics because no licensed, revision-bound hardware capture is
 available; their visual similarity is never treated as a pass condition.
 
-SRAM will use the canonical subtree
-`C:\R4OS\SUBSYSTEMS\r4os.snes\SAVE`. The cartridge remains immutable and no
-legacy or host-specific save directory is probed.
+Battery SRAM and future SA-1 BW-RAM use only the canonical subtree
+`C:\R4OS\SUBSYSTEMS\r4os.snes\SAVE\` and one exact board-sized
+uppercase-`HASH.SAV`. S-RTC and SPC7110 Epson RTC state use an exact,
+versioned and checksummed `HASH.RTC` with chip identity, live/latched registers,
+halt, overflow and bounded forward-only catch-up. One writer lease and one
+serial snapshot worker publish through same-directory stage, target and
+last-good backup; malformed or partial recovery fails closed. Close drains the
+worker before releasing ownership. Battery-less boards do not touch the
+backend. The cartridge remains immutable and no legacy or host-specific save
+directory is probed.

@@ -13,8 +13,10 @@ const error_cartridge: i32 = 71;
 const error_not_implemented: i32 = 72;
 const error_allocator: i32 = 73;
 const error_firmware: i32 = 74;
+const error_persistence_selftest: i32 = 75;
 
 pub fn r4_app_main(app: *r4os.App) i32 {
+    if (std.mem.indexOf(u8, app.args(), "/PERSISTTEST") != null) return persistenceSelfTest(app);
     if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
     if (app.profile != .desktop) return error_profile;
     const files = app.files() orelse return r4os.abi.err_no_group;
@@ -161,4 +163,150 @@ fn selfTest(app: *r4os.App) i32 {
     if (!machine.closed or machine.smp.dsp.capture_enabled or machine.smp.dsp.queuedFrames() != 0) return error_not_implemented;
     sys.println("R4SNES SELFTEST OK: CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
     return 0;
+}
+
+fn persistenceSelfTest(app: *r4os.App) i32 {
+    runPersistenceSelfTest(app) catch |fault| {
+        const sys = app.system();
+        sys.write("R4SNES persistence runtime: FAILED ");
+        sys.println(@errorName(fault));
+        return error_persistence_selftest;
+    };
+    app.system().println("R4SNES persistence runtime: OK sav=exact rtc=versioned lock=exclusive atomic=recover async=worker+drain");
+    return 0;
+}
+
+fn runPersistenceSelfTest(app: *r4os.App) !void {
+    const allocator = app.allocator() orelse return error.AllocatorUnavailable;
+    const files = app.files() orelse return error.FilesUnavailable;
+    const sys = app.system();
+    const wall = core.persistence_r4os.wallSeconds(sys.timeState());
+    const monotonic = sys.monotonicNanoseconds() orelse 0;
+    const generation = (sys.ticks() | 1) +| 2;
+
+    var save_cart = try makePersistenceCart(allocator, 8192, true, .none, 0x73);
+    defer save_cart.deinit();
+    var async_store = core.persistence_r4os.AsyncStore.init(files, allocator);
+    async_store.removeTestFiles(&save_cart.identity);
+    defer async_store.removeTestFiles(&save_cart.identity);
+    var save_session = try core.persistence.Session.open(&save_cart, async_store.backend(), generation, wall, monotonic);
+    defer if (!save_session.closed) save_session.close(&save_cart, generation, wall, monotonic) catch {};
+    for (save_cart.sram_storage, 0..) |_, index| save_cart.writeSram(index, @truncate(index *% 37 +% 11));
+    try save_session.flush(&save_cart, wall, monotonic);
+    save_cart.writeSram(0, 0xA7);
+    try save_session.flush(&save_cart, wall, monotonic);
+
+    var competing_cart = try makePersistenceCart(allocator, 8192, true, .none, 0x73);
+    defer competing_cart.deinit();
+    var competing_store = core.persistence_r4os.Store.init(files);
+    const contention = core.persistence.Session.open(&competing_cart, competing_store.backend(), generation + 1, wall, monotonic);
+    if (contention) |opened| {
+        var unexpected = opened;
+        unexpected.close(&competing_cart, generation + 1, wall, monotonic) catch {};
+        return error.ExclusiveWriterAcceptedTwice;
+    } else |fault| {
+        if (fault != error.Busy) return fault;
+    }
+    try save_session.close(&save_cart, generation, wall, monotonic);
+    if (async_store.stats.started == 0 or async_store.stats.started != async_store.stats.completed or async_store.stats.errors != 0)
+        return error.AsyncPersistenceMismatch;
+
+    var reopened_cart = try makePersistenceCart(allocator, 8192, true, .none, 0x73);
+    defer reopened_cart.deinit();
+    var reopened_store = core.persistence_r4os.Store.init(files);
+    var reopened = try core.persistence.Session.open(&reopened_cart, reopened_store.backend(), generation + 2, wall, monotonic);
+    if (reopened_cart.sram_storage[0] != 0xA7 or
+        reopened_cart.sram_storage[1] != @as(u8, @truncate(1 * 37 + 11)) or
+        reopened_cart.sram_storage[reopened_cart.sram_storage.len - 1] != @as(u8, @truncate((reopened_cart.sram_storage.len - 1) *% 37 +% 11)))
+        return error.SramMismatch;
+    try reopened.close(&reopened_cart, generation + 2, wall, monotonic);
+
+    const sav_path = try core.persistence_r4os.dataPath(&save_cart.identity, .sram);
+    if (!std.mem.startsWith(u8, sav_path.bytes(), core.persistence.save_root) or
+        !std.mem.endsWith(u8, sav_path.bytes(), ".SAV") or
+        std.mem.indexOf(u8, sav_path.bytes(), "\\APPDATA\\") != null)
+        return error.NonCanonicalSavePath;
+
+    var rtc_cart = try makePersistenceCart(allocator, 0, true, .srtc, 0x74);
+    defer rtc_cart.deinit();
+    var rtc_store = core.persistence_r4os.Store.init(files);
+    rtc_store.removeTestFiles(&rtc_cart.identity);
+    defer rtc_store.removeTestFiles(&rtc_cart.identity);
+    var rtc_session = try core.persistence.Session.open(&rtc_cart, rtc_store.backend(), generation + 3, wall, monotonic);
+    const rtc_state = rtc_session.rtcState() orelse return error.RtcMissing;
+    rtc_state.registers[0] = 9;
+    rtc_state.latched[0] = 7;
+    rtc_state.halted = true;
+    rtc_state.overflow = true;
+    try rtc_session.close(&rtc_cart, generation + 3, wall, monotonic);
+
+    var recovery_state = core.persistence.RtcState.init(.s_rtc);
+    recovery_state.registers[0] = 4;
+    recovery_state.latched[0] = 3;
+    var recovery_record: [core.persistence.rtc_record_bytes]u8 = undefined;
+    core.persistence.encodeRtc(.{
+        .state = recovery_state,
+        .wall_anchor_seconds = wall orelse 0,
+        .monotonic_anchor_ns = monotonic,
+        .generation = generation + 4,
+    }, &recovery_record);
+    try rtc_store.prepareInterruptedPublishForTest(&rtc_cart.identity, .rtc, recovery_record[0..]);
+    var recovered_cart = try makePersistenceCart(allocator, 0, true, .srtc, 0x74);
+    defer recovered_cart.deinit();
+    var recovered = try core.persistence.Session.open(&recovered_cart, rtc_store.backend(), generation + 4, wall, monotonic);
+    if (recovered.peekRtcState() == null or
+        recovered.peekRtcState().?.registers[0] != 4 or
+        recovered.peekRtcState().?.latched[0] != 3)
+        return error.RtcRecoveryMismatch;
+    try recovered.close(&recovered_cart, generation + 4, wall, monotonic);
+
+    try rtc_store.prepareInterruptedPublishForTest(
+        &rtc_cart.identity,
+        .rtc,
+        recovery_record[0 .. recovery_record.len / 2],
+    );
+    var rejected_cart = try makePersistenceCart(allocator, 0, true, .srtc, 0x74);
+    defer rejected_cart.deinit();
+    const rejected = core.persistence.Session.open(&rejected_cart, rtc_store.backend(), generation + 5, wall, monotonic);
+    if (rejected) |opened| {
+        var unexpected = opened;
+        unexpected.close(&rejected_cart, generation + 5, wall, monotonic) catch {};
+        return error.PartialRecoveryAccepted;
+    } else |fault| {
+        if (fault != error.Io) return fault;
+    }
+    if (!std.mem.eql(u8, rtc_store.failureStageName(), "atomic_recover") or
+        rtc_store.failureCode() != r4os.abi.file_stream_error_size_mismatch)
+        return error.PartialRecoveryFailureMismatch;
+}
+
+fn makePersistenceCart(
+    allocator: std.mem.Allocator,
+    ram_bytes: usize,
+    battery: bool,
+    enhancement: core.board.Enhancement,
+    identity_byte: u8,
+) !core.cartridge.Cartridge {
+    const rom = try allocator.alloc(u8, core.cartridge.minimum_rom_size);
+    errdefer allocator.free(rom);
+    @memset(rom, 0);
+    const ram = try allocator.alloc(u8, ram_bytes);
+    errdefer allocator.free(ram);
+    @memset(ram, 0);
+    return .{
+        .allocator = allocator,
+        .rom_storage = rom,
+        .sram_storage = ram,
+        .identity = .{identity_byte} ** core.persistence.digest_bytes,
+        .header = undefined,
+        .board = .{
+            .mapping = .lo_rom,
+            .region = .ntsc_u,
+            .fast_rom = false,
+            .capability = core.board.capability(enhancement),
+            .sram_bytes = ram_bytes,
+            .battery = battery,
+        },
+        .had_copier_header = false,
+    };
 }

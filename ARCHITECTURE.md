@@ -22,7 +22,10 @@ follows:
 - `controller.zig`: port-1 serial pad state; port 2 remains disconnected.
 - `coprocessors.zig`: explicit enhancement-chip registry without implicit
   fallbacks.
-- `persistence.zig`: canonical SRAM path and future atomic persistence policy.
+- `persistence.zig`: normalized identity policy, exact SRAM/BW-RAM payloads,
+  checksummed S-RTC/Epson records and forward-only offline-time policy.
+- `persistence_r4os.zig`: thin configuration of the SDK's compiled-in lease,
+  serial-worker and atomic recovery mechanism for the canonical SNES tree.
 - `host_adapter.zig`: R4OS physical-key mapping and generation-safe XRGB32
   bridge into `r4os.subsystem_host`.
 - `runtime_adapter.zig`: bounded composition of the machine stepper and S-DSP
@@ -68,6 +71,17 @@ pull no more than 2048 48 kHz S16LE frames into a caller-owned buffer.
 tracks transport ownership and disables capture on mute or backend failure
 without stalling or accelerating the guest. Reset and repeated close clear the
 same queue and resampler state. Generic pause, resync and backend policy remain
-owned by the shared SDK runtime. Version 0.9.0 still does not start a parsed
+owned by the shared SDK runtime. Version 0.10.0 still does not start a parsed
 cartridge in the R4OS application because the productive machine and window
 host are deliberately scheduled for a later milestone.
+
+Persistence is keyed only by the normalized 32-byte cartridge digest. A
+battery board acquires one generation-bound lease and loads exactly its
+declared SRAM or BW-RAM length; a size mismatch is corruption. RTC boards also
+load an exact 128-byte version-1 record whose SHA-256 binds chip kind,
+registers, latch, halt, overflow, clock anchors and pending catch-up. Host time
+moving backwards queues nothing; forward jumps and accumulated work are
+bounded to 512 days. The compiled-in SDK helper copies dirty data before its
+single worker performs stage/target/last-good replacement. Its recovery accepts
+only the expected size and validates RTC content, while Close drains and joins
+before releasing the lease. This is a source-level helper, not an R4L or ABI.

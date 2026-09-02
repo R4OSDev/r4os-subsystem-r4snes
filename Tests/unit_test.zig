@@ -6,6 +6,7 @@ test {
     _ = @import("cpu_test.zig");
     _ = @import("dma_test.zig");
     _ = @import("ppu_test.zig");
+    _ = @import("persistence_test.zig");
     _ = @import("sdsp_test.zig");
     _ = @import("smp_test.zig");
     _ = @import("video_host_test.zig");
@@ -278,7 +279,7 @@ test "keyboard policy controller isolation and persistence root remain exact" {
     ports.port2.latch();
     var bit: usize = 0;
     while (bit < 16) : (bit += 1) try std.testing.expectEqual(@as(u1, 1), ports.port2.serialBit());
-    try std.testing.expectEqualStrings("C:\\R4OS\\SUBSYSTEMS\\r4os.snes\\SAVE", core.persistence.save_root);
+    try std.testing.expectEqualStrings("C:\\R4OS\\SUBSYSTEMS\\r4os.snes\\SAVE\\", core.persistence.save_root);
 }
 
 test "machines retain private 128 KiB buses and idempotent close state" {
