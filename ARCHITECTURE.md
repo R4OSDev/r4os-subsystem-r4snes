@@ -22,6 +22,10 @@ follows:
 - `controller.zig`: port-1 serial pad state; port 2 remains disconnected.
 - `coprocessors.zig`: explicit enhancement-chip registry without implicit
   fallbacks.
+- `obc1.zig`: exact 8-KiB object-RAM windows, selectors and documented bank
+  mirrors without owning persistence policy.
+- `srtc.zig`: Sharp S-RTC protocol, live/latch calendar and bounded
+  partition-invariant time advancement without host-clock access.
 - `persistence.zig`: normalized identity policy, exact SRAM/BW-RAM payloads,
   checksummed S-RTC/Epson records and forward-only offline-time policy.
 - `persistence_r4os.zig`: thin configuration of the SDK's compiled-in lease,
@@ -71,7 +75,7 @@ pull no more than 2048 48 kHz S16LE frames into a caller-owned buffer.
 tracks transport ownership and disables capture on mute or backend failure
 without stalling or accelerating the guest. Reset and repeated close clear the
 same queue and resampler state. Generic pause, resync and backend policy remain
-owned by the shared SDK runtime. Version 0.10.0 still does not start a parsed
+owned by the shared SDK runtime. Version 0.11.0 still does not start a parsed
 cartridge in the R4OS application because the productive machine and window
 host are deliberately scheduled for a later milestone.
 
@@ -85,3 +89,20 @@ bounded to 512 days. The compiled-in SDK helper copies dirty data before its
 single worker performs stage/target/last-good replacement. Its recovery accepts
 only the expected size and validates RTC content, while Close drains and joins
 before releasing the lease. This is a source-level helper, not an R4L or ABI.
+
+Enhancement access precedes generic MMIO, SRAM and ROM decode only for the
+chip's exact documented windows. OBC-1 folds banks `00-3F/80-BF:6000-7FFF`
+and the `70-71/F0-F1` mirrors into one 13-bit RAM address. Selector writes and
+indirect object/attribute writes report their changed physical byte to the
+cartridge, which maintains one bounded dirty interval while persistence keeps
+the full board-sized raw payload. Reset reloads selector state from battery
+RAM and never clears it.
+
+S-RTC owns only `00-3F/80-BF:2800-2801` at system-I/O timing. A read command
+captures an explicit latch; a calendar write becomes live only after all
+twelve writable nibbles form one valid date. The thirteenth weekday nibble is
+calculated from the Gregorian date. The reset command yields the sole halted
+all-zero representation. Persistence imports and validates both live and
+latched state, applies at most 512 days of forward catch-up to the device, and
+exports the resulting calendar before publication. Invalid calendar,
+weekday, latch, halt and reserved-byte states retain distinct error classes.

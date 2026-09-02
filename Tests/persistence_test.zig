@@ -132,7 +132,7 @@ fn makeCart(
     const ram = try allocator.alloc(u8, ram_bytes);
     errdefer allocator.free(ram);
     @memset(ram, 0);
-    return .{
+    var result = core.cartridge.Cartridge{
         .allocator = allocator,
         .rom_storage = rom,
         .sram_storage = ram,
@@ -147,7 +147,12 @@ fn makeCart(
             .battery = battery,
         },
         .had_copier_header = false,
+        .obc1_device = if (enhancement == .obc1) .{} else null,
+        .srtc_device = if (enhancement == .srtc) .{} else null,
     };
+    if (result.obc1_device) |*device| try device.power(result.sram_storage);
+    if (result.srtc_device) |*device| device.power();
+    return result;
 }
 
 test "normalized hash names only exact canonical SAV and RTC paths" {
@@ -234,6 +239,34 @@ test "lost write acknowledgement preserves dirty state and close always releases
     try std.testing.expectEqual(@as(usize, 1), fake.release_calls);
 }
 
+test "OBC-1 selectors and object bytes restart through exact battery persistence" {
+    const allocator = std.testing.allocator;
+    var fake = try FakeBackend.init(allocator);
+    defer fake.deinit();
+    fake.has_sram = true;
+    fake.sram_len = core.obc1.ram_bytes;
+    @memset(fake.sram[0..fake.sram_len], 0);
+    fake.sram[0x1FF5] = 1;
+    fake.sram[0x1FF6] = 0x7F;
+
+    var first = try makeCart(allocator, core.obc1.ram_bytes, true, .obc1, 0x71);
+    defer first.deinit();
+    var session = try core.persistence.Session.open(&first, fake.backend(), 21, 100, 200);
+    try std.testing.expectEqual(@as(u16, 0x1800), first.obc1_device.?.base);
+    try std.testing.expectEqual(@as(u8, 0x7F), first.obc1_device.?.object);
+    try std.testing.expect(first.writeEnhancement(0x007FF0, 0xA5));
+    try std.testing.expect(first.writeEnhancement(0x007FF1, 0x5A));
+    try session.close(&first, 21, 101, 300);
+
+    var second = try makeCart(allocator, core.obc1.ram_bytes, true, .obc1, 0x71);
+    defer second.deinit();
+    var reopened = try core.persistence.Session.open(&second, fake.backend(), 22, 101, 300);
+    try std.testing.expectEqual(@as(?u8, 0xA5), second.obc1_device.?.read(second.sram_storage, 0x007FF0));
+    try std.testing.expectEqual(@as(?u8, 0x5A), second.obc1_device.?.read(second.sram_storage, 0x007FF1));
+    try std.testing.expectEqual(@as(u16, 0x1800), second.obc1_device.?.base);
+    try reopened.close(&second, 22, 101, 300);
+}
+
 test "RTC record round trips chip registers latch halt overflow and checksum" {
     var state = core.persistence.RtcState.init(.epson);
     for (&state.registers, 0..) |*byte, index| byte.* = @truncate(index * 7 + 1);
@@ -264,6 +297,38 @@ test "RTC record round trips chip registers latch halt overflow and checksum" {
     try std.testing.expectError(error.WrongSize, core.persistence.decodeRtc(encoded[0 .. encoded.len - 1]));
 }
 
+test "S-RTC codec rejects checksum-valid calendar latch and halt corruption precisely" {
+    var state = core.persistence.RtcState.init(.s_rtc);
+    core.srtc.registersFromCalendar(.{
+        .second = 0,
+        .minute = 0,
+        .hour = 0,
+        .day = 1,
+        .month = 1,
+        .year = 0,
+        .weekday = core.srtc.calculateWeekday(0, 1, 1),
+    }, &state.registers);
+    state.latched = state.registers;
+    state.halted = false;
+    var encoded: [core.persistence.rtc_record_bytes]u8 = undefined;
+
+    var invalid_calendar = state;
+    invalid_calendar.registers[8] = 13;
+    core.persistence.encodeRtc(.{ .state = invalid_calendar, .wall_anchor_seconds = 1, .monotonic_anchor_ns = 2, .generation = 3 }, &encoded);
+    try std.testing.expectError(error.InvalidSrtcCalendar, core.persistence.decodeRtc(encoded[0..]));
+
+    var invalid_latch = state;
+    invalid_latch.latched[6] = 0;
+    invalid_latch.latched[7] = 0;
+    core.persistence.encodeRtc(.{ .state = invalid_latch, .wall_anchor_seconds = 1, .monotonic_anchor_ns = 2, .generation = 3 }, &encoded);
+    try std.testing.expectError(error.InvalidSrtcLatch, core.persistence.decodeRtc(encoded[0..]));
+
+    var invalid_halt = state;
+    invalid_halt.halted = true;
+    core.persistence.encodeRtc(.{ .state = invalid_halt, .wall_anchor_seconds = 1, .monotonic_anchor_ns = 2, .generation = 3 }, &encoded);
+    try std.testing.expectError(error.InvalidSrtcHaltState, core.persistence.decodeRtc(encoded[0..]));
+}
+
 test "RTC catch-up is forward-only bounded halt-aware and overflow-visible" {
     const backwards = core.persistence.offlineDelta(200, 199);
     try std.testing.expect(backwards.backwards);
@@ -273,6 +338,7 @@ test "RTC catch-up is forward-only bounded halt-aware and overflow-visible" {
     try std.testing.expectEqual(core.persistence.max_offline_seconds, bounded.seconds);
 
     var running = core.persistence.RtcState.init(.s_rtc);
+    running.halted = false;
     running.queueCatchup(.{ .seconds = core.persistence.max_offline_seconds, .clamped = true });
     try std.testing.expectEqual(core.persistence.max_offline_seconds, running.pending_catchup_seconds);
     try std.testing.expect(running.overflow);
@@ -292,7 +358,17 @@ test "RTC session validates chip identity and queues only forward elapsed time" 
     var fake = try FakeBackend.init(allocator);
     defer fake.deinit();
     var stored = core.persistence.RtcState.init(.s_rtc);
-    stored.registers[0] = 9;
+    core.srtc.registersFromCalendar(.{
+        .second = 9,
+        .minute = 0,
+        .hour = 0,
+        .day = 1,
+        .month = 1,
+        .year = 0,
+        .weekday = core.srtc.calculateWeekday(0, 1, 1),
+    }, &stored.registers);
+    stored.latched = stored.registers;
+    stored.halted = false;
     core.persistence.encodeRtc(.{
         .state = stored,
         .wall_anchor_seconds = 1_000,
@@ -303,11 +379,22 @@ test "RTC session validates chip identity and queues only forward elapsed time" 
     var cart = try makeCart(allocator, 0, true, .srtc, 0x44);
     defer cart.deinit();
     var session = try core.persistence.Session.open(&cart, fake.backend(), 12, 1_250, 3_000);
-    try std.testing.expectEqual(@as(u64, 250), session.peekRtcState().?.pending_catchup_seconds);
-    try std.testing.expectEqual(@as(u8, 9), session.peekRtcState().?.registers[0]);
+    try std.testing.expectEqual(@as(u64, 0), session.peekRtcState().?.pending_catchup_seconds);
+    const advanced = try core.srtc.calendarFromRegisters(&session.peekRtcState().?.registers, true);
+    try std.testing.expectEqual(@as(u8, 19), advanced.second);
+    try std.testing.expectEqual(@as(u8, 4), advanced.minute);
     try session.close(&cart, 12, 1_250, 3_000);
     const updated = try core.persistence.decodeRtc(fake.rtc[0..]);
-    try std.testing.expectEqual(@as(u64, 250), updated.state.pending_catchup_seconds);
+    try std.testing.expectEqual(@as(u64, 0), updated.state.pending_catchup_seconds);
+    const persisted = try core.srtc.calendarFromRegisters(&updated.state.registers, true);
+    try std.testing.expectEqual(advanced, persisted);
+
+    var restarted_cart = try makeCart(allocator, 0, true, .srtc, 0x44);
+    defer restarted_cart.deinit();
+    var restarted = try core.persistence.Session.open(&restarted_cart, fake.backend(), 14, 1_250, 4_000);
+    const restarted_calendar = try core.srtc.calendarFromRegisters(&restarted.peekRtcState().?.registers, true);
+    try std.testing.expectEqual(advanced, restarted_calendar);
+    try restarted.close(&restarted_cart, 14, 1_250, 4_000);
 
     var wrong_chip = try makeCart(allocator, 0, true, .spc7110_epson_rtc, 0x44);
     defer wrong_chip.deinit();

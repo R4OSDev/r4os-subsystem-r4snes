@@ -45,8 +45,8 @@ pub const Capability = struct {
 
 pub const capability_table = [_]Capability{
     .{ .enhancement = .none, .disposition = .base_implemented, .planned_version = "0.73.3" },
-    .{ .enhancement = .obc1, .disposition = .planned, .planned_version = "0.73.12" },
-    .{ .enhancement = .srtc, .disposition = .planned, .planned_version = "0.73.12" },
+    .{ .enhancement = .obc1, .disposition = .base_implemented, .planned_version = "0.73.12" },
+    .{ .enhancement = .srtc, .disposition = .base_implemented, .planned_version = "0.73.12" },
     .{ .enhancement = .sdd1, .disposition = .planned, .planned_version = "0.73.13" },
     .{ .enhancement = .spc7110_epson_rtc, .disposition = .planned, .planned_version = "0.73.13" },
     .{ .enhancement = .super_fx, .disposition = .planned, .planned_version = "0.73.14" },
@@ -74,8 +74,14 @@ pub fn enhancementForHeader(rom_type: u8, map_mode: u8) Enhancement {
         0xF53A, 0xF93A => .spc7110_epson_rtc,
         0x2530 => .obc1,
         0x3320, 0x3420, 0x3520, 0x3323, 0x3423, 0x3523 => .sa1,
-        0x1320, 0x1420, 0x1520, 0x1A20,
-        0x1330, 0x1430, 0x1530, 0x1A30,
+        0x1320,
+        0x1420,
+        0x1520,
+        0x1A20,
+        0x1330,
+        0x1430,
+        0x1530,
+        0x1A30,
         => .super_fx,
         0x4332, 0x4532 => .sdd1,
         0xF320 => .cx4,
@@ -88,6 +94,22 @@ pub fn enhancementForHeader(rom_type: u8, map_mode: u8) Enhancement {
             else => .unknown,
         },
     };
+}
+
+pub const RevisionFamily = enum {
+    obc1,
+    srtc,
+};
+
+/// Classifies only recognizable but unsupported revisions. It is deliberately
+/// narrower than the general enhancement decoder so an unrelated unknown
+/// cartridge cannot be mislabeled as a supported chip family.
+pub fn unsupportedRevisionFamily(rom_type: u8, map_mode: u8) ?RevisionFamily {
+    if ((rom_type & 0xF0) == 0x20 and (rom_type & 0x0F) >= 3 and
+        ((map_mode & 0x2F) == 0x20 or (map_mode & 0x2F) == 0x21)) return .obc1;
+    if ((rom_type & 0xF0) == 0x50 and (rom_type & 0x0F) >= 3 and
+        (map_mode & 0x2F) == 0x25) return .srtc;
+    return null;
 }
 
 pub const Board = struct {
@@ -142,7 +164,8 @@ pub fn mappingForMode(map_mode: u8) ?Mapping {
 pub fn mappingForHeader(map_mode: u8, enhancement: Enhancement) ?Mapping {
     return switch (enhancement) {
         .sa1, .super_fx, .sdd1, .cx4, .obc1, .dsp1_family, .st010_st011, .st018 => .lo_rom,
-        .srtc, .spc7110_epson_rtc => .hi_rom,
+        .srtc => .ex_hi_rom,
+        .spc7110_epson_rtc => .hi_rom,
         else => mappingForMode(map_mode),
     };
 }

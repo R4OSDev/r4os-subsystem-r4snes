@@ -131,7 +131,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     // 5A22, DMA/HDMA, PPU, S-SMP and S-DSP are qualified independently;
     // productive execution is rejected until the runtime-machine/window-host
     // stage composes those owners.
-    sys.println("R4SNES: cartridge, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.9.0.");
+    sys.println("R4SNES: cartridge, OBC-1/S-RTC, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.11.0.");
     return error_not_implemented;
 }
 
@@ -141,6 +141,11 @@ fn cartridgeError(fault: anyerror) []const u8 {
         error.NoValidHeader => "R4SNES: no consistent SNES header was found.",
         error.ExcludedBoard => "R4SNES: cartridge belongs to an excluded adapter or extension system.",
         error.UnsupportedBoard => "R4SNES: cartridge board is unknown or unsupported.",
+        error.UnsupportedOBC1Revision => "R4SNES: cartridge declares an unsupported OBC-1 revision.",
+        error.UnsupportedSrtcRevision => "R4SNES: cartridge declares an unsupported S-RTC revision.",
+        error.ContradictoryOBC1Board => "R4SNES: OBC-1 header contradicts its LoROM, battery or 8-KiB RAM profile.",
+        error.ContradictorySrtcBoard => "R4SNES: S-RTC header contradicts its ExHiROM, battery or save-RAM profile.",
+        error.UnaddressableBoardGeometry => "R4SNES: cartridge board geometry exceeds its implemented address space.",
         error.OutOfMemory => "R4SNES: cartridge memory could not be allocated.",
         else => "R4SNES: cartridge validation failed.",
     };
@@ -158,10 +163,20 @@ fn selfTest(app: *r4os.App) i32 {
     machine.smp.aram[0x0200] = 0x00;
     machine.smp.step() catch return error_not_implemented;
     if (machine.smp.pc != 0x0201) return error_not_implemented;
+    var object_ram = [_]u8{0} ** core.obc1.ram_bytes;
+    var object = core.obc1.Device{};
+    object.power(object_ram[0..]) catch return error_not_implemented;
+    if (!object.write(object_ram[0..], 0x007FF0, 0xA5).changed or
+        object.read(object_ram[0..], 0x807FF0) != 0xA5)
+        return error_not_implemented;
+    var rtc = core.srtc.Device{};
+    rtc.power();
+    if (!rtc.write(0x002801, 0x0E) or !rtc.write(0x002801, 0x04) or !rtc.halted)
+        return error_not_implemented;
     machine.close();
     machine.close();
     if (!machine.closed or machine.smp.dsp.capture_enabled or machine.smp.dsp.queuedFrames() != 0) return error_not_implemented;
-    sys.println("R4SNES SELFTEST OK: CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
+    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
     return 0;
 }
 
@@ -234,15 +249,12 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     defer rtc_store.removeTestFiles(&rtc_cart.identity);
     var rtc_session = try core.persistence.Session.open(&rtc_cart, rtc_store.backend(), generation + 3, wall, monotonic);
     const rtc_state = rtc_session.rtcState() orelse return error.RtcMissing;
-    rtc_state.registers[0] = 9;
-    rtc_state.latched[0] = 7;
-    rtc_state.halted = true;
+    setSrtcCalendar(rtc_state, 9, 7);
     rtc_state.overflow = true;
     try rtc_session.close(&rtc_cart, generation + 3, wall, monotonic);
 
     var recovery_state = core.persistence.RtcState.init(.s_rtc);
-    recovery_state.registers[0] = 4;
-    recovery_state.latched[0] = 3;
+    setSrtcCalendar(&recovery_state, 4, 3);
     var recovery_record: [core.persistence.rtc_record_bytes]u8 = undefined;
     core.persistence.encodeRtc(.{
         .state = recovery_state,
@@ -278,6 +290,29 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     if (!std.mem.eql(u8, rtc_store.failureStageName(), "atomic_recover") or
         rtc_store.failureCode() != r4os.abi.file_stream_error_size_mismatch)
         return error.PartialRecoveryFailureMismatch;
+}
+
+fn setSrtcCalendar(state: *core.persistence.RtcState, live_second: u8, latched_second: u8) void {
+    const weekday = core.srtc.calculateWeekday(0, 1, 1);
+    core.srtc.registersFromCalendar(.{
+        .second = live_second,
+        .minute = 0,
+        .hour = 0,
+        .day = 1,
+        .month = 1,
+        .year = 0,
+        .weekday = weekday,
+    }, &state.registers);
+    core.srtc.registersFromCalendar(.{
+        .second = latched_second,
+        .minute = 0,
+        .hour = 0,
+        .day = 1,
+        .month = 1,
+        .year = 0,
+        .weekday = weekday,
+    }, &state.latched);
+    state.halted = false;
 }
 
 fn makePersistenceCart(

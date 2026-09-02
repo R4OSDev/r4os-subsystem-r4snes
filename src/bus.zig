@@ -8,6 +8,7 @@ pub const AccessClass = enum {
     mmio,
     cartridge_rom,
     cartridge_ram,
+    cartridge_chip,
     open_bus,
 };
 
@@ -38,13 +39,16 @@ pub const Bus = struct {
     reads: u64 = 0,
     writes: u64 = 0,
 
-    pub fn read(self: *Bus, cart: *const cartridge.Cartridge, mmio: anytype, raw_address: u32) Access {
+    pub fn read(self: *Bus, cart: *cartridge.Cartridge, mmio: anytype, raw_address: u32) Access {
         const address = raw_address & address_mask;
         self.last_address = address;
         self.reads +%= 1;
 
         if (wramIndex(address)) |index| {
             return self.completeRead(self.wram[index], 8, .wram, .cpu);
+        }
+        if (cart.readEnhancement(address, self.cpu_open_bus)) |value| {
+            return self.completeRead(value, enhancementCycles(cart), .cartridge_chip, .cpu);
         }
         if (isMmioWindow(address)) {
             const reply: MmioRead = mmio.read(address, self.cpu_open_bus, self.ppu_open_bus);
@@ -68,6 +72,9 @@ pub const Bus = struct {
         if (wramIndex(address)) |index| {
             self.wram[index] = value;
             return .{ .value = value, .master_cycles = 8, .class = .wram };
+        }
+        if (cart.writeEnhancement(address, value)) {
+            return .{ .value = value, .master_cycles = enhancementCycles(cart), .class = .cartridge_chip };
         }
         if (isMmioWindow(address) and mmio.write(address, value, self.cpu_open_bus, self.ppu_open_bus)) {
             return .{ .value = value, .master_cycles = mmioCycles(address), .class = .mmio };
@@ -96,6 +103,14 @@ pub const Bus = struct {
         return if (self.fast_rom_enabled and cart.board.fast_rom and bank >= 0x80) 6 else 8;
     }
 };
+
+fn enhancementCycles(cart: *const cartridge.Cartridge) u8 {
+    return switch (cart.board.capability.enhancement) {
+        .srtc => @import("srtc.zig").access_master_cycles,
+        .obc1 => @import("obc1.zig").access_master_cycles,
+        else => 8,
+    };
+}
 
 // Compile-time adapter used by the CPU core. It keeps the CPU independent of
 // cartridge mapping and MMIO ownership while ensuring production execution

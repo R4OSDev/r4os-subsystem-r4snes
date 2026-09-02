@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.10.0 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.11.0 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
 color math, fixed color, mosaic, VMAIN, hires, overscan and interlace. It
@@ -48,6 +48,21 @@ R4GB: one create-only writer lease, immutable snapshots, one coalescing worker,
 same-directory stage/target/last-good publication, bounded recovery and
 mandatory drain/join. Battery-less boards never access this namespace, and no
 legacy or host-specific path is probed.
+
+OBC-1 is now an executable board capability. Its complete 8-KiB battery RAM,
+both documented bank mirrors, object selector, four-byte object window and
+packed two-bit attribute window run through the production cartridge bus at
+slow-cartridge timing. Only changed physical bytes extend the dirty interval,
+and restart reconstructs selectors from the exact `HASH.SAV` payload.
+
+S-RTC is likewise executable on its documented ExHiROM profile. The `$2800`
+read and `$2801` write ports implement marker, command, transactional
+twelve-nibble calendar write, latch and reset states. Live and latched
+calendars use checked BCD/range rules, Gregorian leap years and an explicit
+reset-halted state. Forward offline time is applied before the next atomic RTC
+snapshot; host time reversal is ignored. Unknown revisions, contradictory
+headers and checksum-valid but semantically invalid RTC records fail with
+specific diagnostics instead of falling back to a base board.
 
 The only connected controller is port 1 and it uses physical keyboard usages:
 

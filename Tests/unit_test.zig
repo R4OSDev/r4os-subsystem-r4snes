@@ -5,6 +5,7 @@ const core = @import("core");
 test {
     _ = @import("cpu_test.zig");
     _ = @import("dma_test.zig");
+    _ = @import("enhancement_test.zig");
     _ = @import("ppu_test.zig");
     _ = @import("persistence_test.zig");
     _ = @import("sdsp_test.zig");
@@ -225,8 +226,8 @@ test "24-bit bus isolates WRAM ROM SRAM MMIO timing and both open-bus latches" {
 test "capability matrix names every planned firmware and excluded family without claiming support" {
     const expected = [_]struct { kind: core.board.Enhancement, disposition: core.board.Disposition }{
         .{ .kind = .none, .disposition = .base_implemented },
-        .{ .kind = .obc1, .disposition = .planned },
-        .{ .kind = .srtc, .disposition = .planned },
+        .{ .kind = .obc1, .disposition = .base_implemented },
+        .{ .kind = .srtc, .disposition = .base_implemented },
         .{ .kind = .sdd1, .disposition = .planned },
         .{ .kind = .spc7110_epson_rtc, .disposition = .planned },
         .{ .kind = .super_fx, .disposition = .planned },
@@ -243,7 +244,9 @@ test "capability matrix names every planned firmware and excluded family without
     for (expected) |entry| {
         const capability = core.board.capability(entry.kind);
         try std.testing.expectEqual(entry.disposition, capability.disposition);
-        if (entry.kind != .none) try std.testing.expect(capability.disposition != .base_implemented);
+        if (entry.kind != .none and entry.kind != .obc1 and entry.kind != .srtc) {
+            try std.testing.expect(capability.disposition != .base_implemented);
+        }
     }
     try std.testing.expectEqual(@as(usize, 0x2000), core.board.capability(.dsp1_family).firmware_bytes);
     try std.testing.expectEqual(@as(usize, 0xD000), core.board.capability(.st010_st011).firmware_bytes);

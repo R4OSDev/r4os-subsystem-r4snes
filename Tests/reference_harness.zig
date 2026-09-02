@@ -44,11 +44,19 @@ const MatrixSuite = struct {
     rom_count: ?usize = null,
 };
 
+const MatrixEnhancement = struct {
+    id: []const u8,
+    status: []const u8,
+    version: ?[]const u8 = null,
+    firmware: ?[]const u8 = null,
+};
+
 const Matrix = struct {
     schema: u32,
     release: []const u8,
     corpus: Corpus,
     suites: []const MatrixSuite,
+    enhancement_chips: []const MatrixEnhancement,
 };
 
 const DmaReferenceRom = struct {
@@ -148,7 +156,7 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.10")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.12")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
@@ -159,6 +167,9 @@ fn run(init: std.process.Init) !void {
     var matrix_roms: usize = 0;
     for (matrix.suites) |suite| matrix_roms += suite.rom_count orelse 0;
     if (matrix_roms != expected.test_roms) return error.QualificationSuiteCountMismatch;
+    if (matrix.enhancement_chips.len != 12) return error.QualificationEnhancementCountMismatch;
+    try expectImplementedEnhancement(matrix.enhancement_chips, "obc1");
+    try expectImplementedEnhancement(matrix.enhancement_chips, "srtc");
 
     const dma_cases_bytes = try cwd.readFileAlloc(io, "Tests/dma_reference_cases.json", allocator, .limited(max_manifest_bytes));
     defer allocator.free(dma_cases_bytes);
@@ -337,6 +348,20 @@ fn run(init: std.process.Init) !void {
         "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} PPU-diagnostics={d} HDRV-geometries={d} S-DSP-oracles={d} Gilyon-basic={d} Gilyon-full={d} Gilyon-spc={d} IPL-speed-bytes={d} IPL-speed-first-divergence=none IPL-speed-steps={d} SPC700-files={d} vectors={d}\n",
         .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, ppu_cases.foreign_roms.len, hdrv_cases.cases.len, sdsp_cases.cases.len, basic_steps, full_steps, spc_steps, ipl_speed.bytes, ipl_speed.steps, vectors.files, vectors.records },
     );
+}
+
+fn expectImplementedEnhancement(chips: []const MatrixEnhancement, id: []const u8) !void {
+    for (chips) |chip| {
+        if (!std.mem.eql(u8, chip.id, id)) continue;
+        if (!std.mem.eql(u8, chip.status, "implemented") or
+            chip.version == null or !std.mem.eql(u8, chip.version.?, "0.73.12") or
+            chip.firmware == null or !std.mem.eql(u8, chip.firmware.?, "none"))
+        {
+            return error.QualificationEnhancementMismatch;
+        }
+        return;
+    }
+    return error.QualificationEnhancementMissing;
 }
 
 const CpuTestMmio = struct {

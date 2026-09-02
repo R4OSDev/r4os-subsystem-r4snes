@@ -2,6 +2,7 @@ const std = @import("std");
 const r4os = @import("r4os");
 const board = @import("board.zig");
 const cartridge = @import("cartridge.zig");
+const srtc = @import("srtc.zig");
 
 const shared = r4os.subsystem_persistence;
 
@@ -77,7 +78,7 @@ pub const RtcState = struct {
     pending_catchup_seconds: u64 = 0,
 
     pub fn init(chip: RtcChip) RtcState {
-        return .{ .chip = chip };
+        return .{ .chip = chip, .halted = chip == .s_rtc };
     }
 
     pub fn queueCatchup(self: *RtcState, adjustment: OfflineAdjustment) void {
@@ -102,10 +103,21 @@ pub const RtcRecord = struct {
     generation: u64,
 };
 
-pub const OpenError = BackendError || error{
+pub const RtcDecodeError = srtc.PersistentError || error{
+    WrongSize,
+    BadMagic,
+    UnsupportedVersion,
+    InvalidChip,
+    InvalidRegisterCount,
+    InvalidFlags,
+    InvalidReserved,
+    BadChecksum,
+    InvalidCatchup,
+};
+
+pub const OpenError = BackendError || RtcDecodeError || error{
     InvalidGeneration,
     CorruptSave,
-    CorruptRtc,
     RtcChipMismatch,
 };
 
@@ -142,7 +154,7 @@ pub const Session = struct {
             .generation = generation,
             .enabled = cart.board.battery,
         };
-        cart.sram_dirty = false;
+        cart.clearSramDirty();
         if (!result.enabled) return result;
 
         try backend.acquire(&result.digest, generation);
@@ -155,17 +167,30 @@ pub const Session = struct {
                 .io => return error.Io,
             }
         }
+        if (cart.obc1_device) |*device| device.power(cart.sram_storage) catch return error.CorruptSave;
 
         if (RtcChip.forEnhancement(cart.board.capability.enhancement)) |chip| {
             var encoded: [rtc_record_bytes]u8 = undefined;
             switch (backend.readExact(&result.digest, .rtc, encoded[0..])) {
                 .ok => {
-                    var record = decodeRtc(encoded[0..]) catch return error.CorruptRtc;
+                    var record = try decodeRtc(encoded[0..]);
                     if (record.state.chip != chip) return error.RtcChipMismatch;
                     result.offline_adjustment = offlineDelta(record.wall_anchor_seconds, wall_now_seconds);
                     record.state.queueCatchup(result.offline_adjustment);
+                    if (cart.srtc_device) |*device| {
+                        try device.loadPersistent(
+                            &record.state.registers,
+                            &record.state.latched,
+                            record.state.halted,
+                            record.state.overflow,
+                        );
+                        const catchup = record.state.takeCatchup();
+                        device.advanceSeconds(catchup);
+                        captureSrtc(device, &record.state);
+                    }
                     result.rtc_record = record;
-                    result.rtc_dirty = result.offline_adjustment.seconds != 0;
+                    result.rtc_dirty = result.offline_adjustment.seconds != 0 or
+                        (cart.srtc_device != null and cart.srtc_device.?.dirty);
                 },
                 .missing => {
                     result.rtc_record = .{
@@ -174,9 +199,10 @@ pub const Session = struct {
                         .monotonic_anchor_ns = monotonic_now_ns,
                         .generation = generation,
                     };
+                    if (cart.srtc_device) |*device| captureSrtc(device, &result.rtc_record.?.state);
                     result.rtc_dirty = true;
                 },
-                .wrong_size => return error.CorruptRtc,
+                .wrong_size => return error.WrongSize,
                 .io => return error.Io,
             }
         }
@@ -206,7 +232,7 @@ pub const Session = struct {
         if (self.closed) return error.Closed;
         if (!self.enabled) return false;
         try self.backend.poll();
-        if (!cart.sram_dirty and !self.rtc_dirty) return false;
+        if (!cart.sram_dirty and !self.rtc_dirty and !srtcDirty(cart)) return false;
         if (guest_tick -| self.last_flush_guest_tick < flush_delay_master_cycles) return false;
         try self.flush(cart, wall_now_seconds, monotonic_now_ns);
         self.last_flush_guest_tick = guest_tick;
@@ -224,7 +250,11 @@ pub const Session = struct {
         try self.backend.poll();
         if (cart.sram_dirty and cart.sram_storage.len != 0) {
             try self.backend.writeAtomic(&self.digest, .sram, cart.sram_storage);
-            cart.sram_dirty = false;
+            cart.clearSramDirty();
+        }
+        if (cart.srtc_device) |*device| {
+            if (device.dirty) self.rtc_dirty = true;
+            if (self.rtc_record) |*record| captureSrtc(device, &record.state);
         }
         if (self.rtc_dirty) {
             if (self.rtc_record) |*record| {
@@ -235,6 +265,7 @@ pub const Session = struct {
                 encodeRtc(record.*, &encoded);
                 try self.backend.writeAtomic(&self.digest, .rtc, encoded[0..]);
                 self.rtc_dirty = false;
+                if (cart.srtc_device) |*device| device.clearDirty();
             }
         }
     }
@@ -298,7 +329,7 @@ pub fn encodeRtc(record: RtcRecord, out: *[rtc_record_bytes]u8) void {
     std.crypto.hash.sha2.Sha256.hash(out[0..96], out[96..128], .{});
 }
 
-pub fn decodeRtc(bytes: []const u8) !RtcRecord {
+pub fn decodeRtc(bytes: []const u8) RtcDecodeError!RtcRecord {
     if (bytes.len != rtc_record_bytes) return error.WrongSize;
     if (!std.mem.eql(u8, bytes[0..rtc_magic.len], rtc_magic)) return error.BadMagic;
     if (readLe(u16, bytes[8..10]) != rtc_record_version) return error.UnsupportedVersion;
@@ -320,12 +351,17 @@ pub fn decodeRtc(bytes: []const u8) !RtcRecord {
     var latched: [16]u8 = undefined;
     @memcpy(registers[0..], bytes[16..32]);
     @memcpy(latched[0..], bytes[32..48]);
+    const halted = (bytes[14] & 1) != 0;
+    if (chip == .s_rtc) {
+        if (halted and pending != 0) return error.InvalidSrtcHaltState;
+        try srtc.validatePersistent(&registers, &latched, halted);
+    }
     return .{
         .state = .{
             .chip = chip,
             .registers = registers,
             .latched = latched,
-            .halted = (bytes[14] & 1) != 0,
+            .halted = halted,
             .overflow = (bytes[14] & 2) != 0,
             .pending_catchup_seconds = pending,
         },
@@ -333,6 +369,21 @@ pub fn decodeRtc(bytes: []const u8) !RtcRecord {
         .monotonic_anchor_ns = readLe(u64, bytes[56..64]),
         .generation = readLe(u64, bytes[64..72]),
     };
+}
+
+fn srtcDirty(cart: *const cartridge.Cartridge) bool {
+    if (cart.srtc_device) |device| return device.dirty;
+    return false;
+}
+
+fn captureSrtc(device: *const srtc.Device, state: *RtcState) void {
+    device.savePersistent(
+        &state.registers,
+        &state.latched,
+        &state.halted,
+        &state.overflow,
+    );
+    state.pending_catchup_seconds = 0;
 }
 
 fn allZero(bytes: []const u8) bool {

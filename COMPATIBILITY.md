@@ -1,6 +1,6 @@
 ﻿# Compatibility
 
-The 0.10.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
+The 0.11.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
 normalizes an optional 512-byte copier header and requires one unambiguous
 LoROM, HiROM, ExLoROM or ExHiROM header. Region, board capability, declared
 sizes, reset vector, startup opcode and checksum/complement contribute to a
@@ -38,10 +38,13 @@ overflow/underflow behavior and guest progress during mute or backend failure.
 The PowerShell WAV gate independently rejects discontinuity, wrong frequency
 and wrong stereo balance. Audible quality remains a final-stage manual check.
 
-The capability table names every planned enhancement family and the
-user-firmware sizes for NEC-DSP/ST hardware without claiming those devices are
-already executable. MSU-1 and adapter systems remain explicit exclusions;
-unknown boards fail closed and are never silently run as a base board.
+OBC-1 and S-RTC are executable capabilities. OBC-1 requires the exact LoROM,
+battery and 8192-byte object-RAM profile. S-RTC requires its ExHiROM, battery
+and save-RAM profile. Recognizable but unknown revisions and contradictory
+profiles have separate rejection classes. The capability table continues to
+name every later enhancement family and the user-firmware sizes for NEC-DSP/ST
+hardware without claiming those devices are already executable. MSU-1 and
+adapter systems remain explicit exclusions.
 
 The S-PPU owner now covers modes 0-7, native hires and interlace geometries,
 Mode 7, windows, main/subscreen composition, color math, fixed color, mosaic,
@@ -60,3 +63,11 @@ last-good backup; malformed or partial recovery fails closed. Close drains the
 worker before releasing ownership. Battery-less boards do not touch the
 backend. The cartridge remains immutable and no legacy or host-specific save
 directory is probed.
+
+OBC-1 tests cover direct and indirect bytes, packed attributes, both selector
+bases, every documented bank mirror, reset reconstruction, exact bus timing,
+dirty bounds and persistence restart. S-RTC tests cover command/read/write
+markers, stable latches, reset/halt, valid ranges, February in leap and century
+years, year wrap, arbitrary slice partitioning and offline restart. An RTC
+record with a valid outer checksum but invalid live calendar, weekday, latch,
+halt relation or reserved state is still rejected before it reaches the chip.

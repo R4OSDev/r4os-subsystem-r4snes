@@ -1,5 +1,7 @@
 const std = @import("std");
 const board = @import("board.zig");
+const obc1 = @import("obc1.zig");
+const srtc = @import("srtc.zig");
 
 pub const copier_header_size: usize = 512;
 pub const mapping_granularity: usize = 32 * 1024;
@@ -46,6 +48,10 @@ pub const Cartridge = struct {
     board: board.Board,
     had_copier_header: bool,
     sram_dirty: bool = false,
+    sram_dirty_first: usize = 0,
+    sram_dirty_end: usize = 0,
+    obc1_device: ?obc1.Device = null,
+    srtc_device: ?srtc.Device = null,
 
     pub fn parse(allocator: std.mem.Allocator, source: []const u8) !Cartridge {
         const geometry = try inspectCandidateSize(source.len);
@@ -54,10 +60,26 @@ pub const Cartridge = struct {
         const header = try selectHeader(normalized);
         const enhancement = board.enhancementForHeader(header.rom_type, header.map_mode);
         const capability = board.capability(enhancement);
+        if (enhancement == .unknown) {
+            if (board.unsupportedRevisionFamily(header.rom_type, header.map_mode)) |family| {
+                return switch (family) {
+                    .obc1 => error.UnsupportedOBC1Revision,
+                    .srtc => error.UnsupportedSrtcRevision,
+                };
+            }
+        }
         if (capability.disposition == .excluded) return error.ExcludedBoard;
         if (capability.disposition == .unsupported) return error.UnsupportedBoard;
         if (capability.disposition == .base_implemented and normalized.len > 8 * 1024 * 1024) {
             return error.UnaddressableBoardGeometry;
+        }
+        const battery = hasBattery(header.rom_type);
+        switch (enhancement) {
+            .obc1 => if (header.mapping != .lo_rom or header.declared_sram_bytes != obc1.ram_bytes or !battery)
+                return error.ContradictoryOBC1Board,
+            .srtc => if (header.mapping != .ex_hi_rom or header.declared_sram_bytes == 0 or !battery or normalized.len <= 4 * 1024 * 1024)
+                return error.ContradictorySrtcBoard,
+            else => {},
         }
 
         const rom_copy = try allocator.alloc(u8, normalized.len);
@@ -69,7 +91,7 @@ pub const Cartridge = struct {
 
         var identity: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(normalized, &identity, .{});
-        return .{
+        var result = Cartridge{
             .allocator = allocator,
             .rom_storage = rom_copy,
             .sram_storage = sram_copy,
@@ -81,10 +103,15 @@ pub const Cartridge = struct {
                 .fast_rom = (header.map_mode & 0x10) != 0,
                 .capability = capability,
                 .sram_bytes = sram_copy.len,
-                .battery = hasBattery(header.rom_type),
+                .battery = battery,
             },
             .had_copier_header = geometry.copier_header,
+            .obc1_device = if (enhancement == .obc1) .{} else null,
+            .srtc_device = if (enhancement == .srtc) .{} else null,
         };
+        if (result.obc1_device) |*device| try device.power(result.sram_storage);
+        if (result.srtc_device) |*device| device.power();
+        return result;
     }
 
     pub fn deinit(self: *Cartridge) void {
@@ -93,6 +120,10 @@ pub const Cartridge = struct {
         self.sram_storage = &.{};
         self.rom_storage = &.{};
         self.sram_dirty = false;
+        self.sram_dirty_first = 0;
+        self.sram_dirty_end = 0;
+        self.obc1_device = null;
+        self.srtc_device = null;
     }
 
     pub fn rom(self: *const Cartridge) []const u8 {
@@ -114,7 +145,49 @@ pub const Cartridge = struct {
     pub fn writeSram(self: *Cartridge, index: usize, value: u8) void {
         if (self.sram_storage[index] == value) return;
         self.sram_storage[index] = value;
-        self.sram_dirty = true;
+        self.markSramDirty(index, index + 1);
+    }
+
+    pub fn readEnhancement(self: *Cartridge, address: u32, open_bus: u8) ?u8 {
+        if (self.obc1_device) |*device| {
+            if (device.read(self.sram_storage, address)) |value| return value;
+        }
+        if (self.srtc_device) |*device| return device.read(address, open_bus);
+        return null;
+    }
+
+    pub fn writeEnhancement(self: *Cartridge, address: u32, value: u8) bool {
+        if (self.obc1_device) |*device| {
+            const result = device.write(self.sram_storage, address, value);
+            if (result.handled) {
+                if (result.changed) self.markSramDirty(result.first, result.end);
+                return true;
+            }
+        }
+        if (self.srtc_device) |*device| return device.write(address, value);
+        return false;
+    }
+
+    pub fn dirtyRange(self: *const Cartridge) ?struct { first: usize, end: usize } {
+        if (!self.sram_dirty) return null;
+        return .{ .first = self.sram_dirty_first, .end = self.sram_dirty_end };
+    }
+
+    pub fn clearSramDirty(self: *Cartridge) void {
+        self.sram_dirty = false;
+        self.sram_dirty_first = 0;
+        self.sram_dirty_end = 0;
+    }
+
+    fn markSramDirty(self: *Cartridge, first: usize, end: usize) void {
+        if (!self.sram_dirty) {
+            self.sram_dirty = true;
+            self.sram_dirty_first = first;
+            self.sram_dirty_end = end;
+            return;
+        }
+        self.sram_dirty_first = @min(self.sram_dirty_first, first);
+        self.sram_dirty_end = @max(self.sram_dirty_end, end);
     }
 
     pub fn identityHex(self: *const Cartridge) [64]u8 {
