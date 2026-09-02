@@ -16,6 +16,7 @@ pub const obc1 = @import("obc1.zig");
 pub const persistence = @import("persistence.zig");
 pub const persistence_r4os = @import("persistence_r4os.zig");
 pub const ppu = @import("ppu.zig");
+pub const product_host = @import("product_host.zig");
 pub const runtime_adapter = @import("runtime_adapter.zig");
 pub const sdsp = @import("sdsp.zig");
 pub const scpu = @import("scpu.zig");

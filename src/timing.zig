@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const ntsc_master_hz: u64 = 21_477_272;
 pub const pal_master_hz: u64 = 21_281_370;
 pub const nominal_audio_hz: u32 = 32_000;
@@ -13,6 +15,7 @@ pub const short_line_master_cycles: u16 = 1_360;
 pub const long_line_master_cycles: u16 = 1_368;
 pub const hblank_start_master_cycle: u16 = 1_096;
 pub const refresh_master_cycles: u8 = 40;
+pub const nanoseconds_per_second: u64 = 1_000_000_000;
 
 pub const Region = enum {
     ntsc,
@@ -29,6 +32,66 @@ pub const Profile = struct {
             .ntsc => .{ .master_hz = ntsc_master_hz, .scanlines = 262, .vblank_start = 225 },
             .pal => .{ .master_hz = pal_master_hz, .scanlines = 312, .vblank_start = 240 },
         };
+    }
+};
+
+/// Converts the pause-corrected guest time supplied by the shared subsystem
+/// runtime into region-correct SNES master-clock debt.  Complete 65C816/DMA
+/// operations may finish just beyond a grant; `reconcile` carries that small
+/// surplus as credit instead of accumulating emulation-rate drift.
+pub const HostBudget = struct {
+    last_guest_nanoseconds: ?u64 = null,
+    fractional_numerator: u64 = 0,
+    pending_master_cycles: u64 = 0,
+    ahead_master_cycles: u64 = 0,
+    paused: bool = true,
+
+    pub fn pause(self: *HostBudget) void {
+        self.last_guest_nanoseconds = null;
+        self.fractional_numerator = 0;
+        self.pending_master_cycles = 0;
+        self.ahead_master_cycles = 0;
+        self.paused = true;
+    }
+
+    pub fn budget(self: *HostBudget, guest_nanoseconds: u64, master_hz: u64, caller_limit: u32) u32 {
+        if (self.paused) {
+            self.last_guest_nanoseconds = guest_nanoseconds;
+            self.paused = false;
+            return 0;
+        }
+        const previous = self.last_guest_nanoseconds orelse {
+            self.last_guest_nanoseconds = guest_nanoseconds;
+            return 0;
+        };
+        if (guest_nanoseconds > previous) {
+            self.last_guest_nanoseconds = guest_nanoseconds;
+            const elapsed = guest_nanoseconds - previous;
+            const scaled: u128 = @as(u128, elapsed) * master_hz + self.fractional_numerator;
+            const whole: u128 = scaled / nanoseconds_per_second;
+            self.fractional_numerator = @intCast(scaled % nanoseconds_per_second);
+            var newly_due: u64 = @intCast(@min(whole, std.math.maxInt(u64)));
+            const covered = @min(newly_due, self.ahead_master_cycles);
+            newly_due -= covered;
+            self.ahead_master_cycles -= covered;
+            self.pending_master_cycles +|= newly_due;
+        }
+        const limit = @min(caller_limit, maximum_host_slice_master_cycles);
+        const granted: u32 = @intCast(@min(self.pending_master_cycles, limit));
+        self.pending_master_cycles -= granted;
+        return granted;
+    }
+
+    pub fn reconcile(self: *HostBudget, granted: u32, executed: u64) void {
+        if (executed < granted) {
+            self.pending_master_cycles +|= granted - executed;
+            return;
+        }
+        var surplus = executed - granted;
+        const pending_covered = @min(surplus, self.pending_master_cycles);
+        self.pending_master_cycles -= pending_covered;
+        surplus -= pending_covered;
+        self.ahead_master_cycles +|= surplus;
     }
 };
 

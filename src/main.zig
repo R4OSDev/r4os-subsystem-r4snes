@@ -2,6 +2,30 @@ const std = @import("std");
 const r4os = @import("r4os");
 const core = @import("core.zig");
 
+const host_api = r4os.subsystem_host;
+const product_host = core.product_host;
+const runtime_api = r4os.subsystem_runtime;
+
+comptime {
+    const bindings = core.host_adapter.bindings;
+    if (bindings.len != 12 or
+        bindings[0].usage != r4os.abi.physical_key_usage_up or
+        bindings[1].usage != r4os.abi.physical_key_usage_down or
+        bindings[2].usage != r4os.abi.physical_key_usage_left or
+        bindings[3].usage != r4os.abi.physical_key_usage_right or
+        bindings[4].usage != r4os.abi.physical_key_usage_enter or
+        bindings[5].usage != r4os.abi.physical_key_usage_right_control or
+        bindings[6].usage != r4os.abi.physical_key_usage_keypad_8 or
+        bindings[7].usage != r4os.abi.physical_key_usage_keypad_6 or
+        bindings[8].usage != r4os.abi.physical_key_usage_keypad_2 or
+        bindings[9].usage != r4os.abi.physical_key_usage_keypad_4 or
+        bindings[10].usage != r4os.abi.physical_key_usage_keypad_7 or
+        bindings[11].usage != r4os.abi.physical_key_usage_keypad_9)
+    {
+        @compileError("R4SNES physical input mapping drifted from the public R4DESK HID contract");
+    }
+}
+
 const error_profile: i32 = 64;
 const error_launch: i32 = 65;
 const error_path: i32 = 66;
@@ -14,248 +38,458 @@ const error_not_implemented: i32 = 72;
 const error_allocator: i32 = 73;
 const error_firmware: i32 = 74;
 const error_persistence_selftest: i32 = 75;
+const error_save_busy: i32 = 76;
+const error_save_open: i32 = 77;
+const error_save_close: i32 = 78;
+const error_host_video: i32 = 79;
+const error_runtime: i32 = 80;
+const audio_service_timeout_ns: u64 = 50 * std.time.ns_per_ms;
+const audio_close_timeout_ns: u64 = 500 * std.time.ns_per_ms;
+const product_audio_target_quanta: u16 = 2;
+const product_audio_max_catchup_quanta: u16 = 16;
 
 pub fn r4_app_main(app: *r4os.App) i32 {
     if (std.mem.indexOf(u8, app.args(), "/PERSISTTEST") != null) return persistenceSelfTest(app);
     if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
+    return runProduct(app);
+}
+
+fn runProduct(app: *r4os.App) i32 {
     if (app.profile != .desktop) return error_profile;
-    const files = app.files() orelse return r4os.abi.err_no_group;
     const sys = app.system();
-    const launch = r4os.subsystem_launch.parse(app.args()) catch {
+    const allocator = app.allocator() orelse return error_allocator;
+    const files = app.files() orelse return r4os.abi.err_no_group;
+    const desk = app.desktop() orelse return r4os.abi.err_no_group;
+    const draw = app.drawing() orelse return r4os.abi.err_no_group;
+    const launch = r4os.subsystem_launch.parse(app.args()) catch |fault| {
         sys.println("R4SNES: invalid R4SUBSYS1 launch request.");
-        return error_launch;
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Startfehler", &.{
+            "Der R4SUBSYS1-Startdatensatz ist ungueltig oder zu gross.",
+            @errorName(fault),
+            "Eine SFC-/SMC-Datei muss ueber Explorer oder Open With gestartet werden.",
+        }, error_launch);
     };
     var path = r4os.AbsoluteFilePath.parse(launch.guest_path) catch {
         sys.println("R4SNES: invalid absolute cartridge path.");
-        return error_path;
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Startfehler", &.{
+            "Der uebergebene Cartridge-Pfad ist nicht absolut oder ungueltig.",
+            launch.guest_path,
+        }, error_path);
     };
-    const info = switch (files.info(path.asZ())) {
-        .value => |value| value,
-        .missing => {
-            sys.println("R4SNES: cartridge file not found.");
-            return error_missing;
-        },
-        .failure => {
-            sys.println("R4SNES: cartridge metadata could not be read.");
-            return error_metadata;
-        },
-    };
-    if (info.is_dir != 0) {
-        sys.println("R4SNES: cartridge path is a directory.");
-        return error_directory;
+    if (!hasCartridgeExtension(launch.guest_path)) {
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Formatfehler", &.{
+            "R4SNES akzeptiert ueber R4SUBSYS1 ausschliesslich .SFC und .SMC.",
+            launch.guest_path,
+        }, error_path);
     }
-    const size = std.math.cast(usize, info.size) orelse {
-        sys.println("R4SNES: cartridge is too large for this host.");
-        return error_size;
+    var source: ?[]u8 = loadCartridgeOwned(allocator, &files, &path) catch |fault| {
+        sys.write("R4SNES: cartridge load failed: ");
+        sys.println(@errorName(fault));
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Ladefehler", &.{
+            loadFailureMessage(fault),
+            launch.guest_path,
+            @errorName(fault),
+        }, loadFailureCode(fault));
     };
-    _ = core.cartridge.inspectContainerSize(size) catch {
-        sys.println("R4SNES: unsupported cartridge geometry.");
-        return error_cartridge;
+    defer if (source) |bytes| secureFree(allocator, bytes);
+
+    const requirement = core.cartridge.inspectNecDspRequirement(source.?, null) catch |fault| {
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Cartridgefehler", &.{
+            cartridgeError(fault),
+            launch.guest_path,
+        }, error_cartridge);
     };
-    const allocator = app.allocator() orelse return error_allocator;
-    const source = allocator.alloc(u8, size) catch {
-        sys.println("R4SNES: cartridge buffer could not be allocated.");
-        return error_allocator;
-    };
-    defer {
-        @memset(source, 0);
-        allocator.free(source);
-    }
-    var offset: usize = 0;
-    while (offset < source.len) {
-        const count = switch (files.readAt(path.asZ(), @intCast(offset), source[offset..])) {
-            .bytes => |value| value,
-            .end, .failure => {
-                sys.println("R4SNES: cartridge read was incomplete.");
-                return error_metadata;
-            },
-        };
-        if (count == 0) {
-            sys.println("R4SNES: cartridge read made no progress.");
-            return error_metadata;
-        }
-        offset += count;
-    }
-    const requirement = core.cartridge.inspectNecDspRequirement(source, null) catch |fault| {
-        sys.println(cartridgeError(fault));
-        return error_cartridge;
-    };
-    const st018_requirement = core.cartridge.inspectSt018Requirement(source) catch |fault| {
-        sys.println(cartridgeError(fault));
-        return error_cartridge;
+    const st018_requirement = core.cartridge.inspectSt018Requirement(source.?) catch |fault| {
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Cartridgefehler", &.{
+            cartridgeError(fault),
+            launch.guest_path,
+        }, error_cartridge);
     };
     var separate_firmware: ?[]u8 = null;
-    defer if (separate_firmware) |firmware| {
-        @memset(firmware, 0);
-        allocator.free(firmware);
-    };
+    defer if (separate_firmware) |firmware| secureFree(allocator, firmware);
     if (requirement) |needed| {
         if (needed.appended) {
-            const appended = source[source.len - needed.firmwareBytes() ..];
+            const appended = source.?[source.?.len - needed.firmwareBytes() ..];
             _ = core.nec_dsp.validateFirmware(needed.revision, appended, .known_only) catch |fault| {
                 printNecDspFirmwareError(sys, needed, fault);
-                return error_firmware;
+                return showStatus(allocator, sys, desk, draw, "R4SNES - Firmwarefehler", &.{
+                    "Die angehaengte NEC-DSP-Firmware ist ungueltig.",
+                    needed.fileName(),
+                    @errorName(fault),
+                }, error_firmware);
             };
         } else {
-            var firmware_path = r4os.AbsoluteFilePath.parse(needed.firmwarePath()) catch {
-                printNecDspFirmwareError(sys, needed, error.InvalidNecDspFirmwarePath);
-                return error_firmware;
-            };
-            const firmware_info = switch (files.info(firmware_path.asZ())) {
-                .missing => {
-                    printNecDspFirmwareError(sys, needed, error.MissingNecDspFirmware);
-                    return error_firmware;
-                },
-                .failure => {
-                    printNecDspFirmwareError(sys, needed, error.NecDspFirmwareMetadataFailure);
-                    return error_firmware;
-                },
-                .value => |value| value,
-            };
-            if (firmware_info.is_dir != 0 or firmware_info.size != needed.firmwareBytes()) {
-                printNecDspFirmwareError(sys, needed, error.InvalidNecDspFirmwareSize);
-                return error_firmware;
-            }
-            const firmware = allocator.alloc(u8, needed.firmwareBytes()) catch {
-                sys.println("R4SNES: NEC-DSP firmware buffer could not be allocated.");
-                return error_allocator;
-            };
-            separate_firmware = firmware;
-            var firmware_offset: usize = 0;
-            while (firmware_offset < firmware.len) {
-                const count = switch (files.readAt(firmware_path.asZ(), @intCast(firmware_offset), firmware[firmware_offset..])) {
-                    .bytes => |value| value,
-                    .end, .failure => {
-                        printNecDspFirmwareError(sys, needed, error.NecDspFirmwareReadFailure);
-                        return error_firmware;
-                    },
-                };
-                if (count == 0) {
-                    printNecDspFirmwareError(sys, needed, error.NecDspFirmwareReadFailure);
-                    return error_firmware;
-                }
-                firmware_offset += count;
-            }
-            _ = core.nec_dsp.validateFirmware(needed.revision, firmware, .known_only) catch |fault| {
+            separate_firmware = loadExactOwned(allocator, &files, needed.firmwarePath(), needed.firmwareBytes()) catch |fault| {
                 printNecDspFirmwareError(sys, needed, fault);
-                return error_firmware;
+                return showStatus(allocator, sys, desk, draw, "R4SNES - Firmwarefehler", &.{
+                    "Die benoetigte NEC-DSP-Firmware fehlt oder ist nicht lesbar.",
+                    needed.firmwarePath(),
+                    @errorName(fault),
+                }, error_firmware);
+            };
+            _ = core.nec_dsp.validateFirmware(needed.revision, separate_firmware.?, .known_only) catch |fault| {
+                printNecDspFirmwareError(sys, needed, fault);
+                return showStatus(allocator, sys, desk, draw, "R4SNES - Firmwarefehler", &.{
+                    "Die NEC-DSP-Firmware passt nicht zur erkannten Chiprevision.",
+                    needed.fileName(),
+                    @errorName(fault),
+                }, error_firmware);
             };
         }
     }
     var st018_firmware: ?[]u8 = null;
-    defer if (st018_firmware) |firmware| {
-        @memset(firmware, 0);
-        allocator.free(firmware);
-    };
+    defer if (st018_firmware) |firmware| secureFree(allocator, firmware);
     if (st018_requirement) |needed| {
-        var st018_path = r4os.AbsoluteFilePath.parse(needed.firmwarePath()) catch {
-            printSt018FirmwareError(sys, needed, error.InvalidSt018FirmwarePath);
-            return error_firmware;
-        };
-        const firmware_info = switch (files.info(st018_path.asZ())) {
-            .missing => {
-                printSt018FirmwareError(sys, needed, error.MissingSt018Firmware);
-                return error_firmware;
-            },
-            .failure => {
-                printSt018FirmwareError(sys, needed, error.St018FirmwareMetadataFailure);
-                return error_firmware;
-            },
-            .value => |value| value,
-        };
-        if (firmware_info.is_dir != 0 or firmware_info.size != needed.firmwareBytes()) {
-            printSt018FirmwareError(sys, needed, error.InvalidSt018FirmwareSize);
-            return error_firmware;
-        }
-        const firmware = allocator.alloc(u8, needed.firmwareBytes()) catch {
-            sys.println("R4SNES: ST018 firmware buffer could not be allocated.");
-            return error_allocator;
-        };
-        st018_firmware = firmware;
-        var firmware_offset: usize = 0;
-        while (firmware_offset < firmware.len) {
-            const count = switch (files.readAt(st018_path.asZ(), @intCast(firmware_offset), firmware[firmware_offset..])) {
-                .bytes => |value| value,
-                .end, .failure => {
-                    printSt018FirmwareError(sys, needed, error.St018FirmwareReadFailure);
-                    return error_firmware;
-                },
-            };
-            if (count == 0) {
-                printSt018FirmwareError(sys, needed, error.St018FirmwareReadFailure);
-                return error_firmware;
-            }
-            firmware_offset += count;
-        }
-        _ = core.st018.validateFirmware(firmware, .known_only, .separate) catch |fault| {
+        st018_firmware = loadExactOwned(allocator, &files, needed.firmwarePath(), needed.firmwareBytes()) catch |fault| {
             printSt018FirmwareError(sys, needed, fault);
-            return error_firmware;
+            return showStatus(allocator, sys, desk, draw, "R4SNES - Firmwarefehler", &.{
+                "Die benoetigte ST018-Firmware fehlt oder ist nicht lesbar.",
+                needed.firmwarePath(),
+                @errorName(fault),
+            }, error_firmware);
+        };
+        _ = core.st018.validateFirmware(st018_firmware.?, .known_only, .separate) catch |fault| {
+            printSt018FirmwareError(sys, needed, fault);
+            return showStatus(allocator, sys, desk, draw, "R4SNES - Firmwarefehler", &.{
+                "Die ST018-Firmware passt nicht zur bekannten Chiprevision.",
+                needed.fileName(),
+                @errorName(fault),
+            }, error_firmware);
         };
     }
-    var cartridge = core.cartridge.Cartridge.parseWithOptions(allocator, source, .{
+    const exact_ipl = loadOptionalIpl(&files) catch |fault| {
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Firmwarefehler", &.{
+            "Die optionale SPC700.IPL ist vorhanden, aber nicht exakt 64 Byte lesbar.",
+            core.persistence.spc700_ipl_path,
+            @errorName(fault),
+        }, error_firmware);
+    };
+
+    var save_store = core.persistence_r4os.AsyncStore.init(files, allocator);
+    const instance_id = sys.ticks() | 1;
+    var time_context = ProductTimeContext{ .sys = &sys };
+    var guest = product_host.Guest.init(allocator, save_store.backend(), time_context.source(), instance_id);
+    defer _ = guest.close();
+    const owned_source = product_host.OwnedSource{
+        .image = source.?,
         .nec_dsp_revision = if (requirement) |needed| needed.revision else null,
         .nec_dsp_firmware = separate_firmware,
         .st018_firmware = st018_firmware,
-    }) catch |fault| {
-        sys.println(cartridgeError(fault));
-        return error_cartridge;
+        .exact_ipl = exact_ipl,
     };
-    defer cartridge.deinit();
+    source = null;
+    separate_firmware = null;
+    st018_firmware = null;
+    guest.openOwned(owned_source) catch |fault| {
+        sys.write("R4SNES: cartridge rejected: ");
+        sys.println(@errorName(fault));
+        const code = openFailureCode(fault);
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Cartridgefehler", &.{
+            openFailureMessage(fault),
+            launch.guest_path,
+            @errorName(fault),
+        }, code);
+    };
 
-    const machine = allocator.create(core.machine.Machine) catch {
-        sys.println("R4SNES: machine state could not be allocated.");
-        return error_allocator;
+    const surface = guest.initialSurface() catch {
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Hostfehler", &.{
+            "Die native XRGB32-Surface konnte nicht angelegt werden.",
+        }, error_host_video);
     };
-    defer allocator.destroy(machine);
-    machine.* = core.machine.Machine.init(1);
-    machine.smp.powerSemanticIpl();
-    defer machine.smp.removeExactIpl();
-    var firmware_path = r4os.AbsoluteFilePath.parse(core.persistence.spc700_ipl_path) catch {
-        sys.println("R4SNES: internal SPC700 IPL path is invalid.");
-        return error_firmware;
+    var raster_scratch: [host_api.tile_max_pixels]u32 = undefined;
+    var window = host_api.Host.init(desk, draw, surface, raster_scratch[0..]) catch |fault| {
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Hostfehler", &.{
+            "Der produktive Super-Nintendo-Fensterhost ist nicht verfuegbar.",
+            @errorName(fault),
+        }, error_host_video);
     };
-    switch (files.info(firmware_path.asZ())) {
-        .missing => {},
-        .failure => {
-            sys.println("R4SNES: optional SPC700.IPL metadata could not be read.");
-            return error_firmware;
+    window.setInputPolicy(.{ .key_text_mode = .key_and_text, .pointer_mode = .ignored });
+    _ = window.setMinimumSize(core.ppu.frame_width, core.ppu.standard_height);
+    guest.attachVideo(&window.video) catch |fault| {
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Hostfehler", &.{
+            "Die Cartridge-Surface konnte nicht an das Fenster gebunden werden.",
+            @errorName(fault),
+        }, error_host_video);
+    };
+
+    var audio_sink_storage: runtime_api.R4AudioSink = undefined;
+    var audio_sink: ?runtime_api.AudioSink = null;
+    if (app.audio()) |audio| {
+        audio_sink_storage = runtime_api.R4AudioSink.initWithTimeouts(audio, audio_service_timeout_ns, audio_close_timeout_ns);
+        audio_sink = audio_sink_storage.sink();
+    }
+    var audio_queue: [runtime_api.default_quantum_frames * product_audio_target_quanta * core.sdsp.sample_bytes]u8 = undefined;
+    var audio_scratch: [runtime_api.default_quantum_frames * core.sdsp.sample_bytes]u8 = undefined;
+    var runtime = runtime_api.Runtime.init(.{
+        .slice_budget = product_host.slice_budget_master_cycles,
+        .max_input_events = runtime_api.default_max_input_events,
+        .max_wait_ticks = runtime_api.default_max_wait_ticks,
+    }, sys.monotonicHz(), sys.ticks(), .{
+        .config = .{
+            .sample_rate = core.sdsp.output_sample_rate,
+            .channels = core.sdsp.channels,
+            .quantum_frames = runtime_api.default_quantum_frames,
+            .target_quanta = product_audio_target_quanta,
+            .max_catchup_quanta = product_audio_max_catchup_quanta,
         },
-        .value => |firmware_info| {
-            if (firmware_info.is_dir != 0 or firmware_info.size != core.smp.exact_ipl_size) {
-                sys.println("R4SNES: optional SPC700.IPL must be an exact 64-byte file.");
-                return error_firmware;
-            }
-            var firmware: [core.smp.exact_ipl_size]u8 = undefined;
-            var firmware_offset: usize = 0;
-            while (firmware_offset < firmware.len) {
-                const count = switch (files.readAt(firmware_path.asZ(), @intCast(firmware_offset), firmware[firmware_offset..])) {
-                    .bytes => |value| value,
-                    .end, .failure => {
-                        sys.println("R4SNES: optional SPC700.IPL read was incomplete.");
-                        return error_firmware;
-                    },
-                };
-                if (count == 0) {
-                    sys.println("R4SNES: optional SPC700.IPL read made no progress.");
-                    return error_firmware;
-                }
-                firmware_offset += count;
-            }
-            machine.smp.installExactIpl(&firmware) catch {
-                sys.println("R4SNES: optional SPC700.IPL validation failed.");
-                return error_firmware;
-            };
-            machine.smp.reset();
-            @memset(firmware[0..], 0);
-        },
+        .queue_storage = audio_queue[0..],
+        .scratch = audio_scratch[0..],
+        .sink = audio_sink,
+    }) catch |fault| {
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Hostfehler", &.{
+            "Die kooperative Gastlaufzeit konnte nicht initialisiert werden.",
+            @errorName(fault),
+        }, error_runtime);
+    };
+    var runtime_host = product_host.WindowHost.init(sys, &window, &guest, &runtime);
+    runtime_host.applyTitle();
+
+    sys.write("R4SNES: validated cartridge ");
+    sys.println(guest.title());
+    sys.write("R4SNES: board ");
+    sys.println(@tagName(guest.cartridge.?.board.capability.enhancement));
+    if (guest.save_session.?.enabled) {
+        sys.write("R4SNES: persistence ");
+        sys.println(core.persistence.save_root);
+    }
+    sys.println("R4SNES: host controls F5=pause F6=resume F8=reset F9=mute F10=unmute");
+    const exit_code = runtime.run(&sys, guest.driver(), runtime_host.driver());
+    const runtime_state = runtime.state;
+    const audio_degraded = runtime.audio.state == .degraded;
+    runtime.shutdown();
+    const close_result = guest.close();
+    if (close_result != 0) {
+        var storage_text: [128]u8 = undefined;
+        const rendered = std.fmt.bufPrint(storage_text[0..], "Speicherstufe: {s}, Dateisystemcode: {d}", .{
+            save_store.failureStageName(),
+            save_store.failureCode(),
+        }) catch "Cartridge-Speicher konnte nicht sicher abgeschlossen werden.";
+        return showStatus(allocator, sys, desk, draw, "R4SNES - Speicherfehler", &.{
+            "SAV/RTC konnte nicht sicher veroeffentlicht werden.",
+            rendered,
+            "Der letzte gueltige Stand bleibt erhalten; ein Stage wird beim naechsten Start wiederaufgenommen.",
+        }, error_save_close);
+    }
+    if (runtime_state == .closed or runtime_state == .completed) return 0;
+    var failure_text: [64]u8 = undefined;
+    const rendered = std.fmt.bufPrint(failure_text[0..], "Laufzeitfehler: {d}", .{exit_code}) catch "Laufzeitfehler";
+    return showStatus(allocator, sys, desk, draw, "R4SNES - Laufzeitfehler", &.{
+        "Die emulierte Super-Nintendo-Instanz wurde kontrolliert beendet.",
+        rendered,
+        if (audio_degraded) "Audio war degradiert; Video und Eingabe liefen unabhaengig weiter." else "Alle Instanzressourcen wurden freigegeben.",
+    }, if (exit_code == 0) error_runtime else exit_code);
+}
+
+const ProductTimeContext = struct {
+    sys: *const r4os.r4sys.Context,
+
+    fn source(self: *ProductTimeContext) product_host.TimeSource {
+        return .{ .context = self, .now_fn = now };
     }
 
-    // Parsing owns a private normalized copy and exposes ROM as read-only. CPU,
-    // 5A22, DMA/HDMA, PPU, S-SMP and S-DSP are qualified independently;
-    // productive execution is rejected until the runtime-machine/window-host
-    // stage composes those owners.
-    sys.println("R4SNES: cartridge, OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4/ST010/ST011/ST018-ARMv3, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.18.0.");
-    return error_not_implemented;
+    fn now(context: *anyopaque) product_host.TimePoint {
+        const self: *ProductTimeContext = @ptrCast(@alignCast(context));
+        return .{
+            .wall_seconds = core.persistence_r4os.wallSeconds(self.sys.timeState()),
+            .monotonic_ns = self.sys.monotonicNanoseconds() orelse 0,
+        };
+    }
+};
+
+const LoadError = error{
+    Missing,
+    Directory,
+    InvalidGeometry,
+    WrongSize,
+    Metadata,
+    Read,
+    OutOfMemory,
+};
+
+fn hasCartridgeExtension(path: []const u8) bool {
+    return endsWithIgnoreCase(path, ".sfc") or endsWithIgnoreCase(path, ".smc");
+}
+
+fn endsWithIgnoreCase(value: []const u8, suffix: []const u8) bool {
+    return value.len >= suffix.len and std.ascii.eqlIgnoreCase(value[value.len - suffix.len ..], suffix);
+}
+
+fn loadCartridgeOwned(
+    allocator: std.mem.Allocator,
+    files: *const r4os.app_storage.Files,
+    path: *r4os.AbsoluteFilePath,
+) LoadError![]u8 {
+    const info = switch (files.info(path.asZ())) {
+        .value => |value| value,
+        .missing => return error.Missing,
+        .failure => return error.Metadata,
+    };
+    if (info.is_dir != 0) return error.Directory;
+    const size = std.math.cast(usize, info.size) orelse return error.InvalidGeometry;
+    _ = core.cartridge.inspectContainerSize(size) catch return error.InvalidGeometry;
+    const image = allocator.alloc(u8, size) catch return error.OutOfMemory;
+    errdefer allocator.free(image);
+    try readExact(files, path, image);
+    return image;
+}
+
+fn loadExactOwned(
+    allocator: std.mem.Allocator,
+    files: *const r4os.app_storage.Files,
+    raw_path: []const u8,
+    expected_size: usize,
+) LoadError![]u8 {
+    var path = r4os.AbsoluteFilePath.parse(raw_path) catch return error.Metadata;
+    const info = switch (files.info(path.asZ())) {
+        .value => |value| value,
+        .missing => return error.Missing,
+        .failure => return error.Metadata,
+    };
+    if (info.is_dir != 0) return error.Directory;
+    if (info.size != expected_size) return error.WrongSize;
+    const bytes = allocator.alloc(u8, expected_size) catch return error.OutOfMemory;
+    errdefer allocator.free(bytes);
+    try readExact(files, &path, bytes);
+    return bytes;
+}
+
+fn loadOptionalIpl(files: *const r4os.app_storage.Files) LoadError!?[core.smp.exact_ipl_size]u8 {
+    var path = r4os.AbsoluteFilePath.parse(core.persistence.spc700_ipl_path) catch return error.Metadata;
+    const info = switch (files.info(path.asZ())) {
+        .missing => return null,
+        .failure => return error.Metadata,
+        .value => |value| value,
+    };
+    if (info.is_dir != 0 or info.size != core.smp.exact_ipl_size) return error.WrongSize;
+    var result: [core.smp.exact_ipl_size]u8 = undefined;
+    try readExact(files, &path, result[0..]);
+    return result;
+}
+
+fn readExact(files: *const r4os.app_storage.Files, path: *r4os.AbsoluteFilePath, out: []u8) LoadError!void {
+    var offset: usize = 0;
+    while (offset < out.len) {
+        const transferred = switch (files.readAt(path.asZ(), @intCast(offset), out[offset..])) {
+            .bytes => |count| count,
+            .end, .failure => return error.Read,
+        };
+        if (transferred == 0 or transferred > out.len - offset) return error.Read;
+        offset += transferred;
+    }
+}
+
+fn secureFree(allocator: std.mem.Allocator, bytes: []u8) void {
+    @memset(bytes, 0);
+    allocator.free(bytes);
+}
+
+fn loadFailureMessage(fault: anyerror) []const u8 {
+    return switch (fault) {
+        error.Missing => "Die Cartridge-Datei wurde nicht gefunden.",
+        error.Directory => "Der Cartridge-Pfad bezeichnet ein Verzeichnis.",
+        error.InvalidGeometry => "Die Datei besitzt keine gueltige SNES-Cartridge-Geometrie.",
+        error.Metadata => "Die Dateiinformationen konnten nicht gelesen werden.",
+        error.Read => "Die Cartridge konnte nicht vollstaendig und unveraendert gelesen werden.",
+        error.OutOfMemory => "Fuer das unveraenderte ROM-Abbild ist nicht genug Speicher verfuegbar.",
+        else => "Die Cartridge konnte nicht geladen werden.",
+    };
+}
+
+fn loadFailureCode(fault: anyerror) i32 {
+    return switch (fault) {
+        error.Missing => error_missing,
+        error.Directory => error_directory,
+        error.InvalidGeometry, error.WrongSize => error_size,
+        error.OutOfMemory => error_allocator,
+        error.Metadata, error.Read => error_metadata,
+        else => error_metadata,
+    };
+}
+
+fn openFailureMessage(fault: anyerror) []const u8 {
+    return switch (fault) {
+        error.Busy => "Der Speicherstand dieser Cartridge ist bereits zum Schreiben geoeffnet.",
+        error.CorruptSave, error.WrongSize, error.RtcChipMismatch, error.BadMagic, error.UnsupportedVersion, error.BadChecksum, error.InvalidChip, error.InvalidRegisterCount, error.InvalidFlags, error.InvalidReserved, error.InvalidCatchup => "Die vorhandene SRAM-/RTC-Datei ist beschaedigt oder inkompatibel.",
+        error.Full => "Der Datentraeger fuer den Speicherstand ist voll.",
+        error.Io, error.Unsupported => "Der kanonische Cartridge-Speicherort ist nicht verfuegbar.",
+        error.OutOfMemory => "Fuer die private Super-Nintendo-Instanz ist nicht genug Speicher verfuegbar.",
+        else => cartridgeError(fault),
+    };
+}
+
+fn openFailureCode(fault: anyerror) i32 {
+    return switch (fault) {
+        error.Busy => error_save_busy,
+        error.CorruptSave, error.WrongSize, error.RtcChipMismatch, error.BadMagic, error.UnsupportedVersion, error.BadChecksum, error.InvalidChip, error.InvalidRegisterCount, error.InvalidFlags, error.InvalidReserved, error.InvalidCatchup, error.Full, error.Io, error.Unsupported => error_save_open,
+        error.OutOfMemory => error_allocator,
+        else => error_cartridge,
+    };
+}
+
+fn showStatus(
+    allocator: std.mem.Allocator,
+    sys: r4os.r4sys.Context,
+    desk: r4os.r4desk.Context,
+    draw: r4os.r4draw.Context,
+    title: [*:0]const u8,
+    lines: []const []const u8,
+    result_code: i32,
+) i32 {
+    _ = allocator;
+    _ = desk.guiSetTitle(title);
+    _ = desk.guiSetMinSize(440, 230);
+    if (!renderStatus(&draw, lines)) return result_code;
+    var activity_sequence: u64 = 0;
+    const close_poll_ticks = @max(@as(u64, 1), sys.ticksFromMilliseconds(100));
+    while (!sys.programShouldClose()) {
+        var event_count: u16 = 0;
+        while (event_count < runtime_api.default_max_input_events) : (event_count += 1) {
+            var event: r4os.abi.GuiEvent = .{};
+            if (desk.guiPollEvent(&event) <= 0) break;
+            if (event.kind == @intFromEnum(r4os.abi.GuiEventKind.close)) return result_code;
+            if (event.kind == @intFromEnum(r4os.abi.GuiEventKind.key_down) and event.key == 27) return result_code;
+            if (event.kind == @intFromEnum(r4os.abi.GuiEventKind.resize)) {
+                if (!renderStatus(&draw, lines)) return result_code;
+            }
+        }
+        if (event_count == runtime_api.default_max_input_events) continue;
+        if (desk.hasFn("desktop_activity_wait")) {
+            var sequence = activity_sequence;
+            const raw = desk.desktopActivityWait(activity_sequence, close_poll_ticks, &sequence);
+            activity_sequence = sequence;
+            if (raw < 0) return result_code;
+        } else {
+            sys.sleepTicks(1);
+        }
+    }
+    return result_code;
+}
+
+fn renderStatus(draw: *const r4os.r4draw.Context, lines: []const []const u8) bool {
+    const background: u32 = 0x0014_1820;
+    if (draw.guiClear(background) <= 0) return false;
+    if (!drawStatusLine(draw, 16, 16, "R4SNES", 0x00FF_FFFF, background)) return false;
+    var y: i32 = 48;
+    for (lines) |line| {
+        if (!drawStatusLine(draw, 16, y, line, 0x00E0_E0E0, background)) return false;
+        y += 18;
+    }
+    if (!drawStatusLine(draw, 16, y + 18, "Fenster schliessen oder Escape druecken.", 0x0090_A0B0, background)) return false;
+    return draw.guiPresent() >= 0;
+}
+
+fn drawStatusLine(
+    draw: *const r4os.r4draw.Context,
+    x: i32,
+    y: i32,
+    value: []const u8,
+    foreground: u32,
+    background: u32,
+) bool {
+    var storage: [320]u8 = .{0} ** 320;
+    const count = @min(value.len, storage.len - 1);
+    @memcpy(storage[0..count], value[0..count]);
+    return draw.guiDrawText(x, y, @ptrCast(&storage), foreground, background) >= 0;
 }
 
 fn printNecDspFirmwareError(sys: anytype, needed: core.cartridge.NecDspRequirement, fault: anyerror) void {
@@ -439,7 +673,7 @@ fn selfTest(app: *r4os.App) i32 {
     machine.close();
     machine.close();
     if (!machine.closed or machine.smp.dsp.capture_enabled or machine.smp.dsp.queuedFrames() != 0) return error_not_implemented;
-    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4/ST010/ST011/ST018-ARMv3, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
+    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4/ST010/ST011/ST018-ARMv3, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; productive R4SUBSYS1 host uses bounded master-clock slices, physical port-1 input, native XRGB32, App-Audio and idempotent persistence teardown.");
     return 0;
 }
 

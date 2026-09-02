@@ -4,7 +4,7 @@ R4SNES follows R4OS subsystem ownership boundaries. The R4X owns guest state;
 the SDK owns generic window/input/video transport; the Kernel owns physical
 device identity. SNES button policy exists only in `host_adapter.zig`.
 
-Every launch will receive a private `Machine`. Its owners are separated as
+Every launch receives a private `Machine`. Its owners are separated as
 follows:
 
 - `cartridge.zig` and `board.zig`: bounded source normalization, immutable
@@ -44,7 +44,12 @@ follows:
   bridge into `r4os.subsystem_host`.
 - `runtime_adapter.zig`: bounded composition of the machine stepper and S-DSP
   queue with `r4os.subsystem_runtime`; it owns no guest clock or backend.
-- `machine.zig`: instance-local composition and lifecycle boundary.
+- `timing.zig`: pause-correct host-time conversion into region-specific
+  master-clock debt and bounded grants.
+- `machine.zig`: instance-local CPU/DMA, PPU, S-SMP and enhancement scheduling
+  plus the productive execution and lifecycle boundary.
+- `product_host.zig`: private source, machine, persistence, runtime, video,
+  input/focus and reverse-teardown ownership for one application launch.
 
 No component stores a host pointer or global mutable guest state. Cartridge
 source bytes are never changed; parsing copies only the normalized program
@@ -85,10 +90,14 @@ pull no more than 2048 48 kHz S16LE frames into a caller-owned buffer.
 tracks transport ownership and disables capture on mute or backend failure
 without stalling or accelerating the guest. Reset and repeated close clear the
 same queue and resampler state. Generic pause, resync and backend policy remain
-owned by the shared SDK runtime. Version 0.16.0 still does not start a parsed
-cartridge in the R4OS application because the productive machine and window
-host are deliberately scheduled for a later milestone. It adds no host-owned
-scheduling or firmware lookup to these component owners.
+owned by the shared SDK runtime. Version 0.19.0 starts a validated cartridge
+through the productive R4SUBSYS1 application path. Host elapsed time becomes
+NTSC/PAL master-clock debt; each host cycle reports at most 32768 clocks. CPU
+and DMA operations finish atomically at that edge and their bounded remainder
+is credited against the next grant. PPU, S-SMP and the selected enhancement
+owner advance from the same machine clock rather than host time. Firmware
+lookup remains an application-boundary policy and generic scheduling remains
+in the SDK.
 
 Persistence is keyed only by the normalized 32-byte cartridge digest. A
 battery board acquires one generation-bound lease and loads exactly its

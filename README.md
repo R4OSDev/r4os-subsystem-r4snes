@@ -4,8 +4,9 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.16.0 joins the bounded cartridge frontend, complete W65C816, timed
-5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU. The PPU owns
+Version 0.19.0 joins the bounded cartridge frontend, complete W65C816, timed
+5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU in a productive
+`R4SUBSYS1` application host. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
 color math, fixed color, mosaic, VMAIN, hires, overscan and interlace. It
 publishes only complete changed native XRGB32 generations at 256 or 512 pixels
@@ -33,9 +34,20 @@ matched byte-for-byte against the revision-pinned independent SNES-SPC oracle,
 and an automatic WAV analyzer checks 48 kHz frequency, continuity and channel
 ratio. The reference harness also
 integrity-checks 23 bounded PPU diagnostics without promoting visual output to
-truth. Productive cartridge execution remains deliberately rejected until the
-runtime-machine and window-host stages are wired, so this version still makes no
-playability claim.
+truth.
+
+Every productive launch owns a private cartridge, `Machine`, persistence
+session, runtime adapter, video adapter and immutable source buffers. Host time
+is converted into NTSC or PAL master-clock debt, with one reported grant of at
+most 32768 clocks per host cycle; a complete CPU or DMA operation may cross the
+edge only by its bounded remainder, which is credited against the next grant.
+The host exposes pause, resume, reset, mute and unmute, accepts physical port-1
+keys only while focused, publishes native XRGB32 generations and sends only
+caller-owned 48-kHz PCM through App-Audio. Reset creates fresh machine, save,
+video and audio generations. Close and every open-error path unwind in reverse
+order and are repeat-idempotent. This establishes automatic product-host
+operation without making a commercial-ROM playability claim before the final
+manual acceptance.
 
 Battery-backed SRAM and SA-1 BW-RAM persist as one exact
 board-sized `HASH.SAV` below

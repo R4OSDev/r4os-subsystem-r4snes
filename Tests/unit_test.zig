@@ -16,6 +16,7 @@ test {
     _ = @import("nec_dsp_test.zig");
     _ = @import("st018_test.zig");
     _ = @import("video_host_test.zig");
+    _ = @import("product_host_test.zig");
     _ = @import("system_test.zig");
 }
 
