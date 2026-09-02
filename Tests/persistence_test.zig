@@ -151,11 +151,13 @@ fn makeCart(
         .srtc_device = if (enhancement == .srtc) .{} else null,
         .spc7110_device = if (enhancement == .spc7110_epson_rtc) .{ .has_rtc = true } else null,
         .superfx_device = if (enhancement == .super_fx) core.superfx.Device.init(.gsu2) else null,
+        .sa1_device = if (enhancement == .sa1) .{} else null,
     };
     if (result.obc1_device) |*device| try device.power(result.sram_storage);
     if (result.srtc_device) |*device| device.power();
     if (result.spc7110_device) |*device| device.power();
     if (result.superfx_device) |*device| try device.power(.gsu2, result.rom_storage.len, result.sram_storage.len);
+    if (result.sa1_device) |*device| try device.power(.ntsc, result.rom_storage.len, result.sram_storage.len);
     return result;
 }
 
@@ -204,6 +206,48 @@ test "battery-backed Super FX work RAM uses the canonical hash save and internal
     _ = volatile_cart.runSuperFxSlice(0);
     try std.testing.expect(!volatile_cart.sram_dirty);
     try volatile_session.close(&volatile_cart, 43, 100, 200);
+    try std.testing.expectEqual(@as(usize, 0), volatile_backend.acquire_calls);
+    try std.testing.expectEqual(@as(usize, 0), volatile_backend.write_calls);
+}
+
+test "battery-backed SA-1 BW-RAM persists atomically while I-RAM and battery-less BW-RAM stay volatile" {
+    const allocator = std.testing.allocator;
+    var fake = try FakeBackend.init(allocator);
+    defer fake.deinit();
+    var first = try makeCart(allocator, 128 * 1024, true, .sa1, 0xA1);
+    defer first.deinit();
+    var second = try makeCart(allocator, 128 * 1024, true, .sa1, 0xA1);
+    defer second.deinit();
+
+    var session = try core.persistence.Session.open(&first, fake.backend(), 51, 100, 200);
+    try std.testing.expect(first.writeEnhancement(0x002229, 0x01));
+    try std.testing.expect(first.writeEnhancement(0x003000, 0xA6));
+    try std.testing.expectEqual(@as(u8, 0xA6), first.sa1_device.?.iram[0]);
+    try std.testing.expect(!first.sram_dirty);
+    try std.testing.expect(first.writeEnhancement(0x002226, 0x80));
+    try std.testing.expect(first.writeEnhancement(0x006123, 0x5C));
+    try std.testing.expect(first.sram_dirty);
+    try std.testing.expectEqual(@as(u8, 0x5C), first.sram_storage[0x123]);
+    try std.testing.expect(try session.maybeFlush(&first, core.persistence.flush_delay_master_cycles, 100, 200));
+    try std.testing.expectEqual(@as(usize, 1), fake.write_calls);
+    try std.testing.expectEqual(@as(usize, 128 * 1024), fake.sram_len);
+    try session.close(&first, 51, 100, 200);
+
+    var reopened = try core.persistence.Session.open(&second, fake.backend(), 52, 100, 200);
+    try std.testing.expectEqual(@as(u8, 0x5C), second.sram_storage[0x123]);
+    try std.testing.expectEqual(@as(u8, 0), second.sa1_device.?.iram[0]);
+    try reopened.close(&second, 52, 100, 200);
+
+    var volatile_cart = try makeCart(allocator, 128 * 1024, false, .sa1, 0xA2);
+    defer volatile_cart.deinit();
+    var volatile_backend = try FakeBackend.init(allocator);
+    defer volatile_backend.deinit();
+    var volatile_session = try core.persistence.Session.open(&volatile_cart, volatile_backend.backend(), 53, 100, 200);
+    try std.testing.expect(volatile_cart.writeEnhancement(0x002226, 0x80));
+    try std.testing.expect(volatile_cart.writeEnhancement(0x006123, 0x7D));
+    try std.testing.expectEqual(@as(u8, 0x7D), volatile_cart.sram_storage[0x123]);
+    try std.testing.expect(!volatile_cart.sram_dirty);
+    try volatile_session.close(&volatile_cart, 53, 100, 200);
     try std.testing.expectEqual(@as(usize, 0), volatile_backend.acquire_calls);
     try std.testing.expectEqual(@as(usize, 0), volatile_backend.write_calls);
 }

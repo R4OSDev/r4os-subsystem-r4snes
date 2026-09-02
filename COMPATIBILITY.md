@@ -1,6 +1,6 @@
 ﻿# Compatibility
 
-The 0.11.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
+The 0.14.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
 normalizes an optional 512-byte copier header and requires one unambiguous
 LoROM, HiROM, ExLoROM or ExHiROM header. Region, board capability, declared
 sizes, reset vector, startup opcode and checksum/complement contribute to a
@@ -53,7 +53,7 @@ register scripts are automated gates. Twenty-three digest-pinned foreign ROMs
 remain diagnostics because no licensed, revision-bound hardware capture is
 available; their visual similarity is never treated as a pass condition.
 
-Battery SRAM and future SA-1 BW-RAM use only the canonical subtree
+Battery SRAM and SA-1 BW-RAM use only the canonical subtree
 `C:\R4OS\SUBSYSTEMS\r4os.snes\SAVE\` and one exact board-sized
 uppercase-`HASH.SAV`. S-RTC and SPC7110 Epson RTC state use an exact,
 versioned and checksummed `HASH.RTC` with chip identity, live/latched registers,
@@ -71,3 +71,15 @@ markers, stable latches, reset/halt, valid ranges, February in leap and century
 years, year wrap, arbitrary slice partitioning and offline restart. An RTC
 record with a valid outer checksum but invalid live calendar, weekday, latch,
 halt relation or reserved state is still rejected before it reaches the chip.
+
+SA-1 boards execute a private W65C816 against independent reset, interrupt and
+clock state. Qualification covers Super MMC mapping, CPU/SA-1 I-RAM and BW-RAM
+protection, bitmap access, contention, bounded normal and character-conversion
+DMA, arithmetic/accumulation, variable-bit reads, timers, vectors, WAI/STP and
+slice invariance. Six pinned open hardware ROMs run through the dual-CPU/PPU
+path: both self-checking tests return `$01`, the utilities bind deterministic
+tilemap/register/state fields, and electrically indeterminate fields are
+masked rather than invented. The backup utility proves a cold/warm two-start
+protocol in which exact battery BW-RAM persists but I-RAM and all other device
+state restart. Unknown revisions and contradictory SA-1 geometries fail with
+dedicated diagnostics.

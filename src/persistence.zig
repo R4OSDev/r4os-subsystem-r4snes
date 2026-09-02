@@ -138,7 +138,7 @@ pub const FlushError = BackendError || error{
 };
 
 /// Cartridge-owned persistence policy over the shared lease/atomic backend.
-/// Battery-less boards never touch the backend. SRAM and future SA-1 BW-RAM
+/// Battery-less boards never touch the backend. SRAM and SA-1 BW-RAM
 /// use one exact board-sized `.SAV` payload keyed by the normalized ROM hash.
 pub const Session = struct {
     backend: Backend,

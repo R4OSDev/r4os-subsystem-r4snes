@@ -24,6 +24,7 @@ const Expected = struct {
     sdsp_oracle_cases: usize,
     enhancement_oracles: usize,
     enhancement_oracle_cases: usize,
+    sa1_hardware_roms: usize,
     spc700_files: usize,
     spc700_records: usize,
 };
@@ -39,6 +40,7 @@ const Corpus = struct {
     test_roms: usize,
     spc700_single_step_files: usize,
     spc700_single_step_records: usize,
+    sa1_hardware_roms: usize,
     commercial_roms: usize,
     proprietary_firmware_images: usize,
 };
@@ -191,10 +193,11 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.14")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.15")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
+        matrix.corpus.sa1_hardware_roms != expected.sa1_hardware_roms or
         matrix.corpus.commercial_roms != 0 or matrix.corpus.proprietary_firmware_images != 0)
     {
         return error.QualificationMatrixMismatch;
@@ -208,6 +211,7 @@ fn run(init: std.process.Init) !void {
     try expectImplementedEnhancement(matrix.enhancement_chips, "sdd1", "0.73.13");
     try expectImplementedEnhancement(matrix.enhancement_chips, "spc7110-epson-rtc", "0.73.13");
     try expectImplementedEnhancement(matrix.enhancement_chips, "superfx-gsu1-gsu2", "0.73.14");
+    try expectImplementedEnhancement(matrix.enhancement_chips, "sa1", "0.73.15");
 
     const dma_cases_bytes = try cwd.readFileAlloc(io, "Tests/dma_reference_cases.json", allocator, .limited(max_manifest_bytes));
     defer allocator.free(dma_cases_bytes);

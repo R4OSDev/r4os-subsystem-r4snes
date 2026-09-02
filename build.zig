@@ -65,6 +65,24 @@ pub fn build(b: *std.Build) void {
     run_superfx_programs.addArg(superfx_output);
     run_superfx_programs.step.dependOn(&assemble_superfx.step);
 
+    const sa1_reference_root = b.createModule(.{
+        .root_source_file = b.path("Tests/sa1_reference_harness.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    sa1_reference_root.addImport("core", core);
+    const sa1_reference_harness = b.addExecutable(.{
+        .name = "r4snes-sa1-reference-harness",
+        .root_module = sa1_reference_root,
+    });
+    const run_sa1_references = b.addRunArtifact(sa1_reference_harness);
+    run_sa1_references.setCwd(b.path("."));
+    run_sa1_references.addArg(b.option([]const u8, "sa1-reference-root", "Pinned SA-1 reference ROM directory") orelse
+        "../../../ExFiles/Reference/SNES/Tests/Binaries/Generated/SA1-e824a9d");
+    run_sa1_references.addArg(b.option([]const u8, "sa1-output-root", "SA-1 tilemap and PPM evidence directory") orelse
+        "../../../Temp/R4SNES-SA1");
+    if (b.option([]const u8, "sa1-reference-case", "Run only one named SA-1 reference case")) |filter| run_sa1_references.addArg(filter);
+
     const coverage_root = b.createModule(.{
         .root_source_file = b.path("Tests/cpu_coverage.zig"),
         .target = b.graph.host,
@@ -88,6 +106,9 @@ pub fn build(b: *std.Build) void {
     const reference_step = b.step("reference-test", "Execute pinned SNES qualification ROMs, models and all SPC700 vectors");
     reference_step.dependOn(&run_references.step);
     reference_step.dependOn(&run_superfx_programs.step);
+    reference_step.dependOn(&run_sa1_references.step);
     const superfx_reference_step = b.step("superfx-reference-test", "Rebuild and execute pinned OpenSNES and owner GSU programs");
     superfx_reference_step.dependOn(&run_superfx_programs.step);
+    const sa1_reference_step = b.step("sa1-reference-test", "Execute six pinned SA-1 hardware tests and two-start BW-RAM persistence");
+    sa1_reference_step.dependOn(&run_sa1_references.step);
 }

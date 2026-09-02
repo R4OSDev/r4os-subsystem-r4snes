@@ -26,6 +26,12 @@ follows:
   mirrors without owning persistence policy.
 - `srtc.zig`: Sharp S-RTC protocol, live/latch calendar and bounded
   partition-invariant time advancement without host-clock access.
+- `sdd1.zig` and `spc7110.zig`: bounded streaming decompression and documented
+  cartridge/data-port mapping; `epson_rtc.zig` owns the optional RTC-4513.
+- `superfx.zig`: private GSU-1/GSU-2 execution, cache, bus arbitration and
+  complete PLOT/RPIX pipeline.
+- `sa1.zig`: private W65C816, Super MMC, I-/BW-RAM, DMA/conversion, arithmetic,
+  timers, vectors and dual-processor arbitration.
 - `persistence.zig`: normalized identity policy, exact SRAM/BW-RAM payloads,
   checksummed S-RTC/Epson records and forward-only offline-time policy.
 - `persistence_r4os.zig`: thin configuration of the SDK's compiled-in lease,
@@ -75,7 +81,7 @@ pull no more than 2048 48 kHz S16LE frames into a caller-owned buffer.
 tracks transport ownership and disables capture on mute or backend failure
 without stalling or accelerating the guest. Reset and repeated close clear the
 same queue and resampler state. Generic pause, resync and backend policy remain
-owned by the shared SDK runtime. Version 0.11.0 still does not start a parsed
+owned by the shared SDK runtime. Version 0.14.0 still does not start a parsed
 cartridge in the R4OS application because the productive machine and window
 host are deliberately scheduled for a later milestone.
 
@@ -106,3 +112,13 @@ all-zero representation. Persistence imports and validates both live and
 latched state, applies at most 512 days of forward catch-up to the device, and
 exports the resulting calendar before publication. Invalid calendar,
 weekday, latch, halt and reserved-byte states retain distinct error classes.
+
+SA-1 is a cartridge-owned second processor, not a scheduler or Kernel object.
+Its private W65C816 advances on an integer master-clock relation and exposes
+only bounded slice/until-clock entry points. Super MMC owns every ROM lookup;
+I-RAM, BW-RAM, bitmap views, write protections and contention stay inside the
+device. Normal DMA and both character conversion paths operate one bounded
+unit at a time. Reset, WAI/STP, bidirectional IRQ/NMI, vectors, arithmetic,
+variable-bit reads and timers remain instance-local. Only physical BW-RAM dirty
+ranges can reach cartridge persistence, and only on a battery board; I-RAM is
+always volatile.

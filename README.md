@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.13.0 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.14.0 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
 color math, fixed color, mosaic, VMAIN, hires, overscan and interlace. It
@@ -37,7 +37,7 @@ truth. Productive cartridge execution remains deliberately rejected until the
 runtime-machine and window-host stages are wired, so this version still makes no
 playability claim.
 
-Battery-backed SRAM and future SA-1 BW-RAM now persist as one exact
+Battery-backed SRAM and SA-1 BW-RAM persist as one exact
 board-sized `HASH.SAV` below
 `C:\R4OS\SUBSYSTEMS\r4os.snes\SAVE\`; the hash is calculated from the
 normalized ROM after copier-header removal. S-RTC and Epson state use one
@@ -87,6 +87,24 @@ binary digest, RAM completion cells and aggregate device state, and compares
 all 16384 pixels from the OpenSNES wireframe example with an independent
 Bresenham bitmap.
 
+SA-1 is an executable board capability with a private W65C816, independent
+clock and interrupt/reset state, Super MMC ROM mapping, 2-KiB I-RAM, mapped
+BW-RAM and bitmap views. Both processors use the documented write protections
+and observable bus contention. Normal DMA, both character-conversion modes,
+variable-bit reads, signed arithmetic and accumulation, timer IRQs and vector
+overrides are bounded and retain their state across arbitrary host slices.
+Battery-backed BW-RAM uses the same exact normalized-ROM `HASH.SAV`; I-RAM and
+battery-less BW-RAM remain volatile.
+
+The focused `sa1-reference-test` executes six revision-pinned open hardware
+ROMs through the production dual-CPU/PPU path. Two self-checking ROMs must end
+at WRAM `$000000 = $01`; four utilities use fixed tilemap, WRAM, SA-1-state or
+defined-register digests while electrically indeterminate open-bus fields are
+kept diagnostic. The backup utility runs twice with only BW-RAM carried over.
+Every phase also writes a raw tilemap and 256x224 PPM evidence image below
+`Temp/R4SNES-SA1`; the full corpus is bound to aggregate digest
+`62D2B8ACD2C164B6`.
+
 The only connected controller is port 1 and it uses physical keyboard usages:
 
 - D-pad: arrow keys
@@ -110,3 +128,5 @@ speed transfer, checks all 256000 SPC700 vectors including bus phases, and
 binds the nine exact S-DSP comparison cases.
 Use `./Build.sh superfx-reference-test` for the focused reproducible GSU source,
 binary, completion, state and pixel-frame gate.
+Use `./Build.sh sa1-reference-test` for the focused six-ROM SA-1 completion,
+defined-field, evidence-artifact and two-start BW-RAM gate.
