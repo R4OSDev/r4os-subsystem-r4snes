@@ -54,7 +54,7 @@ pub const capability_table = [_]Capability{
     .{ .enhancement = .cx4, .disposition = .base_implemented, .planned_version = "0.73.16" },
     .{ .enhancement = .dsp1_family, .disposition = .base_implemented, .planned_version = "0.73.17", .firmware_bytes = 0x2000 },
     .{ .enhancement = .st010_st011, .disposition = .base_implemented, .planned_version = "0.73.18", .firmware_bytes = 0xD000 },
-    .{ .enhancement = .st018, .disposition = .planned_user_firmware, .planned_version = "0.73.19", .firmware_bytes = 0x28000 },
+    .{ .enhancement = .st018, .disposition = .base_implemented, .planned_version = "0.73.19", .firmware_bytes = 0x28000 },
     .{ .enhancement = .msu1, .disposition = .excluded, .planned_version = null },
     .{ .enhancement = .adapter_system, .disposition = .excluded, .planned_version = null },
     .{ .enhancement = .unknown, .disposition = .unsupported, .planned_version = null },
@@ -155,7 +155,7 @@ pub const Board = struct {
         // Cartridge routes those windows through the device before reaching
         // this generic mapper.
         if (self.capability.enhancement == .super_fx or self.capability.enhancement == .sa1 or
-            self.capability.enhancement == .st010_st011) return null;
+            self.capability.enhancement == .st010_st011 or self.capability.enhancement == .st018) return null;
         if (self.capability.enhancement == .cx4) return decodeCx4SramIndex(address, self.sram_bytes);
         const bank: u8 = @truncate(address >> 16);
         const offset: u16 = @truncate(address);

@@ -1,6 +1,6 @@
 ﻿# Compatibility
 
-The 0.17.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
+The 0.18.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
 normalizes an optional 512-byte copier header and requires one unambiguous
 LoROM, HiROM, ExLoROM or ExHiROM header. Region, board capability, declared
 sizes, reset vector, startup opcode and checksum/complement contribute to a
@@ -45,9 +45,11 @@ profiles have separate rejection classes. The capability table exposes NEC
 DSP-1/1A/1B/2/3/4 as executable with an exact 8192-byte user-firmware
 requirement. ST010 and ST011 are executable on the same dynamically sized NEC
 core with exact 53248-byte `ST010.ROM` or `ST011.ROM` user firmware, 4096-byte
-battery data RAM and their Setz LoROM windows. ST018 remains named without a
-false executability claim. MSU-1 and adapter systems remain explicit
-exclusions.
+battery data RAM and their Setz LoROM windows. ST018 is executable through a private ARMv3/ARM60
+core with exact 128-KiB program ROM, 32-KiB data ROM, 16-KiB battery work RAM,
+host bridge, timer, reset delay, exceptions and bounded slices. It requires an
+exact digest-bound 163840-byte `ST018.ROM` supplied by the user. MSU-1 and
+adapter systems remain explicit exclusions.
 
 The S-PPU owner now covers modes 0-7, native hires and interlace geometries,
 Mode 7, windows, main/subscreen composition, color math, fixed color, mosaic,
@@ -110,3 +112,15 @@ restores it before execution. Open synthetic images cover host, math, reset,
 slicing, contention and instance isolation, while the optional private gate
 validates and boots both known firmware digests in place without publishing
 bytes or command tables.
+
+ST018 qualification covers all ARM modes and banked registers, the three-stage
+pipeline, all conditions, ALU/barrel shifts, short and long multiplication,
+single/block transfers, swap, branch/link, PSR transfers and every exception
+entry used by ARMv3. It also covers the complete ARM and S-CPU memory maps,
+mirrored host handshake, timer, fixed 65536-cycle ready delay, IRQ/FIQ, reset,
+arbitrary slice partitioning and instance isolation. One reproducibly generated
+open image binds exact bus/RAM state to digest `DE7069060A5E262D` and exact
+Ares/Mesen2 source pins. The optional private gate validates and boots the known
+firmware in place without publishing bytes. ST018 work RAM is the exact
+16384-byte normalized-ROM `HASH.SAV`; reset preserves it and restart restores it
+before ARM execution.

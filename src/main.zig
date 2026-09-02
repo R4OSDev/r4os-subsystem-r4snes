@@ -80,6 +80,10 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         sys.println(cartridgeError(fault));
         return error_cartridge;
     };
+    const st018_requirement = core.cartridge.inspectSt018Requirement(source) catch |fault| {
+        sys.println(cartridgeError(fault));
+        return error_cartridge;
+    };
     var separate_firmware: ?[]u8 = null;
     defer if (separate_firmware) |firmware| {
         @memset(firmware, 0);
@@ -138,9 +142,60 @@ pub fn r4_app_main(app: *r4os.App) i32 {
             };
         }
     }
+    var st018_firmware: ?[]u8 = null;
+    defer if (st018_firmware) |firmware| {
+        @memset(firmware, 0);
+        allocator.free(firmware);
+    };
+    if (st018_requirement) |needed| {
+        var st018_path = r4os.AbsoluteFilePath.parse(needed.firmwarePath()) catch {
+            printSt018FirmwareError(sys, needed, error.InvalidSt018FirmwarePath);
+            return error_firmware;
+        };
+        const firmware_info = switch (files.info(st018_path.asZ())) {
+            .missing => {
+                printSt018FirmwareError(sys, needed, error.MissingSt018Firmware);
+                return error_firmware;
+            },
+            .failure => {
+                printSt018FirmwareError(sys, needed, error.St018FirmwareMetadataFailure);
+                return error_firmware;
+            },
+            .value => |value| value,
+        };
+        if (firmware_info.is_dir != 0 or firmware_info.size != needed.firmwareBytes()) {
+            printSt018FirmwareError(sys, needed, error.InvalidSt018FirmwareSize);
+            return error_firmware;
+        }
+        const firmware = allocator.alloc(u8, needed.firmwareBytes()) catch {
+            sys.println("R4SNES: ST018 firmware buffer could not be allocated.");
+            return error_allocator;
+        };
+        st018_firmware = firmware;
+        var firmware_offset: usize = 0;
+        while (firmware_offset < firmware.len) {
+            const count = switch (files.readAt(st018_path.asZ(), @intCast(firmware_offset), firmware[firmware_offset..])) {
+                .bytes => |value| value,
+                .end, .failure => {
+                    printSt018FirmwareError(sys, needed, error.St018FirmwareReadFailure);
+                    return error_firmware;
+                },
+            };
+            if (count == 0) {
+                printSt018FirmwareError(sys, needed, error.St018FirmwareReadFailure);
+                return error_firmware;
+            }
+            firmware_offset += count;
+        }
+        _ = core.st018.validateFirmware(firmware, .known_only, .separate) catch |fault| {
+            printSt018FirmwareError(sys, needed, fault);
+            return error_firmware;
+        };
+    }
     var cartridge = core.cartridge.Cartridge.parseWithOptions(allocator, source, .{
         .nec_dsp_revision = if (requirement) |needed| needed.revision else null,
         .nec_dsp_firmware = separate_firmware,
+        .st018_firmware = st018_firmware,
     }) catch |fault| {
         sys.println(cartridgeError(fault));
         return error_cartridge;
@@ -199,7 +254,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     // 5A22, DMA/HDMA, PPU, S-SMP and S-DSP are qualified independently;
     // productive execution is rejected until the runtime-machine/window-host
     // stage composes those owners.
-    sys.println("R4SNES: cartridge, OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4/ST010/ST011, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.17.0.");
+    sys.println("R4SNES: cartridge, OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4/ST010/ST011/ST018-ARMv3, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.18.0.");
     return error_not_implemented;
 }
 
@@ -225,6 +280,25 @@ fn printNecDspFirmwareError(sys: anytype, needed: core.cartridge.NecDspRequireme
     sys.println(".");
 }
 
+fn printSt018FirmwareError(sys: anytype, needed: core.cartridge.St018Requirement, fault: anyerror) void {
+    sys.write("R4SNES: ");
+    sys.write(needed.chipName());
+    sys.write(" firmware ");
+    sys.write(needed.fileName());
+    switch (fault) {
+        error.MissingSt018Firmware => sys.write(" is missing"),
+        error.InvalidSt018FirmwareSize => sys.write(" has the wrong size"),
+        error.InvalidSt018FirmwareDigest => sys.write(" does not match the required chip revision"),
+        error.InvalidSt018FirmwarePath => sys.write(" has an invalid configured path"),
+        error.St018FirmwareMetadataFailure => sys.write(" metadata could not be read"),
+        error.St018FirmwareReadFailure => sys.write(" could not be read completely"),
+        else => sys.write(" failed validation"),
+    }
+    sys.write("; expected exactly 163840 bytes at ");
+    sys.write(needed.firmwarePath());
+    sys.println(".");
+}
+
 fn cartridgeError(fault: anyerror) []const u8 {
     return switch (fault) {
         error.AmbiguousHeader => "R4SNES: cartridge contains ambiguous SNES headers.",
@@ -244,6 +318,10 @@ fn cartridgeError(fault: anyerror) []const u8 {
         error.NecDspFirmwareRevisionMismatch => "R4SNES: appended NEC-DSP firmware contradicts the detected board revision.",
         error.AmbiguousNecDspFirmwareSource => "R4SNES: NEC-DSP firmware was supplied both appended and separately.",
         error.UnexpectedNecDspFirmware, error.UnexpectedAppendedFirmware => "R4SNES: firmware was supplied for a cartridge without a matching NEC-DSP board.",
+        error.MissingSt018Firmware => "R4SNES: required ST018 firmware is missing.",
+        error.InvalidSt018FirmwareSize => "R4SNES: ST018 firmware has the wrong size.",
+        error.InvalidSt018FirmwareDigest => "R4SNES: ST018 firmware digest does not match the required revision.",
+        error.UnexpectedSt018Firmware => "R4SNES: ST018 firmware was supplied for a cartridge without an ST018 board.",
         error.ContradictoryOBC1Board => "R4SNES: OBC-1 header contradicts its LoROM, battery or 8-KiB RAM profile.",
         error.ContradictorySrtcBoard => "R4SNES: S-RTC header contradicts its ExHiROM, battery or save-RAM profile.",
         error.ContradictorySdd1Board => "R4SNES: S-DD1 header contradicts its LoROM, battery or 32-KiB RAM profile.",
@@ -252,6 +330,7 @@ fn cartridgeError(fault: anyerror) []const u8 {
         error.ContradictorySa1Board => "R4SNES: SA-1 header contradicts its LoROM, ROM or BW-RAM profile.",
         error.ContradictoryCx4Board => "R4SNES: CX4 header contradicts its LoROM, ROM or no-save-RAM profile.",
         error.ContradictoryNecDspBoard => "R4SNES: NEC-DSP revision contradicts the cartridge mapping or header identity.",
+        error.ContradictorySt018Board => "R4SNES: ST018 header contradicts its LoROM, subtype, battery or 16-KiB work-RAM profile.",
         error.UnaddressableBoardGeometry => "R4SNES: cartridge board geometry exceeds its implemented address space.",
         error.OutOfMemory => "R4SNES: cartridge memory could not be allocated.",
         else => "R4SNES: cartridge validation failed.",
@@ -339,10 +418,28 @@ fn selfTest(app: *r4os.App) i32 {
     nec.step();
     if (nec.dr != 0x1234 or !nec.requestForMaster() or nec.cycles != 1)
         return error_not_implemented;
+    const arm_firmware = allocator.alloc(u8, core.st018.firmware_bytes) catch return error_allocator;
+    defer {
+        @memset(arm_firmware, 0);
+        allocator.free(arm_firmware);
+    }
+    @memset(arm_firmware, 0);
+    arm_firmware[0] = 0x2a;
+    arm_firmware[1] = 0x00;
+    arm_firmware[2] = 0xa0;
+    arm_firmware[3] = 0xe3; // MOV r0,#42
+    var arm = core.st018.Device.init(allocator, arm_firmware, .allow_open_test, .open_test) catch
+        return error_not_implemented;
+    defer arm.close();
+    arm.reset_delay = 0;
+    arm.ready = true;
+    const arm_result = arm.runSlice(1);
+    if (arm_result.instructions != 1 or arm.cpu.r[0] != 42 or arm.cpu.cpsr.mode != .supervisor)
+        return error_not_implemented;
     machine.close();
     machine.close();
     if (!machine.closed or machine.smp.dsp.capture_enabled or machine.smp.dsp.queuedFrames() != 0) return error_not_implemented;
-    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4/ST010/ST011, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
+    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC/Super FX GSU-1/GSU-2/SA-1/CX4/NEC-DSP-1/1A/1B/2/3/4/ST010/ST011/ST018-ARMv3, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
     return 0;
 }
 

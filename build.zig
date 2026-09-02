@@ -129,6 +129,30 @@ pub fn build(b: *std.Build) void {
         run_nec_dsp_firmware.addArg(root);
     run_nec_dsp_firmware.step.dependOn(&assemble_nec_dsp.step);
 
+    const st018_output = b.option([]const u8, "st018-firmware-output", "Generated open ST018 firmware directory") orelse "../../../Temp/R4SNES-ST018";
+    const assemble_st018 = b.addSystemCommand(&.{ "pwsh", "-NoLogo", "-NoProfile", "-File" });
+    assemble_st018.addFileArg(b.path("Tests/Build-St018Firmware.ps1"));
+    assemble_st018.addArg("-ReferenceRoot");
+    assemble_st018.addArg(snes_reference_root);
+    assemble_st018.addArg("-OutputDirectory");
+    assemble_st018.addArg(st018_output);
+    const st018_firmware_root = b.createModule(.{
+        .root_source_file = b.path("Tests/st018_firmware_harness.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    st018_firmware_root.addImport("core", core);
+    const st018_firmware_harness = b.addExecutable(.{
+        .name = "r4snes-st018-firmware-harness",
+        .root_module = st018_firmware_root,
+    });
+    const run_st018_firmware = b.addRunArtifact(st018_firmware_harness);
+    run_st018_firmware.setCwd(b.path("."));
+    run_st018_firmware.addArg(st018_output);
+    if (b.option([]const u8, "st018-private-root", "Optional private user-provided ST018 firmware directory")) |root|
+        run_st018_firmware.addArg(root);
+    run_st018_firmware.step.dependOn(&assemble_st018.step);
+
     const coverage_root = b.createModule(.{
         .root_source_file = b.path("Tests/cpu_coverage.zig"),
         .target = b.graph.host,
@@ -155,6 +179,7 @@ pub fn build(b: *std.Build) void {
     reference_step.dependOn(&run_sa1_references.step);
     reference_step.dependOn(&run_cx4_programs.step);
     reference_step.dependOn(&run_nec_dsp_firmware.step);
+    reference_step.dependOn(&run_st018_firmware.step);
     const superfx_reference_step = b.step("superfx-reference-test", "Rebuild and execute pinned OpenSNES and owner GSU programs");
     superfx_reference_step.dependOn(&run_superfx_programs.step);
     const sa1_reference_step = b.step("sa1-reference-test", "Execute six pinned SA-1 hardware tests and two-start BW-RAM persistence");
@@ -163,4 +188,6 @@ pub fn build(b: *std.Build) void {
     cx4_reference_step.dependOn(&run_cx4_programs.step);
     const nec_dsp_reference_step = b.step("nec-dsp-reference-test", "Rebuild and execute open uPD7725 firmware; optionally validate private user firmware");
     nec_dsp_reference_step.dependOn(&run_nec_dsp_firmware.step);
+    const st018_reference_step = b.step("st018-reference-test", "Rebuild and execute open ARMv3/ST018 firmware; optionally validate private user firmware");
+    st018_reference_step.dependOn(&run_st018_firmware.step);
 }

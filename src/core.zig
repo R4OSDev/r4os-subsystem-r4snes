@@ -1,4 +1,5 @@
 pub const board = @import("board.zig");
+pub const armv3 = @import("armv3.zig");
 pub const bus = @import("bus.zig");
 pub const cartridge = @import("cartridge.zig");
 pub const controller = @import("controller.zig");
@@ -22,6 +23,7 @@ pub const sdd1 = @import("sdd1.zig");
 pub const smp = @import("smp.zig");
 pub const spc7110 = @import("spc7110.zig");
 pub const srtc = @import("srtc.zig");
+pub const st018 = @import("st018.zig");
 pub const superfx = @import("superfx.zig");
 pub const sa1 = @import("sa1.zig");
 pub const timing = @import("timing.zig");

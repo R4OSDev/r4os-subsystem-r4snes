@@ -180,6 +180,7 @@ pub const Session = struct {
         }
         if (cart.obc1_device) |*device| device.power(cart.sram_storage) catch return error.CorruptSave;
         cart.restoreNecDspPersistentRam() catch return error.CorruptSave;
+        cart.restoreSt018PersistentRam() catch return error.CorruptSave;
 
         if (rtcChipForCartridge(cart)) |chip| {
             var encoded: [rtc_record_bytes]u8 = undefined;

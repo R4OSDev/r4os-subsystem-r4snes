@@ -8,6 +8,7 @@ const superfx = @import("superfx.zig");
 const sa1 = @import("sa1.zig");
 const cx4 = @import("cx4.zig");
 const nec_dsp = @import("nec_dsp.zig");
+const st018 = @import("st018.zig");
 
 pub const copier_header_size: usize = 512;
 pub const mapping_granularity: usize = 32 * 1024;
@@ -59,6 +60,8 @@ pub const ParseOptions = struct {
     nec_dsp_revision: ?nec_dsp.Revision = null,
     nec_dsp_firmware: ?[]const u8 = null,
     nec_dsp_firmware_validation: nec_dsp.FirmwareValidation = .known_only,
+    st018_firmware: ?[]const u8 = null,
+    st018_firmware_validation: st018.FirmwareValidation = .known_only,
 };
 
 pub const NecDspRequirement = struct {
@@ -82,6 +85,24 @@ pub const NecDspRequirement = struct {
     }
 };
 
+pub const St018Requirement = struct {
+    pub fn chipName(_: St018Requirement) []const u8 {
+        return "ST018";
+    }
+
+    pub fn fileName(_: St018Requirement) []const u8 {
+        return st018.firmware_file;
+    }
+
+    pub fn firmwarePath(_: St018Requirement) []const u8 {
+        return st018.firmware_path;
+    }
+
+    pub fn firmwareBytes(_: St018Requirement) usize {
+        return st018.firmware_bytes;
+    }
+};
+
 pub const Cartridge = struct {
     allocator: std.mem.Allocator,
     rom_storage: []u8,
@@ -101,6 +122,7 @@ pub const Cartridge = struct {
     sa1_device: ?sa1.Device = null,
     cx4_device: ?cx4.Device = null,
     nec_dsp_device: ?nec_dsp.Device = null,
+    st018_device: ?st018.Device = null,
     had_appended_firmware: bool = false,
 
     pub fn parse(allocator: std.mem.Allocator, source: []const u8) !Cartridge {
@@ -120,6 +142,8 @@ pub const Cartridge = struct {
             return error.UnexpectedAppendedFirmware;
         if (parts.appended_firmware != null and options.nec_dsp_firmware != null)
             return error.AmbiguousNecDspFirmwareSource;
+        if (options.st018_firmware != null and enhancement != .st018)
+            return error.UnexpectedSt018Firmware;
         if (enhancement == .unknown) {
             if (board.unsupportedRevisionFamily(header.rom_type, header.map_mode)) |family| {
                 return switch (family) {
@@ -151,6 +175,8 @@ pub const Cartridge = struct {
             break :blk superfx.default_ram_bytes;
         } else if (enhancement == .st010_st011)
             nec_dsp.st_data_ram_bytes
+        else if (enhancement == .st018)
+            st018.work_ram_bytes
         else
             header.declared_sram_bytes;
         const nec_revision = if (has_nec_dsp)
@@ -196,6 +222,8 @@ pub const Cartridge = struct {
                 _ = nec_dsp.selectHostMap(nec_revision.?, header.mapping, normalized.len, cartridge_ram_bytes) catch
                     return error.ContradictoryNecDspBoard;
             },
+            .st018 => validateSt018Header(header, battery, cartridge_ram_bytes) catch
+                return error.ContradictorySt018Board,
             else => {},
         }
 
@@ -208,6 +236,8 @@ pub const Cartridge = struct {
 
         var nec_device: ?nec_dsp.Device = null;
         errdefer if (nec_device) |*device| device.close();
+        var st018_device: ?st018.Device = null;
+        errdefer if (st018_device) |*device| device.close();
         if (nec_revision) |revision| {
             const firmware = parts.appended_firmware orelse options.nec_dsp_firmware orelse
                 return error.MissingNecDspFirmware;
@@ -229,6 +259,19 @@ pub const Cartridge = struct {
             );
         } else if (options.nec_dsp_firmware != null) {
             return error.UnexpectedNecDspFirmware;
+        }
+        if (enhancement == .st018) {
+            const firmware = options.st018_firmware orelse return error.MissingSt018Firmware;
+            const firmware_source: st018.FirmwareSource = if (options.st018_firmware_validation == .allow_open_test)
+                .open_test
+            else
+                .separate;
+            st018_device = try st018.Device.init(
+                allocator,
+                firmware,
+                options.st018_firmware_validation,
+                firmware_source,
+            );
         }
 
         var identity: [32]u8 = undefined;
@@ -260,6 +303,7 @@ pub const Cartridge = struct {
             .sa1_device = if (enhancement == .sa1) .{} else null,
             .cx4_device = if (enhancement == .cx4) .{} else null,
             .nec_dsp_device = nec_device,
+            .st018_device = st018_device,
         };
         if (result.obc1_device) |*device| try device.power(result.sram_storage);
         if (result.srtc_device) |*device| device.power();
@@ -277,6 +321,7 @@ pub const Cartridge = struct {
 
     pub fn deinit(self: *Cartridge) void {
         if (self.nec_dsp_device) |*device| device.close();
+        if (self.st018_device) |*device| device.close();
         self.allocator.free(self.sram_storage);
         self.allocator.free(self.rom_storage);
         self.sram_storage = &.{};
@@ -292,6 +337,7 @@ pub const Cartridge = struct {
         self.sa1_device = null;
         self.cx4_device = null;
         self.nec_dsp_device = null;
+        self.st018_device = null;
         self.had_appended_firmware = false;
     }
 
@@ -328,6 +374,7 @@ pub const Cartridge = struct {
         if (self.sa1_device) |*device| return device.readCpu(self.rom_storage, self.sram_storage, address, open_bus);
         if (self.cx4_device) |*device| return device.readCpu(self.rom_storage, self.sram_storage, address, open_bus);
         if (self.nec_dsp_device) |*device| return device.readCpu(address, open_bus);
+        if (self.st018_device) |*device| return device.readCpu(address, open_bus);
         return null;
     }
 
@@ -382,6 +429,7 @@ pub const Cartridge = struct {
             if (handled) self.collectNecDspDirty(device);
             return handled;
         }
+        if (self.st018_device) |*device| return device.writeCpu(address, value);
         return false;
     }
 
@@ -438,13 +486,32 @@ pub const Cartridge = struct {
         return null;
     }
 
+    pub fn runSt018Slice(self: *Cartridge, maximum_steps: usize) ?st018.RunResult {
+        if (self.st018_device) |*device| {
+            const result = device.runSlice(maximum_steps);
+            self.collectSt018Dirty(device);
+            return result;
+        }
+        return null;
+    }
+
     pub fn restoreNecDspPersistentRam(self: *Cartridge) !void {
         if (self.nec_dsp_device) |*device| {
             if (device.revision.isSt01x()) try device.restorePersistentRam(self.sram_storage);
         }
     }
 
+    pub fn restoreSt018PersistentRam(self: *Cartridge) !void {
+        if (self.st018_device) |*device| try device.restorePersistentRam(self.sram_storage);
+    }
+
     fn collectNecDspDirty(self: *Cartridge, device: *nec_dsp.Device) void {
+        const dirty = device.takeDirtyRange() orelse return;
+        device.copyPersistentRamRange(self.sram_storage, dirty.first, dirty.end) catch return;
+        if (self.board.battery) self.markSramDirty(dirty.first, dirty.end);
+    }
+
+    fn collectSt018Dirty(self: *Cartridge, device: *st018.Device) void {
         const dirty = device.takeDirtyRange() orelse return;
         device.copyPersistentRamRange(self.sram_storage, dirty.first, dirty.end) catch return;
         if (self.board.battery) self.markSramDirty(dirty.first, dirty.end);
@@ -533,6 +600,16 @@ pub fn inspectNecDspRequirement(source: []const u8, revision_override: ?nec_dsp.
     return .{ .revision = revision, .appended = parts.appended_firmware != null };
 }
 
+pub fn inspectSt018Requirement(source: []const u8) !?St018Requirement {
+    const parts = try splitSource(source);
+    const normalized_start: usize = if (parts.geometry.copier_header) copier_header_size else 0;
+    const normalized = parts.cartridge[normalized_start..];
+    const header = try selectHeader(normalized);
+    if (board.enhancementForHeader(header.rom_type, header.map_mode) != .st018) return null;
+    try validateSt018Header(header, hasBattery(header.rom_type), st018.work_ram_bytes);
+    return .{};
+}
+
 fn splitSource(source: []const u8) !SourceParts {
     const container = try inspectContainerSize(source.len);
     if (!container.appended_firmware) {
@@ -600,6 +677,13 @@ fn validateNecDspHeader(revision: nec_dsp.Revision, header: Header) !void {
             mode != 0x30 or header.cartridge_subtype != 0x01)
             return error.ContradictoryNecDspBoard,
     }
+}
+
+fn validateSt018Header(header: Header, battery: bool, persistent_bytes: usize) !void {
+    if (header.mapping != .lo_rom or header.rom_type != 0xf5 or
+        (header.map_mode & 0x3f) != 0x30 or header.cartridge_subtype != 0x02 or
+        !battery or persistent_bytes != st018.work_ram_bytes)
+        return error.ContradictorySt018Board;
 }
 
 fn revisionFromKnownFirmware(bytes: []const u8) ?nec_dsp.Revision {

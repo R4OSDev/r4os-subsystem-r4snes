@@ -33,6 +33,9 @@ const Expected = struct {
     nec_dsp_matrix_words: usize,
     nec_dsp_independent_implementations: usize,
     nec_dsp_aggregate_fnv1a64: []const u8,
+    st018_open_firmware_variants: usize,
+    st018_independent_implementations: usize,
+    st018_open_state_fnv1a64: []const u8,
     spc700_files: usize,
     spc700_records: usize,
 };
@@ -56,6 +59,9 @@ const Corpus = struct {
     nec_dsp_independent_implementations: usize,
     st01x_open_synthetic_profiles: usize,
     st01x_private_firmware_boots: usize,
+    st018_open_firmware_variants: usize,
+    st018_independent_implementations: usize,
+    st018_private_firmware_boots: usize,
     commercial_roms: usize,
     proprietary_firmware_images: usize,
 };
@@ -119,6 +125,23 @@ const St01xReferenceCases = struct {
     firmware_bytes_each: usize,
 };
 
+const St018ReferenceCases = struct {
+    release: []const u8,
+    core: []const u8,
+    frequency_hz: u32,
+    program_rom_bytes: usize,
+    data_rom_bytes: usize,
+    work_ram_bytes: usize,
+    decoder_keys: usize,
+    instruction_classes: usize,
+    reset_delay_cycles: usize,
+    firmware_path: []const u8,
+    firmware_bytes: usize,
+    open_firmware_sha256: []const u8,
+    open_state_fnv1a64: []const u8,
+    independent_sources: []const std.json.Value,
+};
+
 const Matrix = struct {
     schema: u32,
     release: []const u8,
@@ -126,6 +149,7 @@ const Matrix = struct {
     cx4_reference_cases: Cx4ReferenceCases,
     nec_dsp_reference_cases: NecDspReferenceCases,
     st01x_reference_cases: St01xReferenceCases,
+    st018_reference_cases: St018ReferenceCases,
     suites: []const MatrixSuite,
     enhancement_chips: []const MatrixEnhancement,
 };
@@ -259,7 +283,7 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.18")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.19")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
@@ -270,6 +294,9 @@ fn run(init: std.process.Init) !void {
         matrix.corpus.nec_dsp_matrix_words != expected.nec_dsp_matrix_words or
         matrix.corpus.nec_dsp_independent_implementations != expected.nec_dsp_independent_implementations or
         matrix.corpus.st01x_open_synthetic_profiles != 2 or matrix.corpus.st01x_private_firmware_boots != 2 or
+        matrix.corpus.st018_open_firmware_variants != expected.st018_open_firmware_variants or
+        matrix.corpus.st018_independent_implementations != expected.st018_independent_implementations or
+        matrix.corpus.st018_private_firmware_boots != 1 or
         matrix.corpus.commercial_roms != 0 or matrix.corpus.proprietary_firmware_images != 0)
     {
         return error.QualificationMatrixMismatch;
@@ -296,6 +323,12 @@ fn run(init: std.process.Init) !void {
         "st010-st011",
         "0.73.18",
         "exact 53248-byte ST010.ROM or ST011.ROM required and never distributed",
+    );
+    try expectImplementedFirmwareEnhancement(
+        matrix.enhancement_chips,
+        "st018",
+        "0.73.19",
+        "exact 163840-byte ST018.ROM required and never distributed",
     );
     const cx4_cases = matrix.cx4_reference_cases;
     if (!std.mem.eql(u8, cx4_cases.release, "0.73.16") or
@@ -337,6 +370,21 @@ fn run(init: std.process.Init) !void {
         st01x_cases.firmware_paths.len != 2 or st01x_cases.firmware_bytes_each != 53_248)
     {
         return error.St01xQualificationMismatch;
+    }
+    const st018_cases = matrix.st018_reference_cases;
+    if (!std.mem.eql(u8, st018_cases.release, "0.73.19") or
+        !std.mem.eql(u8, st018_cases.core, "ARMv3 ARM60") or
+        st018_cases.frequency_hz != 21_440_000 or
+        st018_cases.program_rom_bytes != 131_072 or st018_cases.data_rom_bytes != 32_768 or
+        st018_cases.work_ram_bytes != 16_384 or st018_cases.decoder_keys != 4_096 or
+        st018_cases.instruction_classes != 10 or st018_cases.reset_delay_cycles != 65_536 or
+        !std.mem.eql(u8, st018_cases.firmware_path, "ST018.ROM") or
+        st018_cases.firmware_bytes != 163_840 or
+        !std.mem.eql(u8, st018_cases.open_firmware_sha256, "2621d3e067cd23a94c74712eb1aa1d8e5035fca6ecae8ec5f765611966317ad1") or
+        !std.mem.eql(u8, st018_cases.open_state_fnv1a64, expected.st018_open_state_fnv1a64) or
+        st018_cases.independent_sources.len != expected.st018_independent_implementations)
+    {
+        return error.St018QualificationMismatch;
     }
 
     const dma_cases_bytes = try cwd.readFileAlloc(io, "Tests/dma_reference_cases.json", allocator, .limited(max_manifest_bytes));

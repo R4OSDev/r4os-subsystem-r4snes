@@ -183,6 +183,56 @@ fn makeStCart(allocator: std.mem.Allocator, identity_byte: u8) !core.cartridge.C
     return result;
 }
 
+fn makeSt018Cart(allocator: std.mem.Allocator, identity_byte: u8) !core.cartridge.Cartridge {
+    var result = try makeCart(allocator, core.st018.work_ram_bytes, true, .st018, identity_byte);
+    errdefer result.deinit();
+    const firmware = try allocator.alloc(u8, core.st018.firmware_bytes);
+    defer {
+        @memset(firmware, 0);
+        allocator.free(firmware);
+    }
+    @memset(firmware, 0);
+    // B . provides a bounded, deterministic open fixture while persistence is
+    // exercised through the production ST018 work-RAM owner.
+    firmware[0] = 0xfe;
+    firmware[1] = 0xff;
+    firmware[2] = 0xff;
+    firmware[3] = 0xea;
+    result.st018_device = try core.st018.Device.init(
+        allocator,
+        firmware,
+        .allow_open_test,
+        .open_test,
+    );
+    return result;
+}
+
+test "ST018 16-KiB work RAM uses one exact canonical save and restores before ARM execution" {
+    const allocator = std.testing.allocator;
+    var fake = try FakeBackend.init(allocator);
+    defer fake.deinit();
+    var first = try makeSt018Cart(allocator, 0x18);
+    defer first.deinit();
+    var second = try makeSt018Cart(allocator, 0x18);
+    defer second.deinit();
+
+    var session = try core.persistence.Session.open(&first, fake.backend(), 71, 100, 200);
+    _ = first.st018_device.?.writeByte(0xe000_0123, 0x5a);
+    _ = first.st018_device.?.writeByte(0xe000_3fff, 0xc3);
+    _ = first.runSt018Slice(0).?;
+    try std.testing.expect(first.sram_dirty);
+    try std.testing.expectEqual(@as(u8, 0x5a), first.sram_storage[0x123]);
+    try std.testing.expectEqual(@as(u8, 0xc3), first.sram_storage[0x3fff]);
+    try session.close(&first, 71, 101, 300);
+    try std.testing.expectEqual(@as(usize, core.st018.work_ram_bytes), fake.sram_len);
+
+    var reopened = try core.persistence.Session.open(&second, fake.backend(), 72, 101, 400);
+    try std.testing.expectEqual(@as(u8, 0x5a), second.st018_device.?.work_ram[0x123]);
+    try std.testing.expectEqual(@as(u8, 0xc3), second.st018_device.?.work_ram[0x3fff]);
+    try std.testing.expectEqualSlices(u8, second.sram_storage, second.st018_device.?.work_ram);
+    try reopened.close(&second, 72, 101, 400);
+}
+
 test "ST010 data RAM uses one exact canonical save and restores into the uPD96050 owner" {
     const allocator = std.testing.allocator;
     var fake = try FakeBackend.init(allocator);
