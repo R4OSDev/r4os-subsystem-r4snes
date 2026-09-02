@@ -107,6 +107,8 @@ pub const Smp = struct {
     semantic_destination: u16 = 0,
     semantic_received: u32 = 0,
     semantic_counter: u8 = 0,
+    semantic_port0_pending: bool = false,
+    semantic_pending_port0: u8 = 0,
     oscillator_phase: u64 = 0,
     oscillator_ticks: u64 = 0,
 
@@ -142,6 +144,8 @@ pub const Smp = struct {
         else
             0;
         self.semantic_ipl_state = .dormant;
+        self.semantic_port0_pending = false;
+        self.semantic_pending_port0 = 0;
     }
 
     pub fn installExactIpl(self: *Smp, bytes: []const u8) !void {
@@ -166,6 +170,8 @@ pub const Smp = struct {
         self.semantic_destination = 0;
         self.semantic_received = 0;
         self.semantic_counter = 0;
+        self.semantic_port0_pending = false;
+        self.semantic_pending_port0 = 0;
         self.stopped = false;
         self.waiting = false;
         self.fault = null;
@@ -181,13 +187,30 @@ pub const Smp = struct {
         self.io.cpu_to_smp[port] = value;
         self.io.cpu_port_epoch[port] = self.io.port_epoch;
         self.io.cpu_port_tick[port] = self.oscillator_ticks;
-        if (self.ipl_mode == .semantic and port == 0) self.semanticIplPort0(value);
+        // The S-CPU may use a 16-bit store at $2140: port 0 is written before
+        // port 1 inside the same instruction. Defer the semantic IPL edge to
+        // the instruction boundary so it observes the new data byte instead
+        // of acknowledging and copying the stale port-1 latch.
+        if (self.ipl_mode == .semantic and port == 0 and
+            (self.semantic_ipl_state == .waiting_command or self.semantic_ipl_state == .receiving))
+        {
+            self.semantic_port0_pending = true;
+            self.semantic_pending_port0 = value;
+        }
     }
 
     pub fn cpuReadPort(self: *Smp, port: u2) u8 {
+        self.serviceSemanticIpl();
         const value = self.io.smp_to_cpu[port];
         if (port == 0 and self.semantic_ipl_state == .launch_ack) self.semantic_ipl_state = .running;
         return value;
+    }
+
+    pub fn serviceSemanticIpl(self: *Smp) void {
+        if (self.ipl_mode != .semantic or !self.semantic_port0_pending) return;
+        const value = self.semantic_pending_port0;
+        self.semantic_port0_pending = false;
+        self.semanticIplPort0(value);
     }
 
     pub fn runSemanticInstructions(self: *Smp, budget: u32) !u32 {
@@ -224,7 +247,14 @@ pub const Smp = struct {
                     self.io.smp_to_cpu[0] = value;
                     return;
                 }
-                if (value == self.semantic_counter +% 1 and self.io.cpu_to_smp[1] == 0) {
+                // A valid command deliberately skips the next sequential
+                // byte counter (software normally advances the last
+                // acknowledgement by at least two). Port 1 selects whether
+                // that non-sequential value starts another data block or
+                // launches the uploaded program. It is not required to be
+                // exactly `counter + 1`; commercial loaders commonly choose
+                // a larger collision-free command value.
+                if (self.io.cpu_to_smp[1] == 0) {
                     self.pc = @as(u16, self.io.cpu_to_smp[2]) | (@as(u16, self.io.cpu_to_smp[3]) << 8);
                     self.io.smp_to_cpu[0] = value;
                     self.semantic_ipl_state = .launch_ack;

@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.21.0 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.22.0 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU in a productive
 `R4SUBSYS1` application host. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
@@ -15,7 +15,10 @@ wide and 224, 239, 448 or 478 pixels high.
 The S-SMP now owns a complete bus-phased SPC700, 64 KiB ARAM, TEST/CONTROL,
 three timers, DSP register access and four ordered CPU/APU port latches. A
 semantic IPL service performs the documented upload without distributing the
-proprietary 64 bytes. An optional exact user image is accepted only from
+proprietary 64 bytes. It accepts collision-free, non-sequential block and
+launch commands and observes a port-0 command only after the complete S-CPU or
+DMA operation, so a 16-bit `STA $2140` sees its new port-1 payload rather than
+the previous latch value. An optional exact user image is accepted only from
 `C:\R4OS\SUBSYSTEMS\r4os.snes\FIRMWARE\SPC700.IPL` and only at exactly 64
 bytes. The public module contains no IPL image.
 
@@ -179,6 +182,11 @@ Build on Linux with `./Build.sh`; build on Windows with `Build.bat`. Both thin
 starters run the same PowerShell 7 orchestration. `./Build.sh test` runs the
 module-owned host tests and generates `share/r4snes/CPU_OPCODE_COVERAGE.json`
 under the artifact prefix and self-tests the S-DSP WAV analyzer.
+`./Build.sh cartridge-probe -- <path> [guest-seconds] [exact-IPL-path]` runs one
+explicitly supplied local cartridge through the production parser and machine
+and reports bounded per-second CPU, PPU, S-SMP and S-DSP telemetry. It is a
+diagnostic tool, never an automatic public-ROM gate, and neither copies nor
+embeds the supplied cartridge or optional user firmware.
 `./Build.sh reference-test` validates the optional, locally acquired inventory,
 parses all bound diagnostic cartridges, runs both
 Gilyon CPU ROMs and Gilyon SPC through the production ports, executes the IPL

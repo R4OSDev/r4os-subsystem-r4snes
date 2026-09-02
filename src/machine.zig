@@ -200,6 +200,10 @@ pub const Machine = struct {
             const result = port.serviceDmaStep();
             if (!result.progressed) return .dma_stalled;
         }
+        // Observe a port-0 IPL edge only after the complete S-CPU/DMA
+        // operation. A 16-bit store to $2140 writes the new port-1 payload
+        // after its port-0 counter within that same indivisible operation.
+        self.smp.serviceSemanticIpl();
         const elapsed = self.clock.master_cycles -% before;
         // S-SMP execution is already synchronized only at complete S-CPU or
         // DMA operations. Accumulating its oscillator phase once for that

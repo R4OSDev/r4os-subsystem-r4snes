@@ -1,8 +1,4 @@
-[CmdletBinding()]
-param(
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]] $BuildArguments
-)
+$BuildArguments = @($args)
 
 $ErrorActionPreference = 'Stop'
 $moduleRoot = Split-Path -Parent $PSCommandPath

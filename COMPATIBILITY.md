@@ -1,14 +1,14 @@
 ﻿# Compatibility
 
-The 0.18.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
+The 0.22.0 subsystem accepts `.sfc` and `.smc` candidates up to 64 MiB,
 normalizes an optional 512-byte copier header and requires one unambiguous
 LoROM, HiROM, ExLoROM or ExHiROM header. Region, board capability, declared
 sizes, reset vector, startup opcode and checksum/complement contribute to a
 concrete result. Header checksum equality is evidence rather than a lone veto,
 so consistent homebrew remains representable. No commercial cartridge is
-shipped, embedded or needed by the public build. Execution ends
-with a deterministic not-implemented error until the productive runtime-machine
-and window host are connected.
+shipped, embedded or needed by the public build. Validated cartridges run in
+the productive runtime-machine and window host; unsupported or contradictory
+boards fail with a bounded, visible diagnostic.
 
 CPU qualification covers every legal opcode in emulation mode and all four
 native M/X combinations. Synthetic cases check register/flag widths, direct
@@ -24,8 +24,11 @@ SPC700 qualification executes all 256000 pinned cases through the production
 core and compares A/X/Y, PSW, PC/SP, listed ARAM and every read/write/wait
 phase. Gilyon spctest reaches Success through the real W65C816 bus, semantic
 IPL upload and directional port latches; the open IPL-speed ROM transfers
-32768 bytes without a first data divergence. Timer, SLEEP/STOP, port-order,
-oscillator partition and optional exact-IPL cases are separate owner gates.
+32768 bytes without a first data divergence. Focused owner cases additionally
+bind non-sequential block/launch commands and the instruction-boundary pairing
+of the two writes made by a 16-bit `STA $2140`, preventing stale port-1 data
+from being acknowledged or copied. Timer, SLEEP/STOP, port-order, oscillator
+partition and optional exact-IPL cases remain separate owner gates.
 
 S-DSP qualification covers all eight voices, BRR filters and loop/end flags,
 Gaussian interpolation, pitch modulation, noise, every ADSR/GAIN family,

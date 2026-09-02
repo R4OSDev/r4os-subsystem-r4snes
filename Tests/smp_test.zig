@@ -89,13 +89,16 @@ test "semantic IPL uploads without embedding proprietary bytes" {
     smp.cpuWritePort(3, 0x02);
     smp.cpuWritePort(1, 0xcc);
     smp.cpuWritePort(0, 0xcc);
+    smp.serviceSemanticIpl();
     try std.testing.expectEqual(core.smp.SemanticIplState.receiving, smp.semantic_ipl_state);
     try std.testing.expectEqual(@as(u8, 0xcc), smp.cpuReadPort(0));
 
     smp.cpuWritePort(1, 0x00); // NOP
     smp.cpuWritePort(0, 0x00);
+    smp.serviceSemanticIpl();
     smp.cpuWritePort(1, 0xef); // SLEEP
     smp.cpuWritePort(0, 0x01);
+    smp.serviceSemanticIpl();
     try std.testing.expectEqual(@as(u8, 0x00), smp.aram[0x0200]);
     try std.testing.expectEqual(@as(u8, 0xef), smp.aram[0x0201]);
 
@@ -103,11 +106,85 @@ test "semantic IPL uploads without embedding proprietary bytes" {
     smp.cpuWritePort(3, 0x02);
     smp.cpuWritePort(1, 0x00);
     smp.cpuWritePort(0, 0x03);
+    smp.serviceSemanticIpl();
     try std.testing.expectEqual(core.smp.SemanticIplState.launch_ack, smp.semantic_ipl_state);
     try std.testing.expectEqual(@as(u8, 0x03), smp.cpuReadPort(0));
     try std.testing.expectEqual(core.smp.SemanticIplState.running, smp.semantic_ipl_state);
     try std.testing.expectEqual(@as(u32, 2), try smp.runSemanticInstructions(2));
     try std.testing.expect(smp.waiting);
+}
+
+test "semantic IPL accepts collision-free block and launch command values" {
+    var smp = core.smp.Smp{};
+    smp.powerSemanticIpl();
+
+    smp.cpuWritePort(2, 0x00);
+    smp.cpuWritePort(3, 0x02);
+    smp.cpuWritePort(1, 0xcc);
+    smp.cpuWritePort(0, 0xcc);
+    smp.serviceSemanticIpl();
+
+    smp.cpuWritePort(1, 0x11);
+    smp.cpuWritePort(0, 0x00);
+    smp.serviceSemanticIpl();
+    smp.cpuWritePort(1, 0x22);
+    smp.cpuWritePort(0, 0x01);
+    smp.serviceSemanticIpl();
+    try std.testing.expectEqual(@as(u8, 0x11), smp.aram[0x0200]);
+    try std.testing.expectEqual(@as(u8, 0x22), smp.aram[0x0201]);
+
+    // The next command skips the sequential counter value. A non-zero port 1
+    // starts a fresh data block and must not itself be copied into ARAM.
+    smp.cpuWritePort(2, 0x00);
+    smp.cpuWritePort(3, 0x03);
+    smp.cpuWritePort(1, 0x23);
+    smp.cpuWritePort(0, 0x23);
+    smp.serviceSemanticIpl();
+    try std.testing.expectEqual(@as(u8, 0x23), smp.cpuReadPort(0));
+    try std.testing.expectEqual(@as(u32, 0), smp.semantic_received);
+
+    // Counter zero remains an ordinary data byte even when its payload is
+    // zero. A later non-sequential command with port 1 zero launches.
+    smp.cpuWritePort(1, 0x00);
+    smp.cpuWritePort(0, 0x00);
+    smp.serviceSemanticIpl();
+    try std.testing.expectEqual(@as(u8, 0x00), smp.aram[0x0300]);
+    smp.cpuWritePort(2, 0x00);
+    smp.cpuWritePort(3, 0x03);
+    smp.cpuWritePort(1, 0x00);
+    smp.cpuWritePort(0, 0x22);
+    smp.serviceSemanticIpl();
+    try std.testing.expectEqual(core.smp.SemanticIplState.launch_ack, smp.semantic_ipl_state);
+    try std.testing.expect(smp.io.ipl_enabled);
+    try std.testing.expectEqual(@as(u8, 0x22), smp.cpuReadPort(0));
+    try std.testing.expectEqual(core.smp.SemanticIplState.running, smp.semantic_ipl_state);
+    try std.testing.expectEqual(@as(u16, 0x0300), smp.pc);
+}
+
+test "semantic IPL observes both halves of an S-CPU 16-bit port store" {
+    var smp = core.smp.Smp{};
+    smp.powerSemanticIpl();
+    smp.cpuWritePort(2, 0x00);
+    smp.cpuWritePort(3, 0x02);
+    smp.cpuWritePort(1, 0xcc);
+    smp.cpuWritePort(0, 0xcc);
+    smp.serviceSemanticIpl();
+
+    // W65C816 STA $2140 in 16-bit accumulator mode writes the counter to
+    // port 0 before writing the payload to port 1. Neither half alone may be
+    // consumed as a completed semantic-IPL transaction.
+    smp.cpuWritePort(0, 0x00);
+    try std.testing.expectEqual(@as(u32, 0), smp.semantic_received);
+    try std.testing.expectEqual(@as(u8, 0xcc), smp.io.smp_to_cpu[0]);
+    smp.cpuWritePort(1, 0x5a);
+    try std.testing.expectEqual(@as(u32, 0), smp.semantic_received);
+
+    smp.serviceSemanticIpl();
+    try std.testing.expectEqual(@as(u8, 0x5a), smp.aram[0x0200]);
+    try std.testing.expectEqual(@as(u8, 0x00), smp.io.smp_to_cpu[0]);
+    try std.testing.expectEqual(@as(u32, 1), smp.semantic_received);
+    smp.serviceSemanticIpl();
+    try std.testing.expectEqual(@as(u32, 1), smp.semantic_received);
 }
 
 test "optional exact IPL validates size and missing firmware fails closed" {

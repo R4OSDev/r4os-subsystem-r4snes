@@ -75,9 +75,12 @@ The S-SMP bus exposes every instruction read, write and wait phase. Its three
 divider timers advance from those phases, while the independent rational APU
 oscillator records synchronization points for the four directional port
 latches without using host time. The standard semantic IPL accepts the public
-upload protocol but never supplies arbitrary bytes at `$FFC0-$FFFF`; an exact
-path exists only for an optional 64-byte user file in the private firmware
-tree.
+upload protocol, including non-sequential collision-free block and launch
+commands, but never supplies arbitrary bytes at `$FFC0-$FFFF`. S-CPU port 0 is
+latched immediately but interpreted only after the complete CPU or DMA
+operation. This preserves the hardware-visible pair when a 16-bit
+`STA $2140` writes the counter before the new port-1 payload. An exact path
+exists only for an optional 64-byte user file in the private firmware tree.
 
 The S-DSP advances one of its 32 hardware phases for every APU clock against
 the same ARAM used by SPC700. Its register file, eight voices, BRR history,

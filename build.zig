@@ -46,6 +46,20 @@ pub fn build(b: *std.Build) void {
     });
     const run_performance = b.addRunArtifact(performance_harness);
 
+    const cartridge_probe_root = b.createModule(.{
+        .root_source_file = b.path("Tests/cartridge_probe.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    cartridge_probe_root.addImport("core", performance_core);
+    const cartridge_probe = b.addExecutable(.{
+        .name = "r4snes-cartridge-probe",
+        .root_module = cartridge_probe_root,
+    });
+    const run_cartridge_probe = b.addRunArtifact(cartridge_probe);
+    run_cartridge_probe.setCwd(b.path("."));
+    if (b.args) |args| run_cartridge_probe.addArgs(args);
+
     const maturity_r4os = sdk.createR4osModule(b.graph.host, .ReleaseSafe);
     const maturity_core = b.createModule(.{
         .root_source_file = b.path("src/core.zig"),
@@ -214,6 +228,9 @@ pub fn build(b: *std.Build) void {
 
     const performance_step = b.step("performance-test", "Measure one deterministic NTSC guest second in ReleaseFast");
     performance_step.dependOn(&run_performance.step);
+
+    const cartridge_probe_step = b.step("cartridge-probe", "Run a local cartridge with per-second CPU, PPU and SMP telemetry");
+    cartridge_probe_step.dependOn(&run_cartridge_probe.step);
 
     const maturity_step = b.step("maturity-test", "Prove NTSC/PAL host-pacing, partition, restart and instance determinism");
     maturity_step.dependOn(&run_maturity.step);
