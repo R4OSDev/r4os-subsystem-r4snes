@@ -1,6 +1,8 @@
 const std = @import("std");
 const board = @import("board.zig");
 const obc1 = @import("obc1.zig");
+const sdd1 = @import("sdd1.zig");
+const spc7110 = @import("spc7110.zig");
 const srtc = @import("srtc.zig");
 
 pub const copier_header_size: usize = 512;
@@ -52,6 +54,8 @@ pub const Cartridge = struct {
     sram_dirty_end: usize = 0,
     obc1_device: ?obc1.Device = null,
     srtc_device: ?srtc.Device = null,
+    sdd1_device: ?sdd1.Device = null,
+    spc7110_device: ?spc7110.Device = null,
 
     pub fn parse(allocator: std.mem.Allocator, source: []const u8) !Cartridge {
         const geometry = try inspectCandidateSize(source.len);
@@ -65,6 +69,8 @@ pub const Cartridge = struct {
                 return switch (family) {
                     .obc1 => error.UnsupportedOBC1Revision,
                     .srtc => error.UnsupportedSrtcRevision,
+                    .sdd1 => error.UnsupportedSdd1Revision,
+                    .spc7110 => error.UnsupportedSpc7110Revision,
                 };
             }
         }
@@ -79,6 +85,13 @@ pub const Cartridge = struct {
                 return error.ContradictoryOBC1Board,
             .srtc => if (header.mapping != .ex_hi_rom or header.declared_sram_bytes == 0 or !battery or normalized.len <= 4 * 1024 * 1024)
                 return error.ContradictorySrtcBoard,
+            .sdd1 => if (header.mapping != .lo_rom or
+                (header.rom_type == 0x43 and (battery or header.declared_sram_bytes != 0)) or
+                (header.rom_type == 0x45 and (!battery or header.declared_sram_bytes != 32 * 1024)))
+                return error.ContradictorySdd1Board,
+            .spc7110_epson_rtc => if (header.mapping != .hi_rom or !battery or
+                header.declared_sram_bytes != 8 * 1024 or normalized.len <= spc7110.programRomBytes(normalized.len))
+                return error.ContradictorySpc7110Board,
             else => {},
         }
 
@@ -108,9 +121,16 @@ pub const Cartridge = struct {
             .had_copier_header = geometry.copier_header,
             .obc1_device = if (enhancement == .obc1) .{} else null,
             .srtc_device = if (enhancement == .srtc) .{} else null,
+            .sdd1_device = if (enhancement == .sdd1) .{} else null,
+            .spc7110_device = if (enhancement == .spc7110_epson_rtc)
+                .{ .has_rtc = header.rom_type == 0xF9 }
+            else
+                null,
         };
         if (result.obc1_device) |*device| try device.power(result.sram_storage);
         if (result.srtc_device) |*device| device.power();
+        if (result.sdd1_device) |*device| device.power();
+        if (result.spc7110_device) |*device| device.power();
         return result;
     }
 
@@ -124,6 +144,8 @@ pub const Cartridge = struct {
         self.sram_dirty_end = 0;
         self.obc1_device = null;
         self.srtc_device = null;
+        self.sdd1_device = null;
+        self.spc7110_device = null;
     }
 
     pub fn rom(self: *const Cartridge) []const u8 {
@@ -153,7 +175,13 @@ pub const Cartridge = struct {
             if (device.read(self.sram_storage, address)) |value| return value;
         }
         if (self.srtc_device) |*device| return device.read(address, open_bus);
+        if (self.sdd1_device) |*device| return device.read(self.rom_storage, self.sram_storage, address, open_bus);
+        if (self.spc7110_device) |*device| return device.read(self.rom_storage, self.sram_storage, address, open_bus);
         return null;
+    }
+
+    pub fn observeEnhancementWrite(self: *Cartridge, address: u32, value: u8) void {
+        if (self.sdd1_device) |*device| device.observeDmaWrite(address, value);
     }
 
     pub fn writeEnhancement(self: *Cartridge, address: u32, value: u8) bool {
@@ -165,6 +193,20 @@ pub const Cartridge = struct {
             }
         }
         if (self.srtc_device) |*device| return device.write(address, value);
+        if (self.sdd1_device) |*device| {
+            const result = device.write(self.sram_storage, address, value);
+            if (result.handled) {
+                if (result.changed) self.markSramDirty(result.first, result.end);
+                return true;
+            }
+        }
+        if (self.spc7110_device) |*device| {
+            const result = device.write(self.rom_storage, self.sram_storage, address, value);
+            if (result.handled) {
+                if (result.changed) self.markSramDirty(result.first, result.end);
+                return true;
+            }
+        }
         return false;
     }
 
@@ -245,13 +287,25 @@ fn selectHeader(rom: []const u8) !Header {
 
 fn parseHeaderCandidate(rom: []const u8, location: HeaderLocation) ?Header {
     if (location.offset + header_length > rom.len) return null;
-    if ((location.mapping == .ex_lo_rom or location.mapping == .ex_hi_rom) and rom.len <= 4 * 1024 * 1024) return null;
-    if ((location.mapping == .lo_rom or location.mapping == .hi_rom) and rom.len > 4 * 1024 * 1024) return null;
     const bytes = rom[location.offset .. location.offset + header_length];
     const map_mode = bytes[0x15];
     if ((map_mode & 0x20) == 0) return null;
     const enhancement = board.enhancementForHeader(bytes[0x16], map_mode);
-    if (board.mappingForHeader(map_mode, enhancement) != location.mapping) return null;
+    const revision_family = if (enhancement == .unknown) board.unsupportedRevisionFamily(bytes[0x16], map_mode) else null;
+    const candidate_mapping: ?board.Mapping = if (enhancement == .unknown)
+        if (revision_family) |family| switch (family) {
+            .obc1, .sdd1 => .lo_rom,
+            .srtc => .ex_hi_rom,
+            .spc7110 => .hi_rom,
+        } else board.mappingForHeader(map_mode, enhancement)
+    else
+        board.mappingForHeader(map_mode, enhancement);
+    const special_normal_mapping = enhancement == .sdd1 or enhancement == .spc7110_epson_rtc or
+        revision_family == .sdd1 or revision_family == .spc7110;
+    if ((location.mapping == .ex_lo_rom or location.mapping == .ex_hi_rom) and rom.len <= 4 * 1024 * 1024) return null;
+    if ((location.mapping == .lo_rom or location.mapping == .hi_rom) and rom.len > 4 * 1024 * 1024 and
+        !special_normal_mapping) return null;
+    if (candidate_mapping != location.mapping) return null;
     const region = board.regionForCode(bytes[0x19]) orelse return null;
     const reset_vector = readU16(bytes[0x3C..0x3E]);
     if (reset_vector < 0x8000) return null;

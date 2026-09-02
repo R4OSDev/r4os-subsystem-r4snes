@@ -1,11 +1,12 @@
 {
   "schema": 1,
   "references_sha256": "a2aa8b74fee6f49de8a52c5e5fc73c932e2c3e1e3633266325b809bc805b0fc6",
-  "qualification_matrix_sha256": "d7ff8fec06265fe1afd1c34fa8e5edb6741a3361e83e5990a84f9e25e8dff4dc",
+  "qualification_matrix_sha256": "6dcaaf2bf54646fe4cc2298b4f32716feabb78ea86bd8b8e92d33b61bd224518",
   "dma_cases_sha256": "997fe478761e4cb17f97e7d063d9d400c11c5fc743fe4d3f6c91ff985dc7efff",
   "ppu_cases_sha256": "1e0583887cb3c289895aaa15f3d95ba736798d3967b89499b3b9e5d48b924f68",
   "hdrv_cases_sha256": "076c26ba3818c7043ecdee8d9fa54daf51346220987456ca45b4e1c44fc1e2a6",
   "sdsp_cases_sha256": "d808e733411e19bf468828b6044dd94f5761de4fdc7014b571af7119338a8226",
+  "enhancement_cases_sha256": "fc5efd545c3dc237a0a179a4a08e3516936f1e37ac1c7e3f7eff3c711ea51601",
   "repositories": 16,
   "downloads": 5,
   "trees": 9,
@@ -14,6 +15,8 @@
   "ppu_reference_roms": 23,
   "hdrv_geometry_cases": 9,
   "sdsp_oracle_cases": 9,
+  "enhancement_oracles": 3,
+  "enhancement_oracle_cases": 7,
   "spc700_files": 256,
   "spc700_records": 256000
 }

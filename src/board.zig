@@ -47,8 +47,8 @@ pub const capability_table = [_]Capability{
     .{ .enhancement = .none, .disposition = .base_implemented, .planned_version = "0.73.3" },
     .{ .enhancement = .obc1, .disposition = .base_implemented, .planned_version = "0.73.12" },
     .{ .enhancement = .srtc, .disposition = .base_implemented, .planned_version = "0.73.12" },
-    .{ .enhancement = .sdd1, .disposition = .planned, .planned_version = "0.73.13" },
-    .{ .enhancement = .spc7110_epson_rtc, .disposition = .planned, .planned_version = "0.73.13" },
+    .{ .enhancement = .sdd1, .disposition = .base_implemented, .planned_version = "0.73.13" },
+    .{ .enhancement = .spc7110_epson_rtc, .disposition = .base_implemented, .planned_version = "0.73.13" },
     .{ .enhancement = .super_fx, .disposition = .planned, .planned_version = "0.73.14" },
     .{ .enhancement = .sa1, .disposition = .planned, .planned_version = "0.73.15" },
     .{ .enhancement = .cx4, .disposition = .planned, .planned_version = "0.73.16" },
@@ -99,6 +99,8 @@ pub fn enhancementForHeader(rom_type: u8, map_mode: u8) Enhancement {
 pub const RevisionFamily = enum {
     obc1,
     srtc,
+    sdd1,
+    spc7110,
 };
 
 /// Classifies only recognizable but unsupported revisions. It is deliberately
@@ -109,6 +111,10 @@ pub fn unsupportedRevisionFamily(rom_type: u8, map_mode: u8) ?RevisionFamily {
         ((map_mode & 0x2F) == 0x20 or (map_mode & 0x2F) == 0x21)) return .obc1;
     if ((rom_type & 0xF0) == 0x50 and (rom_type & 0x0F) >= 3 and
         (map_mode & 0x2F) == 0x25) return .srtc;
+    if ((rom_type & 0xF0) == 0x40 and (rom_type & 0x0F) >= 3 and
+        (map_mode & 0x2F) == 0x22 and rom_type != 0x43 and rom_type != 0x45) return .sdd1;
+    if ((rom_type & 0xF0) == 0xF0 and (rom_type & 0x0F) >= 5 and
+        (map_mode & 0x2F) == 0x2A and rom_type != 0xF5 and rom_type != 0xF9) return .spc7110;
     return null;
 }
 

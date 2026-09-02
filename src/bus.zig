@@ -73,6 +73,7 @@ pub const Bus = struct {
             self.wram[index] = value;
             return .{ .value = value, .master_cycles = 8, .class = .wram };
         }
+        cart.observeEnhancementWrite(address, value);
         if (cart.writeEnhancement(address, value)) {
             return .{ .value = value, .master_cycles = enhancementCycles(cart), .class = .cartridge_chip };
         }
@@ -108,6 +109,8 @@ fn enhancementCycles(cart: *const cartridge.Cartridge) u8 {
     return switch (cart.board.capability.enhancement) {
         .srtc => @import("srtc.zig").access_master_cycles,
         .obc1 => @import("obc1.zig").access_master_cycles,
+        .sdd1 => @import("sdd1.zig").access_master_cycles,
+        .spc7110_epson_rtc => @import("spc7110.zig").access_master_cycles,
         else => 8,
     };
 }

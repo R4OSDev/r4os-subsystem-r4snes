@@ -13,6 +13,7 @@ const Expected = struct {
     ppu_cases_sha256: []const u8,
     hdrv_cases_sha256: []const u8,
     sdsp_cases_sha256: []const u8,
+    enhancement_cases_sha256: []const u8,
     repositories: usize,
     downloads: usize,
     trees: usize,
@@ -21,6 +22,8 @@ const Expected = struct {
     ppu_reference_roms: usize,
     hdrv_geometry_cases: usize,
     sdsp_oracle_cases: usize,
+    enhancement_oracles: usize,
+    enhancement_oracle_cases: usize,
     spc700_files: usize,
     spc700_records: usize,
 };
@@ -128,6 +131,38 @@ const SdspReferenceCases = struct {
     };
 };
 
+const EnhancementReferenceCases = struct {
+    schema: u32,
+    generator: struct {
+        algorithm: []const u8,
+        seed: u32,
+        multiplier: u32,
+        increment: u32,
+        input_bytes: usize,
+    },
+    trace: struct {
+        format: []const u8,
+        sha256: []const u8,
+        verified_oracles: []const []const u8,
+        result: []const u8,
+        cases: usize,
+    },
+    oracles: []const struct {
+        name: []const u8,
+        verification: []const u8,
+        sdd1: []const u8,
+        spc7110: []const u8,
+    },
+    cases: []const struct {
+        id: []const u8,
+        chip: []const u8,
+        mode: u8,
+        first_byte: ?u8,
+        output_bytes: usize,
+        expected_hex: []const u8,
+    },
+};
+
 pub fn main(init: std.process.Init) void {
     run(init) catch |fault| {
         std.debug.print("R4SNES reference harness FAILED: {s}\n", .{@errorName(fault)});
@@ -156,7 +191,7 @@ fn run(init: std.process.Init) !void {
     var parsed_matrix = try std.json.parseFromSlice(Matrix, allocator, matrix_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_matrix.deinit();
     const matrix = parsed_matrix.value;
-    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.12")) return error.UnsupportedQualificationMatrix;
+    if (matrix.schema != 1 or !std.mem.eql(u8, matrix.release, "0.73.13")) return error.UnsupportedQualificationMatrix;
     if (matrix.suites.len != 9 or matrix.corpus.test_roms != expected.test_roms or
         matrix.corpus.spc700_single_step_files != expected.spc700_files or
         matrix.corpus.spc700_single_step_records != expected.spc700_records or
@@ -168,8 +203,10 @@ fn run(init: std.process.Init) !void {
     for (matrix.suites) |suite| matrix_roms += suite.rom_count orelse 0;
     if (matrix_roms != expected.test_roms) return error.QualificationSuiteCountMismatch;
     if (matrix.enhancement_chips.len != 12) return error.QualificationEnhancementCountMismatch;
-    try expectImplementedEnhancement(matrix.enhancement_chips, "obc1");
-    try expectImplementedEnhancement(matrix.enhancement_chips, "srtc");
+    try expectImplementedEnhancement(matrix.enhancement_chips, "obc1", "0.73.12");
+    try expectImplementedEnhancement(matrix.enhancement_chips, "srtc", "0.73.12");
+    try expectImplementedEnhancement(matrix.enhancement_chips, "sdd1", "0.73.13");
+    try expectImplementedEnhancement(matrix.enhancement_chips, "spc7110-epson-rtc", "0.73.13");
 
     const dma_cases_bytes = try cwd.readFileAlloc(io, "Tests/dma_reference_cases.json", allocator, .limited(max_manifest_bytes));
     defer allocator.free(dma_cases_bytes);
@@ -277,6 +314,19 @@ fn run(init: std.process.Init) !void {
         }
     }
 
+    const enhancement_cases_bytes = try cwd.readFileAlloc(io, "Tests/enhancement_reference_cases.json", allocator, .limited(max_manifest_bytes));
+    defer allocator.free(enhancement_cases_bytes);
+    try expectSha256(enhancement_cases_bytes, expected.enhancement_cases_sha256);
+    var parsed_enhancement_cases = try std.json.parseFromSlice(EnhancementReferenceCases, allocator, enhancement_cases_bytes, .{});
+    defer parsed_enhancement_cases.deinit();
+    const enhancement_cases = parsed_enhancement_cases.value;
+    if (enhancement_cases.schema != 1 or enhancement_cases.oracles.len != expected.enhancement_oracles or
+        enhancement_cases.cases.len != expected.enhancement_oracle_cases)
+    {
+        return error.EnhancementReferenceManifestMismatch;
+    }
+    try verifyEnhancementVectors(enhancement_cases);
+
     cwd.access(io, root, .{}) catch {
         std.debug.print("R4SNES reference harness SKIP: optional root missing: {s}\n", .{root});
         return;
@@ -295,6 +345,17 @@ fn run(init: std.process.Init) !void {
     {
         return error.ReferenceManifestMismatch;
     }
+    var executed_oracles: usize = 0;
+    for (enhancement_cases.oracles) |oracle| {
+        if (std.mem.startsWith(u8, oracle.verification, "executed-")) executed_oracles += 1;
+        const sdd1_path = try std.fs.path.join(allocator, &.{ root, oracle.sdd1 });
+        defer allocator.free(sdd1_path);
+        const spc_path = try std.fs.path.join(allocator, &.{ root, oracle.spc7110 });
+        defer allocator.free(spc_path);
+        try cwd.access(io, sdd1_path, .{});
+        try cwd.access(io, spc_path, .{});
+    }
+    if (executed_oracles < 2) return error.InsufficientExecutedEnhancementOracles;
 
     for (dma_cases.foreign_roms) |rom| {
         const path = try std.fs.path.join(allocator, &.{ root, rom.path });
@@ -345,16 +406,125 @@ fn run(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} PPU-diagnostics={d} HDRV-geometries={d} S-DSP-oracles={d} Gilyon-basic={d} Gilyon-full={d} Gilyon-spc={d} IPL-speed-bytes={d} IPL-speed-first-divergence=none IPL-speed-steps={d} SPC700-files={d} vectors={d}\n",
-        .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, ppu_cases.foreign_roms.len, hdrv_cases.cases.len, sdsp_cases.cases.len, basic_steps, full_steps, spc_steps, ipl_speed.bytes, ipl_speed.steps, vectors.files, vectors.records },
+        "R4SNES reference harness OK: repositories={d} downloads={d} trees={d} ROMs={d} DMA-diagnostics={d} PPU-diagnostics={d} HDRV-geometries={d} S-DSP-oracles={d} enhancement-oracles={d} enhancement-cases={d} Gilyon-basic={d} Gilyon-full={d} Gilyon-spc={d} IPL-speed-bytes={d} IPL-speed-first-divergence=none IPL-speed-steps={d} SPC700-files={d} vectors={d}\n",
+        .{ expected.repositories, expected.downloads, expected.trees, roms, dma_cases.foreign_roms.len, ppu_cases.foreign_roms.len, hdrv_cases.cases.len, sdsp_cases.cases.len, executed_oracles, enhancement_cases.cases.len, basic_steps, full_steps, spc_steps, ipl_speed.bytes, ipl_speed.steps, vectors.files, vectors.records },
     );
 }
 
-fn expectImplementedEnhancement(chips: []const MatrixEnhancement, id: []const u8) !void {
+fn verifyEnhancementVectors(reference: EnhancementReferenceCases) !void {
+    if (!std.mem.eql(u8, reference.generator.algorithm, "lcg32-high-byte") or
+        reference.generator.seed != 0x12345678 or reference.generator.multiplier != 1664525 or
+        reference.generator.increment != 1013904223 or reference.generator.input_bytes != 65536 or
+        reference.trace.cases != reference.cases.len or
+        !std.mem.eql(u8, reference.trace.result, "byte-identical") or
+        reference.trace.verified_oracles.len < 2)
+    {
+        return error.EnhancementReferenceManifestMismatch;
+    }
+    for (reference.oracles, 0..) |oracle, index| {
+        if (oracle.name.len == 0 or oracle.verification.len == 0 or oracle.sdd1.len == 0 or oracle.spc7110.len == 0) {
+            return error.EnhancementReferenceManifestMismatch;
+        }
+        for (reference.oracles[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.name, oracle.name)) return error.DuplicateEnhancementOracle;
+        }
+    }
+    for (reference.trace.verified_oracles) |verified| {
+        var matched = false;
+        for (reference.oracles) |oracle| {
+            if (std.mem.eql(u8, verified, oracle.name) and std.mem.startsWith(u8, oracle.verification, "executed-")) matched = true;
+        }
+        if (!matched) return error.UnverifiedEnhancementOracle;
+    }
+
+    var source: [65536]u8 = undefined;
+    fillEnhancementInput(&source);
+    var trace_hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for (reference.cases, 0..) |case, index| {
+        if (case.id.len == 0 or case.output_bytes != 64 or case.expected_hex.len != 128) {
+            return error.EnhancementReferenceManifestMismatch;
+        }
+        var name_buffer: [32]u8 = undefined;
+        const name = if (std.mem.eql(u8, case.chip, "sdd1"))
+            try std.fmt.bufPrint(name_buffer[0..], "sdd1_{d}", .{case.mode})
+        else if (std.mem.eql(u8, case.chip, "spc7110"))
+            try std.fmt.bufPrint(name_buffer[0..], "spc7110_{d}", .{case.mode})
+        else
+            return error.UnknownEnhancementReferenceChip;
+        trace_hash.update(name);
+        trace_hash.update("=");
+        trace_hash.update(case.expected_hex);
+        trace_hash.update("\n");
+
+        var expected: [64]u8 = undefined;
+        _ = try std.fmt.hexToBytes(expected[0..], case.expected_hex);
+        var actual: [64]u8 = undefined;
+        if (std.mem.eql(u8, case.chip, "sdd1")) {
+            if (case.mode != index or case.mode > 3 or case.first_byte == null) return error.EnhancementReferenceManifestMismatch;
+            fillEnhancementInput(&source);
+            source[0] = case.first_byte.?;
+            var decoder = core.sdd1.Decompressor{};
+            decoder.init(source[0..], .{ 0, 1, 2, 3 }, 0xC00000);
+            for (&actual) |*byte| byte.* = decoder.read(source[0..], .{ 0, 1, 2, 3 });
+        } else {
+            if (index < 4 or case.mode != index - 4 or case.mode > 2 or case.first_byte != null) return error.EnhancementReferenceManifestMismatch;
+            fillEnhancementInput(&source);
+            try decodeSpcEnhancement(source[0..], case.mode, actual[0..]);
+        }
+        if (!std.mem.eql(u8, expected[0..], actual[0..])) return error.EnhancementOracleMismatch;
+    }
+    var actual_trace_hash: [32]u8 = undefined;
+    trace_hash.final(&actual_trace_hash);
+    var expected_trace_hash: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(expected_trace_hash[0..], reference.trace.sha256);
+    if (!std.mem.eql(u8, expected_trace_hash[0..], actual_trace_hash[0..])) return error.EnhancementTraceDigestMismatch;
+}
+
+fn fillEnhancementInput(bytes: *[65536]u8) void {
+    var state: u32 = 0x12345678;
+    for (bytes) |*byte| {
+        state = state *% 1664525 +% 1013904223;
+        byte.* = @truncate(state >> 24);
+    }
+}
+
+fn decodeSpcEnhancement(data: []const u8, mode: u8, output: []u8) !void {
+    var decoder = core.spc7110.Decompressor{};
+    try decoder.init(data, mode, 0);
+    _ = decoder.decode(data);
+    var at: usize = 0;
+    while (at < output.len) {
+        var tile: [32]u8 = .{0} ** 32;
+        for (0..8) |row| {
+            const result = decoder.result;
+            switch (decoder.bpp) {
+                1 => tile[row] = @truncate(result),
+                2 => {
+                    tile[row * 2] = @truncate(result);
+                    tile[row * 2 + 1] = @truncate(result >> 8);
+                },
+                4 => {
+                    tile[row * 2] = @truncate(result);
+                    tile[row * 2 + 1] = @truncate(result >> 8);
+                    tile[row * 2 + 16] = @truncate(result >> 16);
+                    tile[row * 2 + 17] = @truncate(result >> 24);
+                },
+                else => return error.InvalidSpcEnhancementBpp,
+            }
+            _ = decoder.decode(data);
+        }
+        const tile_bytes = @as(usize, decoder.bpp) * 8;
+        const count = @min(tile_bytes, output.len - at);
+        @memcpy(output[at .. at + count], tile[0..count]);
+        at += count;
+    }
+}
+
+fn expectImplementedEnhancement(chips: []const MatrixEnhancement, id: []const u8, version: []const u8) !void {
     for (chips) |chip| {
         if (!std.mem.eql(u8, chip.id, id)) continue;
         if (!std.mem.eql(u8, chip.status, "implemented") or
-            chip.version == null or !std.mem.eql(u8, chip.version.?, "0.73.12") or
+            chip.version == null or !std.mem.eql(u8, chip.version.?, version) or
             chip.firmware == null or !std.mem.eql(u8, chip.firmware.?, "none"))
         {
             return error.QualificationEnhancementMismatch;

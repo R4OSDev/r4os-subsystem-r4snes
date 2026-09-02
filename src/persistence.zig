@@ -2,6 +2,7 @@ const std = @import("std");
 const r4os = @import("r4os");
 const board = @import("board.zig");
 const cartridge = @import("cartridge.zig");
+const epson = @import("epson_rtc.zig");
 const srtc = @import("srtc.zig");
 
 const shared = r4os.subsystem_persistence;
@@ -78,7 +79,17 @@ pub const RtcState = struct {
     pending_catchup_seconds: u64 = 0,
 
     pub fn init(chip: RtcChip) RtcState {
-        return .{ .chip = chip, .halted = chip == .s_rtc };
+        var result = RtcState{ .chip = chip, .halted = true };
+        if (chip == .epson) {
+            const device = epson.Device{};
+            device.savePersistent(
+                &result.registers,
+                &result.latched,
+                &result.halted,
+                &result.overflow,
+            );
+        }
+        return result;
     }
 
     pub fn queueCatchup(self: *RtcState, adjustment: OfflineAdjustment) void {
@@ -103,7 +114,7 @@ pub const RtcRecord = struct {
     generation: u64,
 };
 
-pub const RtcDecodeError = srtc.PersistentError || error{
+pub const RtcDecodeError = srtc.PersistentError || epson.PersistentError || error{
     WrongSize,
     BadMagic,
     UnsupportedVersion,
@@ -169,7 +180,7 @@ pub const Session = struct {
         }
         if (cart.obc1_device) |*device| device.power(cart.sram_storage) catch return error.CorruptSave;
 
-        if (RtcChip.forEnhancement(cart.board.capability.enhancement)) |chip| {
+        if (rtcChipForCartridge(cart)) |chip| {
             var encoded: [rtc_record_bytes]u8 = undefined;
             switch (backend.readExact(&result.digest, .rtc, encoded[0..])) {
                 .ok => {
@@ -188,9 +199,22 @@ pub const Session = struct {
                         device.advanceSeconds(catchup);
                         captureSrtc(device, &record.state);
                     }
+                    if (cart.spc7110_device) |*device| {
+                        if (device.has_rtc) {
+                            try device.rtc.loadPersistent(
+                                &record.state.registers,
+                                &record.state.latched,
+                                record.state.halted,
+                                record.state.overflow,
+                            );
+                            const catchup = record.state.takeCatchup();
+                            device.advanceRtcSeconds(catchup);
+                            captureEpson(&device.rtc, &record.state);
+                        }
+                    }
                     result.rtc_record = record;
                     result.rtc_dirty = result.offline_adjustment.seconds != 0 or
-                        (cart.srtc_device != null and cart.srtc_device.?.dirty);
+                        rtcDirty(cart);
                 },
                 .missing => {
                     result.rtc_record = .{
@@ -200,6 +224,9 @@ pub const Session = struct {
                         .generation = generation,
                     };
                     if (cart.srtc_device) |*device| captureSrtc(device, &result.rtc_record.?.state);
+                    if (cart.spc7110_device) |*device| {
+                        if (device.has_rtc) captureEpson(&device.rtc, &result.rtc_record.?.state);
+                    }
                     result.rtc_dirty = true;
                 },
                 .wrong_size => return error.WrongSize,
@@ -232,7 +259,7 @@ pub const Session = struct {
         if (self.closed) return error.Closed;
         if (!self.enabled) return false;
         try self.backend.poll();
-        if (!cart.sram_dirty and !self.rtc_dirty and !srtcDirty(cart)) return false;
+        if (!cart.sram_dirty and !self.rtc_dirty and !rtcDirty(cart)) return false;
         if (guest_tick -| self.last_flush_guest_tick < flush_delay_master_cycles) return false;
         try self.flush(cart, wall_now_seconds, monotonic_now_ns);
         self.last_flush_guest_tick = guest_tick;
@@ -256,6 +283,12 @@ pub const Session = struct {
             if (device.dirty) self.rtc_dirty = true;
             if (self.rtc_record) |*record| captureSrtc(device, &record.state);
         }
+        if (cart.spc7110_device) |*device| {
+            if (device.has_rtc) {
+                if (device.rtc.dirty) self.rtc_dirty = true;
+                if (self.rtc_record) |*record| captureEpson(&device.rtc, &record.state);
+            }
+        }
         if (self.rtc_dirty) {
             if (self.rtc_record) |*record| {
                 record.wall_anchor_seconds = wall_now_seconds orelse 0;
@@ -266,6 +299,9 @@ pub const Session = struct {
                 try self.backend.writeAtomic(&self.digest, .rtc, encoded[0..]);
                 self.rtc_dirty = false;
                 if (cart.srtc_device) |*device| device.clearDirty();
+                if (cart.spc7110_device) |*device| {
+                    if (device.has_rtc) device.rtc.clearDirty();
+                }
             }
         }
     }
@@ -355,6 +391,9 @@ pub fn decodeRtc(bytes: []const u8) RtcDecodeError!RtcRecord {
     if (chip == .s_rtc) {
         if (halted and pending != 0) return error.InvalidSrtcHaltState;
         try srtc.validatePersistent(&registers, &latched, halted);
+    } else {
+        if (halted and pending != 0) return error.InvalidEpsonHaltState;
+        try epson.validatePersistent(&registers, &latched, halted);
     }
     return .{
         .state = .{
@@ -371,12 +410,36 @@ pub fn decodeRtc(bytes: []const u8) RtcDecodeError!RtcRecord {
     };
 }
 
-fn srtcDirty(cart: *const cartridge.Cartridge) bool {
+fn rtcChipForCartridge(cart: *const cartridge.Cartridge) ?RtcChip {
+    if (cart.srtc_device != null) return .s_rtc;
+    if (cart.spc7110_device) |device| {
+        if (device.has_rtc) return .epson;
+        return null;
+    }
+    return switch (cart.board.capability.enhancement) {
+        .srtc => .s_rtc,
+        .spc7110_epson_rtc => .epson,
+        else => null,
+    };
+}
+
+fn rtcDirty(cart: *const cartridge.Cartridge) bool {
     if (cart.srtc_device) |device| return device.dirty;
+    if (cart.spc7110_device) |device| return device.has_rtc and device.rtc.dirty;
     return false;
 }
 
 fn captureSrtc(device: *const srtc.Device, state: *RtcState) void {
+    device.savePersistent(
+        &state.registers,
+        &state.latched,
+        &state.halted,
+        &state.overflow,
+    );
+    state.pending_catchup_seconds = 0;
+}
+
+fn captureEpson(device: *const epson.Device, state: *RtcState) void {
     device.savePersistent(
         &state.registers,
         &state.latched,

@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "generator": {
+    "algorithm": "lcg32-high-byte",
+    "seed": 305419896,
+    "multiplier": 1664525,
+    "increment": 1013904223,
+    "input_bytes": 65536
+  },
+  "trace": {
+    "format": "name=lowercase-hex, LF, seven records in case order",
+    "sha256": "1a68e3f6a5e92a506b6944f99e4e9999563536fca595aabeb41d9cc75f547ad8",
+    "verified_oracles": ["Mesen2", "Snes9x"],
+    "result": "byte-identical",
+    "cases": 7
+  },
+  "oracles": [
+    {
+      "name": "Ares",
+      "verification": "source-reviewed",
+      "sdd1": "Implementations/Ares/ares/sfc/coprocessor/sdd1/decompressor.cpp",
+      "spc7110": "Implementations/Ares/ares/sfc/coprocessor/spc7110/decompressor.cpp"
+    },
+    {
+      "name": "Mesen2",
+      "verification": "executed-unmodified-decompressor-source",
+      "sdd1": "Implementations/Mesen2/Core/SNES/Coprocessors/SDD1/Sdd1Decomp.cpp",
+      "spc7110": "Implementations/Mesen2/Core/SNES/Coprocessors/SPC7110/Spc7110Decomp.cpp"
+    },
+    {
+      "name": "Snes9x",
+      "verification": "executed-unmodified-decompressor-source",
+      "sdd1": "Implementations/Snes9x/sdd1emu.cpp",
+      "spc7110": "Implementations/Snes9x/spc7110dec.cpp"
+    }
+  ],
+  "cases": [
+    {
+      "id": "sdd1-bitplanes-0-context-0",
+      "chip": "sdd1",
+      "mode": 0,
+      "first_byte": 0,
+      "output_bytes": 64,
+      "expected_hex": "2807d4fc99114a9fd4b0aa8b6b17dcadab8fff3c527ac191d506b2507e909ea8230b24d4ada73d384d6d8ab5af6a4450d7864e7bfef2fde493b9d6886b2a4bcc"
+    },
+    {
+      "id": "sdd1-bitplanes-1-context-1",
+      "chip": "sdd1",
+      "mode": 1,
+      "first_byte": 80,
+      "output_bytes": 64,
+      "expected_hex": "2807a4c5e1017343331eb71daad925bba804956013388744cf368670105faabd15bf0307aa7f540ec8c6ecb58bb15d6d50ff3aa94d1aea153f8ce98aec0276fe"
+    },
+    {
+      "id": "sdd1-bitplanes-2-context-2",
+      "chip": "sdd1",
+      "mode": 2,
+      "first_byte": 160,
+      "output_bytes": 64,
+      "expected_hex": "2807d5ff7b9db5c4a5c747f341fb49f1a43fe97faa79bcf39cfbb43f95dfb5ae497b56085e7f9391b7c3e5f7eb37adf3982e9bae73a1928c961c93deb11f97fe"
+    },
+    {
+      "id": "sdd1-bitplanes-3-context-3",
+      "chip": "sdd1",
+      "mode": 3,
+      "first_byte": 240,
+      "output_bytes": 64,
+      "expected_hex": "1029153f04a33c92299201f620fa49db9a8fb2a5582ce2605fc0c2e2830a2a2bc0f779b9aebe63b86b5091553026b226a8202833b3728ad18cef4ceb1409850a"
+    },
+    {
+      "id": "spc7110-mode-0-1bpp",
+      "chip": "spc7110",
+      "mode": 0,
+      "first_byte": null,
+      "output_bytes": 64,
+      "expected_hex": "5db8f0155da8e0643f8983dc366583c03e7c82c1df7448c9856438d9a1441cf1b14d08f2974e00f39d36298bf6363481863617a9aaf5f74942fcf76b6abeae43"
+    },
+    {
+      "id": "spc7110-mode-1-2bpp",
+      "chip": "spc7110",
+      "mode": 1,
+      "first_byte": null,
+      "output_bytes": 64,
+      "expected_hex": "3986f5a5401f11eaef2f5cf7295b72a5a35280cb5698c0572b824f00b44170c7816bd007c5dbdcd6b014e36457a86aed01fbfc7e00574a858f56246a8fe07674"
+    },
+    {
+      "id": "spc7110-mode-2-4bpp",
+      "chip": "spc7110",
+      "mode": 2,
+      "first_byte": null,
+      "output_bytes": 64,
+      "expected_hex": "6dc11b23e72c5850bfd1bd95b7746c6214f3d3aa56a87ae1a25818eb23cd5c2adbc7d5246d831b28a7d39a24d66d973d305dc27028ca87328d64599696a3418e"
+    }
+  ]
+}

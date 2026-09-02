@@ -149,9 +149,11 @@ fn makeCart(
         .had_copier_header = false,
         .obc1_device = if (enhancement == .obc1) .{} else null,
         .srtc_device = if (enhancement == .srtc) .{} else null,
+        .spc7110_device = if (enhancement == .spc7110_epson_rtc) .{ .has_rtc = true } else null,
     };
     if (result.obc1_device) |*device| try device.power(result.sram_storage);
     if (result.srtc_device) |*device| device.power();
+    if (result.spc7110_device) |*device| device.power();
     return result;
 }
 
@@ -269,11 +271,11 @@ test "OBC-1 selectors and object bytes restart through exact battery persistence
 
 test "RTC record round trips chip registers latch halt overflow and checksum" {
     var state = core.persistence.RtcState.init(.epson);
-    for (&state.registers, 0..) |*byte, index| byte.* = @truncate(index * 7 + 1);
-    for (&state.latched, 0..) |*byte, index| byte.* = @truncate(index * 11 + 3);
+    state.registers = .{ 8, 5, 9, 5, 3, 2, 9, 2, 2, 0, 4, 2, 4, 2, 0, 6 };
+    state.latched = state.registers;
     state.halted = true;
     state.overflow = true;
-    state.pending_catchup_seconds = 12345;
+    state.pending_catchup_seconds = 0;
     const record = core.persistence.RtcRecord{
         .state = state,
         .wall_anchor_seconds = 1_800_000_000,
@@ -327,6 +329,37 @@ test "S-RTC codec rejects checksum-valid calendar latch and halt corruption prec
     invalid_halt.halted = true;
     core.persistence.encodeRtc(.{ .state = invalid_halt, .wall_anchor_seconds = 1, .monotonic_anchor_ns = 2, .generation = 3 }, &encoded);
     try std.testing.expectError(error.InvalidSrtcHaltState, core.persistence.decodeRtc(encoded[0..]));
+}
+
+test "Epson codec rejects checksum-valid calendar weekday latch control and halt corruption precisely" {
+    var state = runningEpsonState();
+    var encoded: [core.persistence.rtc_record_bytes]u8 = undefined;
+
+    var invalid_calendar = state;
+    invalid_calendar.registers[8] = 0;
+    invalid_calendar.registers[9] = 0;
+    core.persistence.encodeRtc(.{ .state = invalid_calendar, .wall_anchor_seconds = 1, .monotonic_anchor_ns = 2, .generation = 3 }, &encoded);
+    try std.testing.expectError(error.InvalidEpsonCalendar, core.persistence.decodeRtc(encoded[0..]));
+
+    var invalid_weekday = state;
+    invalid_weekday.registers[12] = 7;
+    core.persistence.encodeRtc(.{ .state = invalid_weekday, .wall_anchor_seconds = 1, .monotonic_anchor_ns = 2, .generation = 3 }, &encoded);
+    try std.testing.expectError(error.InvalidEpsonWeekday, core.persistence.decodeRtc(encoded[0..]));
+
+    var invalid_latch = state;
+    invalid_latch.latched[6] = 0;
+    invalid_latch.latched[7] = 0;
+    core.persistence.encodeRtc(.{ .state = invalid_latch, .wall_anchor_seconds = 1, .monotonic_anchor_ns = 2, .generation = 3 }, &encoded);
+    try std.testing.expectError(error.InvalidEpsonLatch, core.persistence.decodeRtc(encoded[0..]));
+
+    var invalid_control = state;
+    invalid_control.registers[14] = 0x10;
+    core.persistence.encodeRtc(.{ .state = invalid_control, .wall_anchor_seconds = 1, .monotonic_anchor_ns = 2, .generation = 3 }, &encoded);
+    try std.testing.expectError(error.InvalidEpsonControl, core.persistence.decodeRtc(encoded[0..]));
+
+    state.halted = true;
+    core.persistence.encodeRtc(.{ .state = state, .wall_anchor_seconds = 1, .monotonic_anchor_ns = 2, .generation = 3 }, &encoded);
+    try std.testing.expectError(error.InvalidEpsonHaltState, core.persistence.decodeRtc(encoded[0..]));
 }
 
 test "RTC catch-up is forward-only bounded halt-aware and overflow-visible" {
@@ -400,4 +433,55 @@ test "RTC session validates chip identity and queues only forward elapsed time" 
     defer wrong_chip.deinit();
     try std.testing.expectError(error.RtcChipMismatch, core.persistence.Session.open(&wrong_chip, fake.backend(), 13, 1_300, 4_000));
     try std.testing.expect(!fake.held);
+}
+
+test "Epson RTC session applies offline time once and restarts exact state" {
+    const allocator = std.testing.allocator;
+    var fake = try FakeBackend.init(allocator);
+    defer fake.deinit();
+    const stored = runningEpsonState();
+    core.persistence.encodeRtc(.{
+        .state = stored,
+        .wall_anchor_seconds = 1_000,
+        .monotonic_anchor_ns = 2_000,
+        .generation = 1,
+    }, &fake.rtc);
+    fake.has_rtc = true;
+
+    var cart = try makeCart(allocator, 8 * 1024, true, .spc7110_epson_rtc, 0x62);
+    defer cart.deinit();
+    var session = try core.persistence.Session.open(&cart, fake.backend(), 31, 1_002, 3_000);
+    const advanced = try core.epson_rtc.calendarFromRegisters(&session.peekRtcState().?.registers);
+    try std.testing.expectEqual(@as(u8, 0), advanced.second);
+    try std.testing.expectEqual(@as(u8, 0), advanced.minute);
+    try std.testing.expectEqual(@as(u8, 0), advanced.hour);
+    try std.testing.expectEqual(@as(u8, 1), advanced.day);
+    try std.testing.expectEqual(@as(u8, 3), advanced.month);
+    try std.testing.expectEqual(@as(u64, 0), session.peekRtcState().?.pending_catchup_seconds);
+    try session.close(&cart, 31, 1_002, 3_000);
+
+    const persisted = try core.persistence.decodeRtc(fake.rtc[0..]);
+    try std.testing.expectEqualSlices(u8, session.peekRtcState().?.registers[0..], persisted.state.registers[0..]);
+    var restarted_cart = try makeCart(allocator, 8 * 1024, true, .spc7110_epson_rtc, 0x62);
+    defer restarted_cart.deinit();
+    var restarted = try core.persistence.Session.open(&restarted_cart, fake.backend(), 32, 1_002, 4_000);
+    const restarted_calendar = try core.epson_rtc.calendarFromRegisters(&restarted.peekRtcState().?.registers);
+    try std.testing.expectEqual(advanced, restarted_calendar);
+    try restarted.close(&restarted_cart, 32, 1_002, 4_000);
+
+    var backwards_cart = try makeCart(allocator, 8 * 1024, true, .spc7110_epson_rtc, 0x62);
+    defer backwards_cart.deinit();
+    var backwards = try core.persistence.Session.open(&backwards_cart, fake.backend(), 33, 900, 5_000);
+    try std.testing.expect(backwards.offline_adjustment.backwards);
+    const backwards_calendar = try core.epson_rtc.calendarFromRegisters(&backwards.peekRtcState().?.registers);
+    try std.testing.expectEqual(restarted_calendar, backwards_calendar);
+    try backwards.close(&backwards_cart, 33, 900, 5_000);
+}
+
+fn runningEpsonState() core.persistence.RtcState {
+    var result = core.persistence.RtcState.init(.epson);
+    result.registers = .{ 8, 5, 9, 5, 3, 2, 9, 2, 2, 0, 4, 2, 4, 2, 0, 4 };
+    result.latched = result.registers;
+    result.halted = false;
+    return result;
 }

@@ -131,7 +131,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     // 5A22, DMA/HDMA, PPU, S-SMP and S-DSP are qualified independently;
     // productive execution is rejected until the runtime-machine/window-host
     // stage composes those owners.
-    sys.println("R4SNES: cartridge, OBC-1/S-RTC, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.11.0.");
+    sys.println("R4SNES: cartridge, OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC, CPU, 5A22, complete PPU, SPC700 and S-DSP recognized; productive runtime-machine integration is not implemented in 0.12.0.");
     return error_not_implemented;
 }
 
@@ -143,8 +143,12 @@ fn cartridgeError(fault: anyerror) []const u8 {
         error.UnsupportedBoard => "R4SNES: cartridge board is unknown or unsupported.",
         error.UnsupportedOBC1Revision => "R4SNES: cartridge declares an unsupported OBC-1 revision.",
         error.UnsupportedSrtcRevision => "R4SNES: cartridge declares an unsupported S-RTC revision.",
+        error.UnsupportedSdd1Revision => "R4SNES: cartridge declares an unsupported S-DD1 revision.",
+        error.UnsupportedSpc7110Revision => "R4SNES: cartridge declares an unsupported SPC7110 revision.",
         error.ContradictoryOBC1Board => "R4SNES: OBC-1 header contradicts its LoROM, battery or 8-KiB RAM profile.",
         error.ContradictorySrtcBoard => "R4SNES: S-RTC header contradicts its ExHiROM, battery or save-RAM profile.",
+        error.ContradictorySdd1Board => "R4SNES: S-DD1 header contradicts its LoROM, battery or 32-KiB RAM profile.",
+        error.ContradictorySpc7110Board => "R4SNES: SPC7110 header contradicts its HiROM, battery, 8-KiB RAM or data-ROM profile.",
         error.UnaddressableBoardGeometry => "R4SNES: cartridge board geometry exceeds its implemented address space.",
         error.OutOfMemory => "R4SNES: cartridge memory could not be allocated.",
         else => "R4SNES: cartridge validation failed.",
@@ -173,10 +177,27 @@ fn selfTest(app: *r4os.App) i32 {
     rtc.power();
     if (!rtc.write(0x002801, 0x0E) or !rtc.write(0x002801, 0x04) or !rtc.halted)
         return error_not_implemented;
+    var stream: [256]u8 = undefined;
+    fillEnhancementSelfTest(&stream);
+    stream[0] = 0;
+    var sdd1 = core.sdd1.Decompressor{};
+    sdd1.init(stream[0..], .{ 0, 1, 2, 3 }, 0xC00000);
+    if (sdd1.read(stream[0..], .{ 0, 1, 2, 3 }) != 0x28 or
+        sdd1.read(stream[0..], .{ 0, 1, 2, 3 }) != 0x07)
+        return error_not_implemented;
+    fillEnhancementSelfTest(&stream);
+    var spc7110 = core.spc7110.Decompressor{};
+    spc7110.init(stream[0..], 0, 0) catch return error_not_implemented;
+    if ((spc7110.decode(stream[0..]) & 0xFF) != 0x5D) return error_not_implemented;
+    var epson = core.epson_rtc.Device{};
+    epson.power();
+    if (!epson.isHalted() or !epson.writePort(0x4840, 1) or
+        (epson.readPort(0x4842, 0) & 0x80) == 0)
+        return error_not_implemented;
     machine.close();
     machine.close();
     if (!machine.closed or machine.smp.dsp.capture_enabled or machine.smp.dsp.queuedFrames() != 0) return error_not_implemented;
-    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
+    sys.println("R4SNES SELFTEST OK: OBC-1/S-RTC/S-DD1/SPC7110/Epson-RTC, CPU, timed 5A22, byte-bounded DMA, complete PPU, SPC700/S-SMP and cycle-clocked S-DSP owners isolated; incomplete runtime-machine execution safely rejected.");
     return 0;
 }
 
@@ -290,6 +311,32 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     if (!std.mem.eql(u8, rtc_store.failureStageName(), "atomic_recover") or
         rtc_store.failureCode() != r4os.abi.file_stream_error_size_mismatch)
         return error.PartialRecoveryFailureMismatch;
+
+    var epson_cart = try makePersistenceCart(allocator, 8192, true, .spc7110_epson_rtc, 0x75);
+    defer epson_cart.deinit();
+    var epson_store = core.persistence_r4os.Store.init(files);
+    epson_store.removeTestFiles(&epson_cart.identity);
+    defer epson_store.removeTestFiles(&epson_cart.identity);
+    var epson_session = try core.persistence.Session.open(&epson_cart, epson_store.backend(), generation + 6, wall, monotonic);
+    const epson_state = epson_session.rtcState() orelse return error.EpsonRtcMissing;
+    setEpsonCalendar(epson_state);
+    try epson_session.close(&epson_cart, generation + 6, wall, monotonic);
+    var reopened_epson_cart = try makePersistenceCart(allocator, 8192, true, .spc7110_epson_rtc, 0x75);
+    defer reopened_epson_cart.deinit();
+    var reopened_epson = try core.persistence.Session.open(&reopened_epson_cart, epson_store.backend(), generation + 7, wall, monotonic);
+    const reopened_epson_state = reopened_epson.peekRtcState() orelse return error.EpsonRtcMissing;
+    if (reopened_epson_state.chip != .epson or reopened_epson_state.registers[0] != 8 or
+        reopened_epson_state.registers[1] != 5 or reopened_epson_state.registers[15] != 4)
+        return error.EpsonRtcRecoveryMismatch;
+    try reopened_epson.close(&reopened_epson_cart, generation + 7, wall, monotonic);
+}
+
+fn fillEnhancementSelfTest(bytes: *[256]u8) void {
+    var state: u32 = 0x12345678;
+    for (bytes) |*byte| {
+        state = state *% 1664525 +% 1013904223;
+        byte.* = @truncate(state >> 24);
+    }
 }
 
 fn setSrtcCalendar(state: *core.persistence.RtcState, live_second: u8, latched_second: u8) void {
@@ -313,6 +360,13 @@ fn setSrtcCalendar(state: *core.persistence.RtcState, live_second: u8, latched_s
         .weekday = weekday,
     }, &state.latched);
     state.halted = false;
+}
+
+fn setEpsonCalendar(state: *core.persistence.RtcState) void {
+    state.registers = .{ 8, 5, 9, 5, 3, 2, 9, 2, 2, 0, 4, 2, 4, 2, 0, 4 };
+    state.latched = state.registers;
+    state.halted = false;
+    state.pending_catchup_seconds = 0;
 }
 
 fn makePersistenceCart(

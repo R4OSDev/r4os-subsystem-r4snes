@@ -228,8 +228,8 @@ test "capability matrix names every planned firmware and excluded family without
         .{ .kind = .none, .disposition = .base_implemented },
         .{ .kind = .obc1, .disposition = .base_implemented },
         .{ .kind = .srtc, .disposition = .base_implemented },
-        .{ .kind = .sdd1, .disposition = .planned },
-        .{ .kind = .spc7110_epson_rtc, .disposition = .planned },
+        .{ .kind = .sdd1, .disposition = .base_implemented },
+        .{ .kind = .spc7110_epson_rtc, .disposition = .base_implemented },
         .{ .kind = .super_fx, .disposition = .planned },
         .{ .kind = .sa1, .disposition = .planned },
         .{ .kind = .cx4, .disposition = .planned },
@@ -244,7 +244,9 @@ test "capability matrix names every planned firmware and excluded family without
     for (expected) |entry| {
         const capability = core.board.capability(entry.kind);
         try std.testing.expectEqual(entry.disposition, capability.disposition);
-        if (entry.kind != .none and entry.kind != .obc1 and entry.kind != .srtc) {
+        if (entry.kind != .none and entry.kind != .obc1 and entry.kind != .srtc and
+            entry.kind != .sdd1 and entry.kind != .spc7110_epson_rtc)
+        {
             try std.testing.expect(capability.disposition != .base_implemented);
         }
     }
