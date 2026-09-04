@@ -226,6 +226,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_wav_analyzer.step);
     test_step.dependOn(&run_maturity.step);
 
+    const unit_step = b.step("unit-test", "Run bounded R4SNES owner tests without maturity or performance profiles");
+    unit_step.dependOn(&run_unit_tests.step);
+    unit_step.dependOn(&run_wav_analyzer.step);
+
     const performance_step = b.step("performance-test", "Measure one deterministic NTSC guest second in ReleaseFast");
     performance_step.dependOn(&run_performance.step);
 
