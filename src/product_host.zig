@@ -461,15 +461,17 @@ pub const Guest = struct {
         if (result.fault != null) return runtime_api.StepResult.fail(runtime_error_machine)
             .withOperations(result.granted_master_cycles);
         if (self.save_session) |*session| {
-            const point = self.time.now();
-            const flushed = session.maybeFlush(
-                cart,
-                machine.clock.master_cycles,
-                point.wall_seconds,
-                point.monotonic_ns,
-            ) catch return runtime_api.StepResult.fail(runtime_error_persistence)
-                .withOperations(result.granted_master_cycles);
-            if (flushed) self.stats.flushes +%= 1;
+            if (session.enabled) {
+                const point = self.time.now();
+                const flushed = session.maybeFlush(
+                    cart,
+                    machine.clock.master_cycles,
+                    point.wall_seconds,
+                    point.monotonic_ns,
+                ) catch return runtime_api.StepResult.fail(runtime_error_persistence)
+                    .withOperations(result.granted_master_cycles);
+                if (flushed) self.stats.flushes +%= 1;
+            }
         }
         if (self.completion_witness) |witness| {
             if (machine.bus.wram[witness.wram_index] == witness.value and

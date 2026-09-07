@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.22.4 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.22.5 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU in a productive
 `R4SUBSYS1` application host. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,

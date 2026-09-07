@@ -8,6 +8,7 @@ const runtime_api = r4os.subsystem_runtime;
 const FakeTime = struct {
     wall: ?i64 = 1_000,
     monotonic: u64 = 10,
+    calls: u32 = 0,
 
     fn source(self: *FakeTime) product.TimeSource {
         return .{ .context = self, .now_fn = now };
@@ -15,6 +16,7 @@ const FakeTime = struct {
 
     fn now(context: *anyopaque) product.TimePoint {
         const self: *FakeTime = @ptrCast(@alignCast(context));
+        self.calls += 1;
         return .{ .wall_seconds = self.wall, .monotonic_ns = self.monotonic };
     }
 };
@@ -31,6 +33,7 @@ const FakeStore = struct {
     acquire_calls: u32 = 0,
     release_calls: u32 = 0,
     write_calls: u32 = 0,
+    poll_calls: u32 = 0,
 
     fn backend(self: *FakeStore) core.persistence.Backend {
         return .{
@@ -39,7 +42,13 @@ const FakeStore = struct {
             .release_fn = release,
             .read_exact_fn = readExact,
             .write_atomic_fn = writeAtomic,
+            .poll_fn = poll,
         };
+    }
+
+    fn poll(context: *anyopaque) core.persistence.BackendError!void {
+        const self: *FakeStore = @ptrCast(@alignCast(context));
+        self.poll_calls += 1;
     }
 
     fn acquire(context: *anyopaque, digest: *const [core.persistence.digest_bytes]u8, generation: u64) core.persistence.BackendError!void {
@@ -171,6 +180,7 @@ test "private product guests isolate machine input video audio and bounded runti
     _ = first.driver().audioFeedback(.{ .state = .ready, .muted = false });
     try std.testing.expect(first.machine.?.smp.dsp.capture_enabled);
 
+    const time_calls_before_slices = time.calls;
     var first_runtime = try makeRuntime();
     var second_runtime = try makeRuntime();
     var first_host = IdleHost{};
@@ -187,6 +197,9 @@ test "private product guests isolate machine input video audio and bounded runti
     try std.testing.expect(second.stats.maximum_slice_grant <= product.slice_budget_master_cycles);
     try std.testing.expect(first.machine.?.ppu.frame_generation != 0);
     try std.testing.expect(second.machine.?.ppu.frame_generation != 0);
+
+    try std.testing.expectEqual(time_calls_before_slices, time.calls);
+    try std.testing.expectEqual(@as(u32, 0), store.poll_calls);
 
     const first_before_pause = first.machine.?.clock.master_cycles;
     first_runtime.request(.pause, tick, first.driver());
@@ -270,6 +283,13 @@ test "same battery identity is exclusive reset preserves SAV and close failure s
         .image = try makeRom(allocator, "R4SNES SAVE", true, 0x33),
     }));
     try std.testing.expect(!rejected.resourcesOpen());
+
+    const time_calls_before_slices = time.calls;
+    const polls_before_slices = store.poll_calls;
+    _ = owner.driver().step(product.slice_budget_master_cycles, 0);
+    _ = owner.driver().step(product.slice_budget_master_cycles, std.time.ns_per_ms);
+    try std.testing.expectEqual(time_calls_before_slices + 2, time.calls);
+    try std.testing.expectEqual(polls_before_slices + 2, store.poll_calls);
 
     owner.cartridge.?.writeSram(0, 0x73);
     const generation = owner.generation;
