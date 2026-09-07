@@ -308,7 +308,7 @@ noinline fn runProduct(app: *r4os.App) i32 {
         sys.write("R4SNES: persistence ");
         sys.println(core.persistence.save_root);
     }
-    sys.println("R4SNES: host controls F5=pause F6=resume F8=reset F9=mute F10=unmute");
+    sys.println("R4SNES: host controls F5=pause F6=resume F7=FPS on/off F8=reset F9=mute F10=unmute");
     const exit_code = runtime.run(&sys, guest.driver(), runtime_host.driver());
     const runtime_state = runtime.state;
     const audio_degraded = runtime.audio.state == .degraded;

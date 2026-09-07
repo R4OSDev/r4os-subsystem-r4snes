@@ -29,6 +29,7 @@ pub const reset_error_video: i32 = -9747;
 // USB HID keyboard usages. These deliberately do not overlap guest controls.
 pub const physical_usage_f5: u32 = 0x3E;
 pub const physical_usage_f6: u32 = 0x3F;
+pub const physical_usage_f7: u32 = 0x40;
 pub const physical_usage_f8: u32 = 0x41;
 pub const physical_usage_f9: u32 = 0x42;
 pub const physical_usage_f10: u32 = 0x43;
@@ -514,6 +515,73 @@ const TitleState = struct {
     }
 };
 
+pub const FpsDisplay = struct {
+    pub const bounds = host_api.Rect{ .x = 8, .y = 8, .w = 104, .h = 24 };
+    enabled: bool = false,
+    key_held: bool = false,
+    anchored: bool = false,
+    anchor_tick: u64 = 0,
+    anchor_frame: u64 = 0,
+    generation: u64 = 0,
+    paused: bool = false,
+    storage: [24]u8 = undefined,
+    text_len: usize = 0,
+
+    pub fn key(self: *FpsDisplay, down: bool, repeated: bool, focused: bool) bool {
+        if (!down) {
+            self.key_held = false;
+            return false;
+        }
+        if (repeated or self.key_held or !focused) return false;
+        self.key_held = true;
+        self.enabled = !self.enabled;
+        self.anchored = false;
+        return true;
+    }
+
+    pub fn text(self: *const FpsDisplay) []const u8 {
+        return self.storage[0..self.text_len];
+    }
+
+    fn setText(self: *FpsDisplay, value: []const u8) bool {
+        if (std.mem.eql(u8, self.text(), value)) return false;
+        @memcpy(self.storage[0..value.len], value);
+        self.text_len = value.len;
+        return true;
+    }
+
+    /// Count completed emulation frames against real host time, including
+    /// frames whose pixels did not change. No clock call is made here.
+    pub fn sample(self: *FpsDisplay, tick: u64, hz: u64, frame: u64, generation: u64, paused: bool) bool {
+        if (!self.enabled) return false;
+        if (!self.anchored or generation != self.generation or paused != self.paused or
+            tick < self.anchor_tick or frame < self.anchor_frame)
+        {
+            self.anchored = true;
+            self.anchor_tick = tick;
+            self.anchor_frame = frame;
+            self.generation = generation;
+            self.paused = paused;
+            return self.setText(if (paused) "FPS: Pause" else "FPS: --.-");
+        }
+        const elapsed = tick - self.anchor_tick;
+        if (paused or hz == 0 or elapsed < @max(1, hz / 2 + hz % 2)) return false;
+        const tenths: u32 = @intCast(@min(99_999, (@as(u128, frame - self.anchor_frame) * hz * 10 + elapsed / 2) / elapsed));
+        self.anchor_tick = tick;
+        self.anchor_frame = frame;
+        var formatted: [24]u8 = undefined;
+        const value = std.fmt.bufPrint(&formatted, "FPS: {d}.{d}", .{ tenths / 10, tenths % 10 }) catch unreachable;
+        return self.setText(value);
+    }
+
+    pub fn commands(self: *const FpsDisplay) [2]r4os.abi.GuiFrameCommand {
+        return .{
+            .{ .kind = r4os.abi.gui_frame_command_kind_rect, .x = bounds.x, .y = bounds.y, .w = bounds.w, .h = bounds.h, .rgb = 0x101010 },
+            .{ .kind = r4os.abi.gui_frame_command_kind_text, .x = bounds.x + 4, .y = bounds.y + 4, .fg = 0xFFFFFF, .bg = 0x101010, .font_id = r4os.abi.gui_font_builtin_id, .text_w = @intCast(self.text_len * r4os.gui.font_w), .text_h = r4os.gui.font_h, .baseline = r4os.gui.font_h - 1, .line_height = r4os.gui.font_h, .resource_bytes = @intCast(self.text_len) },
+        };
+    }
+};
+
 /// Translates ordered window events only. The shared Runtime performs the one
 /// bounded guest slice after the input batch; no guest scheduler lives here.
 pub const WindowHost = struct {
@@ -525,6 +593,7 @@ pub const WindowHost = struct {
     initial_present_pending: bool = true,
     title_state: ?TitleState = null,
     title_storage: [192]u8 = .{0} ** 192,
+    fps: FpsDisplay = .{},
 
     pub fn init(
         sys: r4os.r4sys.Context,
@@ -573,6 +642,14 @@ pub const WindowHost = struct {
     fn poll(context: *anyopaque) runtime_api.HostPollResult {
         const self: *WindowHost = @ptrCast(@alignCast(context));
         self.applyTitle();
+        if (self.fps.enabled) {
+            if (self.guest.machine) |machine| {
+                if (self.fps.sample(self.runtime.clock.last_host_tick, self.runtime.clock.monotonic_hz, machine.clock.frame, self.guest.generation, self.runtime.state == .paused)) {
+                    self.window.video.invalidateClient(FpsDisplay.bounds);
+                    return .present;
+                }
+            }
+        }
         if (self.initial_present_pending) {
             self.initial_present_pending = false;
             return .present;
@@ -589,6 +666,7 @@ pub const WindowHost = struct {
             },
             .focus => |focus| blk: {
                 if (focus.focused) self.guest.focusGained(focus.tick) else self.guest.focusLost(focus.tick);
+                if (!focus.focused) self.fps.key_held = false;
                 break :blk if (focus.focused) .present else .handled;
             },
             .physical_key_down => |key| self.physical(key, true),
@@ -599,6 +677,17 @@ pub const WindowHost = struct {
 
     fn physical(self: *WindowHost, key: host_api.PhysicalKeyEvent, down: bool) runtime_api.HostPollResult {
         const repeat = (key.flags & r4os.abi.physical_key_flag_repeat) != 0;
+        if (key.key == physical_usage_f7) {
+            if (!self.fps.key(down, repeat, self.window.input.focused)) return .ignored;
+            if (self.fps.enabled) {
+                if (self.guest.machine) |machine| {
+                    _ = self.fps.sample(self.runtime.clock.last_host_tick, self.runtime.clock.monotonic_hz, machine.clock.frame, self.guest.generation, self.runtime.state == .paused);
+                }
+            }
+            self.window.overlay = if (self.fps.enabled) .{ .context = self, .append_fn = appendFps } else null;
+            self.window.video.invalidateClient(FpsDisplay.bounds);
+            return .present;
+        }
         if (actionForPhysicalUsage(key.key)) |action| {
             if (!down or repeat) return .ignored;
             switch (action) {
@@ -634,6 +723,12 @@ pub const WindowHost = struct {
             .presented => runtime_api.host_presented,
         };
     }
+
+    fn appendFps(context: *anyopaque) i32 {
+        const self: *WindowHost = @ptrCast(@alignCast(context));
+        const commands = self.fps.commands();
+        return self.window.draw.guiFrameAppend(&commands, self.fps.text());
+    }
 };
 
 test "host actions are explicit and never overlap twelve guest controls" {
@@ -643,4 +738,44 @@ test "host actions are explicit and never overlap twelve guest controls" {
     try std.testing.expectEqual(HostAction.mute, actionForPhysicalUsage(physical_usage_f9).?);
     try std.testing.expectEqual(HostAction.unmute, actionForPhysicalUsage(physical_usage_f10).?);
     for (host_adapter.bindings) |binding| try std.testing.expect(actionForPhysicalUsage(binding.usage) == null);
+    for (host_adapter.bindings) |binding| try std.testing.expect(binding.usage != physical_usage_f7);
+}
+
+test "FPS display defaults off and toggles once per focused physical press" {
+    var fps = FpsDisplay{};
+    try std.testing.expect(!fps.enabled);
+    try std.testing.expect(!fps.sample(500, 1000, 30, 1, false));
+    try std.testing.expect(!fps.anchored);
+    try std.testing.expect(!fps.key(true, false, false));
+    try std.testing.expect(fps.key(true, false, true));
+    try std.testing.expect(fps.enabled);
+    try std.testing.expect(!fps.key(true, true, true));
+    try std.testing.expect(!fps.key(true, false, true));
+    try std.testing.expect(!fps.key(false, false, true));
+    try std.testing.expect(fps.key(true, false, true));
+    try std.testing.expect(!fps.enabled);
+}
+
+test "FPS display measures real time and resets pause and cartridge generations" {
+    var fps = FpsDisplay{ .enabled = true };
+    try std.testing.expect(fps.sample(1000, 1000, 100, 1, false));
+    try std.testing.expect(!fps.sample(1499, 1000, 130, 1, false));
+    try std.testing.expect(fps.sample(1500, 1000, 130, 1, false));
+    try std.testing.expectEqualStrings("FPS: 60.0", fps.text());
+    try std.testing.expect(fps.sample(2000, 1000, 132, 1, false));
+    try std.testing.expectEqualStrings("FPS: 4.0", fps.text());
+    try std.testing.expect(fps.sample(2100, 1000, 138, 1, true));
+    try std.testing.expectEqualStrings("FPS: Pause", fps.text());
+    try std.testing.expect(!fps.sample(10000, 1000, 138, 1, true));
+    try std.testing.expect(fps.sample(10000, 1000, 138, 1, false));
+    try std.testing.expect(fps.sample(10500, 1000, 168, 1, false));
+    try std.testing.expectEqualStrings("FPS: 60.0", fps.text());
+    try std.testing.expect(fps.sample(11000, 1000, 0, 2, false));
+    try std.testing.expect(fps.sample(11500, 1000, 25, 2, false));
+    try std.testing.expectEqualStrings("FPS: 50.0", fps.text());
+    const commands = fps.commands();
+    try std.testing.expectEqual(@as(i32, 8), commands[0].x);
+    try std.testing.expectEqual(@as(i32, 8), commands[0].y);
+    try std.testing.expect(commands[1].text_w + 8 <= commands[0].w);
+    try std.testing.expectEqual(fps.text().len, commands[1].resource_bytes);
 }
