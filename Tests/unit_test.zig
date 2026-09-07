@@ -59,6 +59,14 @@ test "plain and copier-header images normalize byte-identically without source m
     try std.testing.expect(first.header.checksum_matches);
     try std.testing.expectEqual(@as(usize, 2048), first.sram().len);
     try std.testing.expect(first.board.battery);
+    var borrowed = try core.cartridge.Cartridge.borrowWithOptions(allocator, headed, .{}, null);
+    defer borrowed.deinit();
+    var reset = try core.cartridge.Cartridge.borrowWithOptions(allocator, headed, .{}, &borrowed);
+    defer reset.deinit();
+    try std.testing.expectEqual(headed[512..].ptr, borrowed.rom_storage.ptr);
+    try std.testing.expectEqual(borrowed.rom_storage.ptr, reset.rom_storage.ptr);
+    try std.testing.expectEqualSlices(u8, &first.identity, &reset.identity);
+    try std.testing.expect(reset.header.checksum_matches and reset.had_copier_header);
 }
 
 test "all four mappings and three region profiles classify reproducibly" {

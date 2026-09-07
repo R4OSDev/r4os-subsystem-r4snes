@@ -9,6 +9,11 @@ const Config = struct {
         "C:\\R4OS\\SUBSYSTEMS\\r4os.snes\\SAVE",
     };
     pub const rtc_record_bytes = persistence.rtc_record_bytes;
+    pub const delta_record_bytes = persistence.delta.record_bytes;
+
+    pub fn validateDelta(bytes: []const u8) bool {
+        return persistence.delta.validate(bytes);
+    }
 
     pub fn validateRtc(bytes: []const u8) bool {
         _ = persistence.decodeRtc(bytes) catch return false;

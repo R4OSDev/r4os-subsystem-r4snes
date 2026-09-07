@@ -56,10 +56,10 @@ test "Super FX headers select GSU-2 compatibly and explicit metadata enforces GS
     defer allocator.free(pal_image);
     var pal_cart = try core.cartridge.Cartridge.parse(allocator, pal_image);
     defer pal_cart.deinit();
-    default_cart.rom_storage[0] = 0xD1;
-    default_cart.rom_storage[1] = 0x00;
-    pal_cart.rom_storage[0] = 0xD1;
-    pal_cart.rom_storage[1] = 0x00;
+    @constCast(default_cart.rom_storage)[0] = 0xD1;
+    @constCast(default_cart.rom_storage)[1] = 0x00;
+    @constCast(pal_cart.rom_storage)[0] = 0xD1;
+    @constCast(pal_cart.rom_storage)[1] = 0x00;
     default_cart.superfx_device.?.scmr = 0x18;
     pal_cart.superfx_device.?.scmr = 0x18;
     startDevice(&default_cart.superfx_device.?, default_cart.sram_storage, 0);
@@ -76,7 +76,7 @@ test "production cartridge bus owns GSU registers ROM RAM arbitration and IRQ ac
     defer allocator.free(image);
     var cart = try core.cartridge.Cartridge.parse(allocator, image);
     defer cart.deinit();
-    cart.rom_storage[0] = 0x00; // STOP after the documented startup pipeline NOP.
+    @constCast(cart.rom_storage)[0] = 0x00; // STOP after the documented startup pipeline NOP.
     cart.sram_storage[0] = 0x11;
 
     var bus = core.bus.Bus{};

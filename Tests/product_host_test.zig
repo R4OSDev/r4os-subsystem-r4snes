@@ -82,6 +82,7 @@ const FakeStore = struct {
                 if (self.sram_len != out.len) return .wrong_size;
                 @memcpy(out, self.sram[0..self.sram_len]);
             },
+            .sram_delta => return .missing,
             .rtc => {
                 if (!self.rtc_present) return .missing;
                 if (out.len != self.rtc.len) return .wrong_size;
@@ -107,6 +108,7 @@ const FakeStore = struct {
                 @memcpy(self.sram[0..bytes.len], bytes);
                 self.sram_len = bytes.len;
             },
+            .sram_delta => return error.Unsupported,
             .rtc => {
                 if (bytes.len != self.rtc.len) return error.Io;
                 @memcpy(&self.rtc, bytes);
@@ -305,7 +307,55 @@ test "same battery identity is exclusive reset preserves SAV and close failure s
     try std.testing.expectEqual(product.close_error_persistence, owner.close());
     try std.testing.expectEqual(@as(u64, 2), owner.stats.machine_destroys);
     try std.testing.expectEqual(@as(u64, 2), owner.stats.cartridge_destroys);
-    try std.testing.expectEqual(@as(u32, 2), store.release_calls);
+    try std.testing.expectEqual(@as(u32, 1), store.release_calls);
+}
+
+test "borrowed ROM reset keeps one source and failed preparation preserves the running guest" {
+    var allocations = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = allocations.allocator();
+    var store = FakeStore{};
+    var time = FakeTime{};
+    var guest = product.Guest.init(allocator, store.backend(), time.source(), 41);
+    try guest.openOwned(.{ .image = try makeRom(allocator, "BORROW RESET", true, 0x31) });
+    defer _ = guest.close();
+    const source = guest.source_image.?;
+    try std.testing.expectEqual(source.ptr, guest.cartridge.?.rom_storage.ptr);
+    try std.testing.expect(!guest.cartridge.?.owns_rom);
+    const machine = guest.machine.?;
+    const generation = guest.generation;
+    for (0..2) |failure_offset| {
+        allocations.fail_index = allocations.alloc_index + failure_offset;
+        try std.testing.expect(guest.reset() != 0);
+        try std.testing.expectEqual(machine, guest.machine.?);
+        try std.testing.expectEqual(generation, guest.generation);
+        try std.testing.expect(guest.runtime_guest_ready and store.owner);
+    }
+    allocations.fail_index = std.math.maxInt(usize);
+    guest.cartridge.?.writeSram(0, 0x67);
+    store.fail_writes = true;
+    try std.testing.expectEqual(product.reset_error_persistence, guest.reset());
+    try std.testing.expect(guest.runtime_guest_ready and store.owner);
+    try std.testing.expectEqual(machine, guest.machine.?);
+    try std.testing.expectEqual(@as(u8, 0x67), guest.cartridge.?.sram_storage[0]);
+    store.fail_writes = false;
+    var scratch: [r4os.subsystem_host.tile_max_pixels]u32 = undefined;
+    var presenter = try r4os.subsystem_host.Presenter.init(try guest.initialSurface(), &scratch);
+    try guest.attachVideo(&presenter);
+    guest.video.binding_generation = guest.generation + 1;
+    const old_pixels = presenter.surface.xrgb32Pixels().?.ptr;
+    try std.testing.expectEqual(product.reset_error_video, guest.reset());
+    try std.testing.expectEqual(machine, guest.machine.?);
+    try std.testing.expectEqual(old_pixels, presenter.surface.xrgb32Pixels().?.ptr);
+    try std.testing.expect(guest.runtime_guest_ready and store.owner);
+    guest.video.binding_generation = guest.generation;
+    const before = allocations.allocated_bytes;
+    const fresh_mutable_bytes = guest.cartridge.?.sram_storage.len + @sizeOf(core.machine.Machine);
+    try std.testing.expectEqual(@as(i32, 0), guest.reset());
+    try std.testing.expectEqual(fresh_mutable_bytes, allocations.allocated_bytes - before);
+    try std.testing.expectEqual(source.ptr, guest.cartridge.?.rom_storage.ptr);
+    try std.testing.expectEqual(@as(u32, 1), store.acquire_calls);
+    try std.testing.expectEqual(@as(u32, 0), store.release_calls);
+    std.debug.print("SNES live ROM bytes load/reset: {d}/{d}; maximum source including copier header=67109376\n", .{ source.len, source.len });
 }
 
 test "invalid cartridge releases its owned source without opening persistence" {

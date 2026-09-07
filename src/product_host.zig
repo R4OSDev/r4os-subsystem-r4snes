@@ -285,20 +285,8 @@ pub const Guest = struct {
         const old_machine = self.machine orelse return runtime_error_closed;
         const old_cart = if (self.cartridge) |*value| value else return runtime_error_closed;
 
-        // Release the old writer before re-opening the same identity. A reset
-        // thereby reuses the exact atomic persistence path without ever owning
-        // two leases for one cartridge.
-        self.runtime_guest.close();
-        self.runtime_guest_ready = false;
-        if (self.save_session) |*session| {
-            const point = self.time.now();
-            session.close(old_cart, self.save_generation, point.wall_seconds, point.monotonic_ns) catch
-                return reset_error_persistence;
-        }
-        self.save_session = null;
-        self.save_generation +%= 1;
-        if (self.save_generation == 0) self.save_generation = 1;
-
+        // Prepare all fallible state while the old machine and writer lease
+        // remain usable. The unchanged ROM and persistence identity are shared.
         var replacement_cart = self.parseCartridge() catch return reset_error_cartridge;
         var replacement_cart_owned = true;
         defer if (replacement_cart_owned) replacement_cart.deinit();
@@ -313,22 +301,20 @@ pub const Guest = struct {
         ) catch return reset_error_machine;
         var replacement_machine_powered = true;
         defer if (replacement_machine_powered) replacement_machine.close();
+        const next_generation = if (self.generation == std.math.maxInt(u64)) 1 else self.generation + 1;
+        var replacement_video = self.video;
+        var replacement_presenter: host_api.Presenter = undefined;
+        if (self.presenter) |presenter| {
+            replacement_presenter = presenter.*;
+            replacement_video.bind(&replacement_machine.ppu, &replacement_presenter, next_generation) catch return reset_error_video;
+        }
         const point = self.time.now();
-        var replacement_session = persistence.Session.open(
-            &replacement_cart,
-            self.backend,
-            self.save_generation,
-            point.wall_seconds,
-            point.monotonic_ns,
-        ) catch return reset_error_persistence;
-        var replacement_session_owned = true;
-        defer if (replacement_session_owned) replacement_session.close(
-            &replacement_cart,
-            self.save_generation,
-            point.wall_seconds,
-            point.monotonic_ns,
-        ) catch {};
+        if (self.save_session) |*session| {
+            session.flush(old_cart, point.wall_seconds, point.monotonic_ns) catch return reset_error_persistence;
+            session.restoreForReset(old_cart, &replacement_cart) catch return reset_error_persistence;
+        }
 
+        self.runtime_guest.close();
         old_machine.close();
         self.allocator.destroy(old_machine);
         self.stats.machine_destroys +%= 1;
@@ -341,11 +327,9 @@ pub const Guest = struct {
         replacement_machine_powered = false;
         replacement_machine_owned = false;
         self.stats.machine_creates +%= 1;
-        self.save_session = replacement_session;
-        replacement_session_owned = false;
+        if (self.save_session) |*session| session.last_flush_guest_tick = 0;
 
-        self.generation +%= 1;
-        if (self.generation == 0) self.generation = 1;
+        self.generation = next_generation;
         self.runtime_guest = runtime_adapter.Adapter.init(&replacement_machine.smp.dsp, .{
             .context = self,
             .step_fn = stepMachine,
@@ -355,7 +339,8 @@ pub const Guest = struct {
         self.last_effective_guest_ns = 0;
         _ = host_adapter.applyInput(&replacement_machine.controllers, 0, .reset);
         if (self.presenter) |presenter| {
-            self.video.bind(&replacement_machine.ppu, presenter, self.generation) catch return reset_error_video;
+            self.video = replacement_video;
+            presenter.* = replacement_presenter;
         }
         self.stats.resets +%= 1;
         return 0;
@@ -411,11 +396,11 @@ pub const Guest = struct {
     }
 
     fn parseCartridge(self: *Guest) !cartridge.Cartridge {
-        return cartridge.Cartridge.parseWithOptions(self.allocator, self.source_image orelse return error.NoSource, .{
+        return cartridge.Cartridge.borrowWithOptions(self.allocator, self.source_image orelse return error.NoSource, .{
             .nec_dsp_revision = self.source_nec_dsp_revision,
             .nec_dsp_firmware = self.source_nec_dsp_firmware,
             .st018_firmware = self.source_st018_firmware,
-        });
+        }, if (self.cartridge) |*cart| cart else null);
     }
 
     fn exactIpl(self: *Guest) ?[]const u8 {

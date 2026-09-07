@@ -105,7 +105,8 @@ pub const St018Requirement = struct {
 
 pub const Cartridge = struct {
     allocator: std.mem.Allocator,
-    rom_storage: []u8,
+    rom_storage: []const u8,
+    owns_rom: bool = true,
     sram_storage: []u8,
     identity: [32]u8,
     header: Header,
@@ -130,11 +131,25 @@ pub const Cartridge = struct {
     }
 
     pub fn parseWithOptions(allocator: std.mem.Allocator, source: []const u8, options: ParseOptions) !Cartridge {
+        return parseStorage(allocator, source, options, true, null);
+    }
+
+    /// Source and any appended firmware remain immutable and caller-owned until
+    /// all borrowed cartridges are destroyed. Reset may reuse its validated ROM.
+    pub fn borrowWithOptions(allocator: std.mem.Allocator, source: []const u8, options: ParseOptions, previous: ?*const Cartridge) !Cartridge {
+        return parseStorage(allocator, source, options, false, previous);
+    }
+
+    fn parseStorage(allocator: std.mem.Allocator, source: []const u8, options: ParseOptions, owns_rom: bool, previous: ?*const Cartridge) !Cartridge {
         const parts = try splitSource(source);
         const geometry = parts.geometry;
         const normalized_start: usize = if (geometry.copier_header) copier_header_size else 0;
         const normalized = parts.cartridge[normalized_start..];
-        const header = try selectHeader(normalized);
+        if (previous) |old| {
+            if (owns_rom or old.owns_rom or old.rom_storage.ptr != normalized.ptr or old.rom_storage.len != normalized.len)
+                return error.DifferentBorrowedSource;
+        }
+        const header = if (previous) |old| old.header else try selectHeader(normalized);
         const enhancement = board.enhancementForHeader(header.rom_type, header.map_mode);
         const capability = board.capability(enhancement);
         const has_nec_dsp = enhancement == .dsp1_family or enhancement == .st010_st011;
@@ -227,9 +242,8 @@ pub const Cartridge = struct {
             else => {},
         }
 
-        const rom_copy = try allocator.alloc(u8, normalized.len);
-        errdefer allocator.free(rom_copy);
-        @memcpy(rom_copy, normalized);
+        const rom_copy = if (owns_rom) try allocator.dupe(u8, normalized) else normalized;
+        errdefer if (owns_rom) allocator.free(rom_copy);
         const sram_copy = try allocator.alloc(u8, cartridge_ram_bytes);
         errdefer allocator.free(sram_copy);
         @memset(sram_copy, 0);
@@ -275,10 +289,11 @@ pub const Cartridge = struct {
         }
 
         var identity: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(normalized, &identity, .{});
+        if (previous) |old| identity = old.identity else std.crypto.hash.sha2.Sha256.hash(normalized, &identity, .{});
         var result = Cartridge{
             .allocator = allocator,
             .rom_storage = rom_copy,
+            .owns_rom = owns_rom,
             .sram_storage = sram_copy,
             .identity = identity,
             .header = header,
@@ -323,7 +338,7 @@ pub const Cartridge = struct {
         if (self.nec_dsp_device) |*device| device.close();
         if (self.st018_device) |*device| device.close();
         self.allocator.free(self.sram_storage);
-        self.allocator.free(self.rom_storage);
+        if (self.owns_rom) self.allocator.free(self.rom_storage);
         self.sram_storage = &.{};
         self.rom_storage = &.{};
         self.sram_dirty = false;

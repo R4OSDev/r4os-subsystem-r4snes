@@ -18,6 +18,15 @@ const FakeBackend = struct {
     last_generation: u64 = 0,
     fail_poll: bool = false,
     fail_write_after_publish: bool = false,
+    fail_before_publish: bool = false,
+    delta_bytes: [core.persistence.delta.record_bytes]u8 = undefined,
+    has_delta: bool = false,
+    asynchronous: bool = false,
+    queued: [8]?Snapshot = .{null} ** 8,
+    queued_count: usize = 0,
+    snapshot_bytes: usize = 0,
+    published_bytes: usize = 0,
+    const Snapshot = struct { kind: core.persistence.FileKind, bytes: []u8 };
 
     fn init(allocator: std.mem.Allocator) !FakeBackend {
         return .{
@@ -27,6 +36,7 @@ const FakeBackend = struct {
     }
 
     fn deinit(self: *FakeBackend) void {
+        for (self.queued[0..self.queued_count]) |job| self.allocator.free(job.?.bytes);
         self.allocator.free(self.sram);
         self.sram = &.{};
     }
@@ -39,6 +49,8 @@ const FakeBackend = struct {
             .read_exact_fn = readExact,
             .write_atomic_fn = writeAtomic,
             .poll_fn = poll,
+            .drain_fn = drain,
+            .pending_fn = pending,
         };
     }
 
@@ -55,7 +67,8 @@ const FakeBackend = struct {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
         self.release_calls += 1;
         if (!self.held or generation != self.last_generation or !std.mem.eql(u8, digest, &self.last_digest)) return error.Busy;
-        self.held = false;
+        defer self.held = false;
+        try drain(context);
     }
 
     fn readExact(
@@ -74,6 +87,11 @@ const FakeBackend = struct {
                 .wrong_size
             else blk: {
                 @memcpy(out, self.sram[0..self.sram_len]);
+                break :blk .ok;
+            },
+            .sram_delta => if (!self.has_delta) .missing else blk: {
+                if (out.len != self.delta_bytes.len) break :blk .wrong_size;
+                @memcpy(out, &self.delta_bytes);
                 break :blk .ok;
             },
             .rtc => if (!self.has_rtc)
@@ -96,6 +114,18 @@ const FakeBackend = struct {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
         self.write_calls += 1;
         self.last_digest = digest.*;
+        self.snapshot_bytes += bytes.len;
+        if (self.asynchronous) {
+            if (self.queued_count == self.queued.len) return error.Full;
+            self.queued[self.queued_count] = .{ .kind = kind, .bytes = self.allocator.dupe(u8, bytes) catch return error.Full };
+            self.queued_count += 1;
+            return;
+        }
+        try self.publish(kind, bytes);
+    }
+
+    fn publish(self: *FakeBackend, kind: core.persistence.FileKind, bytes: []const u8) core.persistence.BackendError!void {
+        if (self.fail_before_publish) return error.Io;
         switch (kind) {
             .sram => {
                 if (bytes.len > self.sram.len) return error.Full;
@@ -103,13 +133,36 @@ const FakeBackend = struct {
                 self.sram_len = bytes.len;
                 self.has_sram = true;
             },
+            .sram_delta => {
+                if (!core.persistence.delta.validate(bytes)) return error.Io;
+                @memcpy(&self.delta_bytes, bytes);
+                self.has_delta = true;
+            },
             .rtc => {
                 if (bytes.len != self.rtc.len) return error.Io;
                 @memcpy(self.rtc[0..], bytes);
                 self.has_rtc = true;
             },
         }
+        self.published_bytes += bytes.len;
         if (self.fail_write_after_publish) return error.Io;
+    }
+
+    fn drain(context: *anyopaque) core.persistence.BackendError!void {
+        const self: *FakeBackend = @ptrCast(@alignCast(context));
+        while (self.queued_count != 0) {
+            const job = self.queued[0].?;
+            try self.publish(job.kind, job.bytes);
+            self.allocator.free(job.bytes);
+            self.queued_count -= 1;
+            std.mem.copyForwards(?Snapshot, self.queued[0..self.queued_count], self.queued[1..][0..self.queued_count]);
+            self.queued[self.queued_count] = null;
+        }
+    }
+
+    fn pending(context: *anyopaque) bool {
+        const self: *FakeBackend = @ptrCast(@alignCast(context));
+        return self.queued_count != 0;
     }
 
     fn poll(context: *anyopaque) core.persistence.BackendError!void {
@@ -205,6 +258,84 @@ fn makeSt018Cart(allocator: std.mem.Allocator, identity_byte: u8) !core.cartridg
         .open_test,
     );
     return result;
+}
+
+test "bounded SRAM journal preserves changes during snapshots and crash reopen then exports raw SAV on close" {
+    const allocator = std.testing.allocator;
+    var fake = try FakeBackend.init(allocator);
+    defer fake.deinit();
+    fake.asynchronous = true;
+    var cart = try makeCart(allocator, core.persistence.maximum_sram_bytes, true, .none, 0x79);
+    defer cart.deinit();
+    var session = try core.persistence.Session.open(&cart, fake.backend(), 1, 100, 200);
+    cart.writeSram(0, 1);
+    try session.flush(&cart, 100, 200);
+    cart.writeSram(0, 2);
+    const delay = core.persistence.flush_delay_master_cycles;
+    try std.testing.expect(!try session.maybeFlush(&cart, delay, 100, 200));
+    try std.testing.expect(cart.sram_dirty);
+    try fake.backend().drain();
+    try std.testing.expectEqual(@as(u8, 1), fake.sram[0]);
+    fake.snapshot_bytes = 0;
+    fake.published_bytes = 0;
+    try std.testing.expect(try session.maybeFlush(&cart, delay, 100, 200));
+    cart.writeSram(257, 3);
+    try std.testing.expect(try session.maybeFlush(&cart, delay * 2, 100, 200));
+    try std.testing.expectEqual(@as(usize, 2 * core.persistence.delta.record_bytes), fake.snapshot_bytes);
+    // The queued payload owns its bytes even as the next guest step changes RAM.
+    cart.writeSram(0, 4);
+    try fake.backend().release(&cart.identity, 1);
+    session.closed = true; // Abrupt guest loss after accepted autosaves, without a final checkpoint.
+    try std.testing.expectEqual(fake.snapshot_bytes, fake.published_bytes);
+    var recovered = try makeCart(allocator, cart.sram_storage.len, true, .none, 0x79);
+    defer recovered.deinit();
+    var reopened = try core.persistence.Session.open(&recovered, fake.backend(), 2, 100, 200);
+    try std.testing.expectEqual(@as(u8, 2), recovered.sram_storage[0]);
+    try std.testing.expectEqual(@as(u8, 3), recovered.sram_storage[257]);
+    try reopened.close(&recovered, 2, 100, 200);
+    try std.testing.expectEqualSlices(u8, recovered.sram_storage, fake.sram);
+    try std.testing.expect(!fake.backend().pending());
+    std.debug.print("SRAM single-change snapshot/write bytes: old=2097152 new={d}; cumulative pages={d}\n", .{ core.persistence.delta.record_bytes, session.journal.count() });
+}
+
+test "journal checkpoint capacity failure and returning to identical baseline retain Last-Good" {
+    const allocator = std.testing.allocator;
+    var fake = try FakeBackend.init(allocator);
+    defer fake.deinit();
+    var cart = try makeCart(allocator, core.persistence.maximum_sram_bytes, true, .none, 0x7a);
+    defer cart.deinit();
+    var session = try core.persistence.Session.open(&cart, fake.backend(), 1, 100, 200);
+    cart.writeSram(0, 1);
+    try session.flush(&cart, 100, 200);
+    cart.writeSram(1, 2);
+    const delay = core.persistence.flush_delay_master_cycles;
+    try std.testing.expect(try session.maybeFlush(&cart, delay, 100, 200));
+    const last_good = fake.delta_bytes;
+    cart.writeSram(cart.sram_storage.len - 1, 3);
+    cart.writeSram(0, 4); // Wide range forces a full checkpoint.
+    fake.fail_before_publish = true;
+    try std.testing.expectError(error.Io, session.maybeFlush(&cart, delay * 2, 100, 200));
+    try std.testing.expect(cart.sram_dirty);
+    try std.testing.expectEqualSlices(u8, &last_good, &fake.delta_bytes);
+    try std.testing.expectEqual(@as(u8, 1), fake.sram[0]);
+    fake.fail_before_publish = false;
+    // Return exactly to the first baseline. A stale sidecar must not revive byte 1.
+    @memset(cart.sram_storage, 0);
+    cart.writeSram(0, 1);
+    try session.flush(&cart, 100, 200);
+    try fake.backend().release(&cart.identity, 1);
+    session.closed = true;
+    var reopened = try core.persistence.Session.open(&cart, fake.backend(), 2, 100, 200);
+    try std.testing.expectEqual(@as(u8, 0), cart.sram_storage[1]);
+    try reopened.close(&cart, 2, 100, 200);
+    // A damaged sidecar is rejected without changing the durable raw baseline.
+    fake.delta_bytes[100] ^= 1;
+    try std.testing.expectError(error.CorruptSave, core.persistence.Session.open(&cart, fake.backend(), 3, 100, 200));
+    try std.testing.expect(!fake.held);
+    fake.delta_bytes[100] ^= 1;
+    fake.has_sram = false;
+    try std.testing.expectError(error.CorruptSave, core.persistence.Session.open(&cart, fake.backend(), 4, 100, 200));
+    try std.testing.expect(!fake.held);
 }
 
 test "ST018 16-KiB work RAM uses one exact canonical save and restores before ARM execution" {

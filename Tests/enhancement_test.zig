@@ -281,7 +281,7 @@ test "S-DD1 production bus shadows DMA and streams exact bytes with bank SRAM an
     for (headers, expected_hex) |header, hex| {
         fillReferenceInput(&source);
         source[0] = header;
-        @memcpy(cart.rom_storage[0x10000 .. 0x10000 + source.len], source[0..]);
+        @memcpy(@constCast(cart.rom_storage)[0x10000 .. 0x10000 + source.len], source[0..]);
         cart.sdd1_device.?.reset();
         var expected: [64]u8 = undefined;
         _ = try std.fmt.hexToBytes(expected[0..], hex);
@@ -304,7 +304,7 @@ test "S-DD1 production bus shadows DMA and streams exact bytes with bank SRAM an
         try std.testing.expect(!cart.sdd1_device.?.dma_ready);
     }
 
-    cart.rom_storage[0x100000] = 0xA6;
+    @constCast(cart.rom_storage)[0x100000] = 0xA6;
     _ = bus.write(&cart, mmio, 0x004804, 1);
     try std.testing.expectEqual(@as(u8, 0xA6), bus.read(&cart, mmio, 0xC00000).value);
     _ = bus.write(&cart, mmio, 0x006123, 0x5C);
@@ -406,10 +406,10 @@ test "SPC7110 production DCU emits every mode exactly and is slice deterministic
     };
 
     for (expected_hex, 0..) |hex, mode| {
-        cart.rom_storage[0x1F0000] = @intCast(mode);
-        cart.rom_storage[0x1F0001] = 0;
-        cart.rom_storage[0x1F0002] = 0;
-        cart.rom_storage[0x1F0003] = 0;
+        @constCast(cart.rom_storage)[0x1F0000] = @intCast(mode);
+        @constCast(cart.rom_storage)[0x1F0001] = 0;
+        @constCast(cart.rom_storage)[0x1F0002] = 0;
+        @constCast(cart.rom_storage)[0x1F0003] = 0;
         cart.spc7110_device.?.reset();
         _ = bus.write(&cart, mmio, 0x004801, 0x00);
         _ = bus.write(&cart, mmio, 0x004802, 0x00);
@@ -433,7 +433,7 @@ test "SPC7110 production DCU emits every mode exactly and is slice deterministic
         try std.testing.expectEqualSlices(u8, expected[0..], actual[0..]);
     }
     for ([_]u8{ 3, 4 }) |invalid_mode| {
-        cart.rom_storage[0x1F0000] = invalid_mode;
+        @constCast(cart.rom_storage)[0x1F0000] = invalid_mode;
         cart.spc7110_device.?.reset();
         _ = bus.write(&cart, mmio, 0x004801, 0x00);
         _ = bus.write(&cart, mmio, 0x004802, 0x00);

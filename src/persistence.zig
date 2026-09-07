@@ -6,6 +6,7 @@ const epson = @import("epson_rtc.zig");
 const srtc = @import("srtc.zig");
 
 const shared = r4os.subsystem_persistence;
+pub const delta = @import("save_delta.zig");
 
 pub const save_root = "C:\\R4OS\\SUBSYSTEMS\\r4os.snes\\SAVE\\";
 pub const firmware_root = "C:\\R4OS\\SUBSYSTEMS\\r4os.snes\\FIRMWARE";
@@ -139,7 +140,9 @@ pub const FlushError = BackendError || error{
 
 /// Cartridge-owned persistence policy over the shared lease/atomic backend.
 /// Battery-less boards never touch the backend. SRAM and SA-1 BW-RAM
-/// use one exact board-sized `.SAV` payload keyed by the normalized ROM hash.
+/// retain the exact board-sized `.SAV` keyed by normalized ROM hash. Small
+/// autosaves use a bounded cumulative `.SDJ`; explicit flush/close checkpoint
+/// the current state back to the raw `.SAV` for existing readers.
 pub const Session = struct {
     backend: Backend,
     digest: [digest_bytes]u8,
@@ -150,6 +153,10 @@ pub const Session = struct {
     rtc_record: ?RtcRecord = null,
     rtc_dirty: bool = false,
     offline_adjustment: OfflineAdjustment = .{},
+    journal: delta.Journal = .{},
+    base_present: bool = false,
+    checkpoint_pending: bool = false,
+    disk_delta_base: ?[32]u8 = null,
 
     pub fn open(
         cart: *cartridge.Cartridge,
@@ -173,7 +180,23 @@ pub const Session = struct {
 
         if (cart.sram_storage.len != 0) {
             switch (backend.readExact(&result.digest, .sram, cart.sram_storage)) {
-                .ok, .missing => {},
+                .ok => result.base_present = true,
+                .missing => {},
+                .wrong_size => return error.CorruptSave,
+                .io => return error.Io,
+            }
+            var base: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(cart.sram_storage, &base, .{});
+            switch (backend.readExact(&result.digest, .sram_delta, &result.journal.bytes)) {
+                .ok => {
+                    if (!delta.validate(&result.journal.bytes)) return error.CorruptSave;
+                    result.disk_delta_base = result.journal.base();
+                    if (!result.base_present) return error.CorruptSave;
+                    if (!result.journal.apply(cart.sram_storage, base)) {
+                        result.journal = delta.Journal.init(cart.sram_storage.len, base);
+                    }
+                },
+                .missing => result.journal = delta.Journal.init(cart.sram_storage.len, base),
                 .wrong_size => return error.CorruptSave,
                 .io => return error.Io,
             }
@@ -263,7 +286,20 @@ pub const Session = struct {
         try self.backend.poll();
         if (!cart.sram_dirty and !self.rtc_dirty and !rtcDirty(cart)) return false;
         if (guest_tick -| self.last_flush_guest_tick < flush_delay_master_cycles) return false;
-        try self.flush(cart, wall_now_seconds, monotonic_now_ns);
+        // The base snapshot may still be in flight. Keep new dirty ranges until
+        // it is durable; no delta may reference a merely queued checkpoint.
+        if (self.checkpoint_pending and self.backend.pending()) return false;
+        self.checkpoint_pending = false;
+        if (cart.dirtyRange()) |range| {
+            if (self.base_present and cart.sram_storage.len > delta.record_bytes and
+                self.journal.capture(cart.sram_storage, range.first, range.end))
+            {
+                try self.backend.writeAtomic(&self.digest, .sram_delta, &self.journal.bytes);
+                self.disk_delta_base = self.journal.base();
+                cart.clearSramDirty();
+            } else try self.checkpoint(cart);
+        }
+        try self.flushRtc(cart, wall_now_seconds, monotonic_now_ns);
         self.last_flush_guest_tick = guest_tick;
         return true;
     }
@@ -277,10 +313,33 @@ pub const Session = struct {
         if (self.closed) return error.Closed;
         if (!self.enabled) return;
         try self.backend.poll();
-        if (cart.sram_dirty and cart.sram_storage.len != 0) {
-            try self.backend.writeAtomic(&self.digest, .sram, cart.sram_storage);
-            cart.clearSramDirty();
+        if ((cart.sram_dirty or self.journal.count() != 0) and cart.sram_storage.len != 0) try self.checkpoint(cart);
+        try self.flushRtc(cart, wall_now_seconds, monotonic_now_ns);
+    }
+
+    fn checkpoint(self: *Session, cart: *cartridge.Cartridge) BackendError!void {
+        // Prevent per-kind coalescing from dropping a baseline still referenced
+        // by a previously accepted delta, and retain its Last-Good on failure.
+        try self.backend.drain();
+        var base: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(cart.sram_storage, &base, .{});
+        if (self.disk_delta_base) |old_base| {
+            if (std.mem.eql(u8, &base, &old_base)) {
+                // Returning to an older identical base must not revive a stale
+                // delta after a crash between publishing .SAV and closing.
+                const empty = delta.Journal.init(cart.sram_storage.len, base);
+                try self.backend.writeAtomic(&self.digest, .sram_delta, &empty.bytes);
+                try self.backend.drain();
+            }
         }
+        try self.backend.writeAtomic(&self.digest, .sram, cart.sram_storage);
+        self.base_present = true;
+        self.checkpoint_pending = true;
+        self.journal = delta.Journal.init(cart.sram_storage.len, base);
+        cart.clearSramDirty();
+    }
+
+    fn flushRtc(self: *Session, cart: *cartridge.Cartridge, wall_now_seconds: ?i64, monotonic_now_ns: u64) FlushError!void {
         if (cart.srtc_device) |*device| {
             if (device.dirty) self.rtc_dirty = true;
             if (self.rtc_record) |*record| captureSrtc(device, &record.state);
@@ -306,6 +365,27 @@ pub const Session = struct {
                 }
             }
         }
+    }
+
+    /// Reset keeps the lease and restores only battery-backed state into an
+    /// already powered replacement. Failure leaves the old cartridge intact.
+    pub fn restoreForReset(self: *Session, old: *const cartridge.Cartridge, replacement: *cartridge.Cartridge) !void {
+        if (!self.enabled) return;
+        if (old.sram_storage.len != replacement.sram_storage.len) return error.CorruptSave;
+        @memcpy(replacement.sram_storage, old.sram_storage);
+        if (replacement.obc1_device) |*device| try device.power(replacement.sram_storage);
+        try replacement.restoreNecDspPersistentRam();
+        try replacement.restoreSt018PersistentRam();
+        if (self.rtc_record) |record| {
+            const state = record.state;
+            if (replacement.srtc_device) |*device| {
+                try device.loadPersistent(&state.registers, &state.latched, state.halted, state.overflow);
+            }
+            if (replacement.spc7110_device) |*device| {
+                if (device.has_rtc) try device.rtc.loadPersistent(&state.registers, &state.latched, state.halted, state.overflow);
+            }
+        }
+        replacement.clearSramDirty();
     }
 
     /// Close is idempotent, drains the shared asynchronous backend through

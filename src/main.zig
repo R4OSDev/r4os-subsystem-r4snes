@@ -1061,7 +1061,7 @@ noinline fn persistenceSelfTest(app: *r4os.App) i32 {
         sys.println(@errorName(fault));
         return error_persistence_selftest;
     };
-    app.system().println("R4SNES persistence runtime: OK sav=exact rtc=versioned lock=exclusive atomic=recover async=worker+drain");
+    app.system().println("R4SNES persistence runtime: OK sav=exact rtc=versioned lock=exclusive atomic=recover async=worker+drain delta=bounded+recover");
     return 0;
 }
 
@@ -1073,7 +1073,7 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     const monotonic = sys.monotonicNanoseconds() orelse 0;
     const generation = (sys.ticks() | 1) +| 2;
 
-    var save_cart = try makePersistenceCart(allocator, 8192, true, .none, 0x73);
+    var save_cart = try makePersistenceCart(allocator, 32768, true, .none, 0x73);
     defer save_cart.deinit();
     var async_store = core.persistence_r4os.AsyncStore.init(files, allocator);
     async_store.removeTestFiles(&save_cart.identity);
@@ -1082,10 +1082,18 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     defer if (!save_session.closed) save_session.close(&save_cart, generation, wall, monotonic) catch {};
     for (save_cart.sram_storage, 0..) |_, index| save_cart.writeSram(index, @truncate(index *% 37 +% 11));
     try save_session.flush(&save_cart, wall, monotonic);
+    try async_store.backend().drain();
+    const snapshot_before = async_store.stats.snapshot_bytes;
     save_cart.writeSram(0, 0xA7);
-    try save_session.flush(&save_cart, wall, monotonic);
+    if (!try save_session.maybeFlush(&save_cart, core.persistence.flush_delay_master_cycles, wall, monotonic))
+        return error.DeltaNotAccepted;
+    save_cart.writeSram(1, 0xB8);
+    if (!try save_session.maybeFlush(&save_cart, core.persistence.flush_delay_master_cycles * 2, wall, monotonic))
+        return error.DeltaNotAccepted;
+    if (async_store.stats.snapshot_bytes - snapshot_before != 2 * core.persistence.delta.record_bytes)
+        return error.DeltaSnapshotNotBounded;
 
-    var competing_cart = try makePersistenceCart(allocator, 8192, true, .none, 0x73);
+    var competing_cart = try makePersistenceCart(allocator, 32768, true, .none, 0x73);
     defer competing_cart.deinit();
     var competing_store = core.persistence_r4os.Store.init(files);
     const contention = core.persistence.Session.open(&competing_cart, competing_store.backend(), generation + 1, wall, monotonic);
@@ -1100,15 +1108,37 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     if (async_store.stats.started == 0 or async_store.stats.started != async_store.stats.completed or async_store.stats.errors != 0)
         return error.AsyncPersistenceMismatch;
 
-    var reopened_cart = try makePersistenceCart(allocator, 8192, true, .none, 0x73);
+    var reopened_cart = try makePersistenceCart(allocator, 32768, true, .none, 0x73);
     defer reopened_cart.deinit();
     var reopened_store = core.persistence_r4os.Store.init(files);
     var reopened = try core.persistence.Session.open(&reopened_cart, reopened_store.backend(), generation + 2, wall, monotonic);
     if (reopened_cart.sram_storage[0] != 0xA7 or
-        reopened_cart.sram_storage[1] != @as(u8, @truncate(1 * 37 + 11)) or
+        reopened_cart.sram_storage[1] != 0xB8 or
         reopened_cart.sram_storage[reopened_cart.sram_storage.len - 1] != @as(u8, @truncate((reopened_cart.sram_storage.len - 1) *% 37 +% 11)))
         return error.SramMismatch;
     try reopened.close(&reopened_cart, generation + 2, wall, monotonic);
+
+    // Recover an interrupted journal replacement against the exact durable
+    // baseline, then export its recovered bytes through the regular close.
+    var base: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(reopened_cart.sram_storage, &base, .{});
+    var journal = core.persistence.delta.Journal.init(reopened_cart.sram_storage.len, base);
+    reopened_cart.writeSram(0, 0xC9);
+    if (!journal.capture(reopened_cart.sram_storage, 0, 1)) return error.DeltaNotAccepted;
+    try reopened_store.prepareInterruptedPublishForTest(&save_cart.identity, .sram_delta, &journal.bytes);
+    var journal_recovered = try core.persistence.Session.open(&reopened_cart, reopened_store.backend(), generation + 20, wall, monotonic);
+    if (reopened_cart.sram_storage[0] != 0xC9 or reopened_cart.sram_storage[1] != 0xB8) return error.DeltaRecoveryMismatch;
+    try journal_recovered.close(&reopened_cart, generation + 20, wall, monotonic);
+    try reopened_store.prepareInterruptedPublishForTest(&save_cart.identity, .sram_delta, journal.bytes[0 .. journal.bytes.len / 2]);
+    if (core.persistence.Session.open(&reopened_cart, reopened_store.backend(), generation + 21, wall, monotonic)) |opened| {
+        var unexpected = opened;
+        unexpected.close(&reopened_cart, generation + 21, wall, monotonic) catch {};
+        return error.PartialDeltaAccepted;
+    } else |fault| {
+        if (fault != error.Io) return fault;
+    }
+    const retained_delta = try reopened_store.recoveryTestStateForTest(&save_cart.identity, .sram_delta);
+    if (retained_delta.backup_size != core.persistence.delta.record_bytes) return error.DeltaLastGoodLost;
 
     const sav_path = try core.persistence_r4os.dataPath(&save_cart.identity, .sram);
     if (!std.mem.startsWith(u8, sav_path.bytes(), core.persistence.save_root) or

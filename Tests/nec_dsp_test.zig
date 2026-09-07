@@ -525,6 +525,18 @@ test "separate appended and copier-header firmware normalize to one cartridge id
     try std.testing.expect(copier_joined.had_copier_header);
     try std.testing.expect(copier_joined.had_appended_firmware);
     try std.testing.expectEqualSlices(u8, &separate.identity, &copier_joined.identity);
+    const borrow_options: core.cartridge.ParseOptions = .{
+        .nec_dsp_revision = .dsp1b,
+        .nec_dsp_firmware_validation = .allow_open_test,
+    };
+    var borrowed = try core.cartridge.Cartridge.borrowWithOptions(allocator, headed_appended, borrow_options, null);
+    defer borrowed.deinit();
+    var reset = try core.cartridge.Cartridge.borrowWithOptions(allocator, headed_appended, borrow_options, &borrowed);
+    defer reset.deinit();
+    try std.testing.expectEqual(headed_appended[512..].ptr, reset.rom_storage.ptr);
+    try std.testing.expectEqual(plain.len, reset.rom_storage.len);
+    try std.testing.expectEqualSlices(u8, &separate.identity, &reset.identity);
+    try std.testing.expectEqual(separate.nec_dsp_device.?.stateDigest(), reset.nec_dsp_device.?.stateDigest());
 
     try std.testing.expectError(error.MissingNecDspFirmware, core.cartridge.Cartridge.parse(allocator, plain));
     try std.testing.expectError(error.AmbiguousNecDspFirmwareSource, core.cartridge.Cartridge.parseWithOptions(allocator, appended, .{

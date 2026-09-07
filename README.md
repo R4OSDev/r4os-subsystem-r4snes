@@ -62,8 +62,9 @@ most 32768 clocks per host cycle; a complete CPU or DMA operation may cross the
 edge only by its bounded remainder, which is credited against the next grant.
 The host exposes pause, resume, reset, mute and unmute, accepts physical port-1
 keys only while focused, publishes native XRGB32 generations and sends only
-caller-owned 48-kHz PCM through App-Audio. Reset creates fresh machine, save,
-video and audio generations. App-Audio writes use a bounded 200-ms service
+caller-owned 48-kHz PCM through App-Audio. Reset prepares a fresh machine,
+video and audio generation while retaining the existing persistence lease.
+Allocation or save failure preserves the previous running guest. App-Audio writes use a bounded 200-ms service
 deadline, covering the measured SMP4 AUDSVC latency while remaining below the
 250-ms scheduling budget; an expired write is never retried because its remote
 completion is ambiguous, and degradation still cannot stall guest time or
@@ -79,6 +80,12 @@ two failures remain visible until cooperatively closed. SNES probing reads no
 content because the format has no universal fixed-position magic; R4SNES alone
 loads and validates the complete cartridge.
 
+Since 0.22.6 the product host owns one immutable source image. Cartridge and
+its reset replacement borrow the normalized ROM slice, including correct
+copier-header and appended-firmware boundaries. Reset reuses the validated
+header and ROM digest; only mutable cartridge/device and machine state is
+allocated again. Separate product instances retain separate source ownership.
+
 Battery-backed SRAM and SA-1 BW-RAM persist as one exact
 board-sized `HASH.SAV` below
 `C:\R4OS\SUBSYSTEMS\r4os.snes\SAVE\`; the hash is calculated from the
@@ -90,6 +97,20 @@ R4GB: one create-only writer lease, immutable snapshots, one coalescing worker,
 same-directory stage/target/last-good publication, bounded recovery and
 mandatory drain/join. Battery-less boards never access this namespace, and no
 legacy or host-specific path is probed.
+
+Since 0.22.6 small autosaves for SRAM larger than 16 KB atomically replace a
+16-KB `HASH.SDJ` journal containing at most 62 cumulative 256-byte pages.
+The record binds the raw base size and SHA-256, validates its own checksum,
+and is independently recoverable without earlier journal snapshots. The
+first save, journal overflow, explicit flush, reset and close checkpoint the
+complete raw `.SAV`. Older raw saves load unchanged; after a clean close the
+raw file contains the latest state. A crash before close requires this version
+to apply its sidecar. Never discard `.SDJ` when copying a live/crashed save.
+Accepted deltas drain before replacing a baseline; new deltas wait for that
+baseline to finish. Returning to identical old baseline bytes cannot revive a
+stale journal. A small change in a 2-MB save copies/writes 16 KB instead of
+2 MB (128 times fewer snapshot bytes); this is a save-path reduction, not a
+measurement of continuous emulation speed.
 
 OBC-1 is now an executable board capability. Its complete 8-KiB battery RAM,
 both documented bank mirrors, object selector, four-byte object window and
