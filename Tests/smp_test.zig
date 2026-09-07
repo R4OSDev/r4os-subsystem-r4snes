@@ -318,3 +318,75 @@ test "APU progress and port synchronization are slice and host-wait invariant" {
     try std.testing.expectEqualSlices(u64, one.io.cpu_port_epoch[0..], many.io.cpu_port_epoch[0..]);
     try std.testing.expectEqualSlices(u8, one.io.cpu_to_smp[0..], many.io.cpu_to_smp[0..]);
 }
+
+test "S-SMP source-clock rates preserve TEST waits timers and native DSP rate" {
+    for ([_]u8{ 2, 4, 10, 20 }, [_]u8{ 2, 4, 8, 16 }, 0..) |wait, timer_wait, selector| {
+        var smp = core.smp.Smp{};
+        smp.ipl_mode = .exact; // execute zero/NOP RAM, no semantic idle service
+        smp.bus_mode = .vector_ram;
+        smp.io.external_wait_states = @intCast(selector);
+        smp.io.internal_wait_states = @intCast(selector);
+        for (&smp.timers) |*timer| { timer.enabled = true; timer.target = 1; }
+        const master_hz = if (selector & 1 == 0) core.timing.ntsc_master_hz else core.timing.pal_master_hz;
+        _ = smp.advanceOscillator(master_hz, master_hz);
+        try std.testing.expectEqual(@as(u64, 2_048_000), smp.oscillator_ticks);
+        var instructions: u64 = 0;
+        var timer_edges = [_]u64{0} ** 3;
+        while (smp.cycles < smp.oscillator_ticks) {
+            const deadline = @min(smp.cycles + 128, smp.oscillator_ticks);
+            while (smp.cycles < deadline) : (instructions += 1) try smp.step();
+            for (&smp.timers, &timer_edges) |*timer, *edges| {
+                edges.* += timer.output;
+                timer.output = 0;
+            }
+        }
+        try std.testing.expectEqual(@as(u64, 2_048_000) / (2 * @as(u64, wait)), instructions);
+        const timer_clocks = instructions * 2 * timer_wait;
+        try std.testing.expectEqualSlices(u64, &.{ timer_clocks / 256, timer_clocks / 256, timer_clocks / 32 }, &timer_edges);
+        try std.testing.expectEqual(@as(u64, 32_000), smp.dsp.stats.native_frames);
+        std.debug.print("SMPRATE source={d} wait={d} instructions={d} timers={d}/{d}/{d} dsp={d}\n", .{ smp.oscillator_ticks, wait, instructions, timer_edges[0], timer_edges[1], timer_edges[2], smp.dsp.stats.native_frames });
+    }
+    // A RAM opcode/operand use external waits; the MMIO read uses internal.
+    var mixed = core.smp.Smp{};
+    mixed.io.ipl_enabled = false;
+    mixed.io.internal_wait_states = 1;
+    mixed.pc = 0x200;
+    mixed.aram[0x200..0x202].* = .{ 0xe4, 0xf4 }; // MOV A,$f4
+    try mixed.step();
+    try std.testing.expectEqual(@as(u64, 8), mixed.cycles);
+    try std.testing.expectEqual(@as(u8, 4), mixed.dsp.phase);
+}
+
+test "semantic upload peripheral clocks keep odd remainders across partitions" {
+    for (0..4) |selector| {
+        var one = core.smp.Smp{};
+        one.powerSemanticIpl();
+        one.io.internal_wait_states = @intCast(selector);
+        for (&one.timers) |*timer| { timer.enabled = true; timer.target = 7; }
+        var split = one;
+        _ = one.advanceOscillator(core.timing.pal_master_hz, 30_003);
+        var elapsed: u64 = 0;
+        while (elapsed < 30_003) {
+            const part = @min(@as(u64, 31), 30_003 - elapsed);
+            _ = split.advanceOscillator(core.timing.pal_master_hz, part);
+            elapsed += part;
+        }
+        try std.testing.expectEqual(one.oscillator_ticks, one.cycles);
+        try std.testing.expectEqual(one.cycles, split.cycles);
+        try std.testing.expectEqual(one.oscillator_phase, split.oscillator_phase);
+        try std.testing.expectEqual(one.dsp_source_remainder, split.dsp_source_remainder);
+        try std.testing.expectEqual(one.semantic_timer_remainder, split.semantic_timer_remainder);
+        try std.testing.expectEqualDeep(one.timers, split.timers);
+        try std.testing.expectEqualDeep(one.dsp, split.dsp);
+        const cycles = split.cycles;
+        // A new upload preserves peripheral time; an exact reset starts anew.
+        split.powerSemanticIpl();
+        try std.testing.expectEqual(cycles, split.cycles);
+        var exact = [_]u8{0} ** 64;
+        try split.installExactIpl(&exact);
+        split.reset();
+        try std.testing.expectEqual(@as(u64, 0), split.oscillator_ticks);
+        try std.testing.expectEqual(@as(u64, 0), split.cycles);
+        try std.testing.expectEqual(@as(u1, 0), split.dsp_source_remainder);
+    }
+}

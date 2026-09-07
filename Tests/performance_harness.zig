@@ -112,6 +112,7 @@ pub fn main(init: std.process.Init) !void {
             .submitted_frames = @as(u64, 0),
             .actually_presented_frames = @as(u64, 0), // Owner harness has no display.
             .apu_cpu_cycles = machine.smp.cycles - smp_before,
+            .apu_source_hz = core.timing.apu_source_hz,
             .apu_native_frames = machine.smp.dsp.stats.native_frames - native_before,
             .pcm_bytes = drain.bytes - bytes_before,
             .pcm_render_calls = drain.render_calls - audio_calls_before,

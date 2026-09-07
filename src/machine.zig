@@ -40,11 +40,21 @@ pub const RunResult = struct {
 const SystemMmio = struct {
     display: *ppu.Ppu,
     audio: *smp.Smp,
+    clock: *timing.Clock,
+    operation_start: u64,
+    advanced_master_clocks: u64 = 0,
     profile: ?*performance.Profile = null,
 
     pub fn read(self: *SystemMmio, address: u32, cpu_open_bus: u8, ppu_open_bus: u8) bus.MmioRead {
         const offset: u16 = @truncate(address);
         if (offset >= 0x2140 and offset <= 0x2143) {
+            if (offset == 0x2140 and self.audio.ipl_mode == .semantic and self.audio.semantic_ipl_state == .launch_ack) {
+                // Bind the start to this acknowledgement read, including the
+                // part of the current S-CPU operation before the read edge.
+                const elapsed = self.clock.master_cycles - self.operation_start - self.advanced_master_clocks;
+                _ = self.audio.advanceOscillator(self.clock.profile().master_hz, elapsed);
+                self.advanced_master_clocks += elapsed;
+            }
             return .{
                 .handled = true,
                 .value = self.audio.cpuReadPort(@truncate(offset - 0x2140)),
@@ -192,7 +202,7 @@ pub const Machine = struct {
         var phase_started = if (profile) |p| p.now() else 0;
         const ppu_before = if (profile) |p| p.elapsed(.ppu) else 0;
         self.cpu.setIrqLine(self.scpu.irq_flag or cart.sa1CpuIrqPending() or cart.cx4CpuIrqPending());
-        var mmio = SystemMmio{ .display = &self.ppu, .audio = &self.smp, .profile = profile };
+        var mmio = SystemMmio{ .display = &self.ppu, .audio = &self.smp, .clock = &self.clock, .operation_start = self.clock.master_cycles, .profile = profile };
         var port = scpu.TimedPortWithDevice(*SystemMmio){
             .bus = &self.bus,
             .cartridge = cart,
@@ -232,7 +242,7 @@ pub const Machine = struct {
         // DMA operations. Accumulating its oscillator phase once for that
         // exact span is arithmetically identical to one division per master
         // clock and removes the dominant product-host hot path.
-        _ = self.smp.advanceOscillator(self.clock.profile().master_hz, elapsed);
+        _ = self.smp.advanceOscillator(self.clock.profile().master_hz, elapsed - mmio.advanced_master_clocks);
         if (self.serviceSmp()) return .smp;
         if (profile) |p| {
             const now = p.now();
@@ -246,7 +256,14 @@ pub const Machine = struct {
 
     fn serviceSmp(self: *Machine) bool {
         if (self.smp.ipl_mode == .semantic and self.smp.semantic_ipl_state != .running) return false;
-        while (self.smp.cycles < self.smp.oscillator_ticks) self.smp.step() catch return true;
+        while (self.smp.cycles < self.smp.oscillator_ticks) {
+            if (self.smp.ipl_mode == .semantic and self.smp.io.ipl_enabled and self.smp.pc >= 0xffc0) {
+                self.smp.powerSemanticIpl();
+                _ = self.smp.advanceOscillator(self.clock.profile().master_hz, 0);
+                break;
+            }
+            self.smp.step() catch return true;
+        }
         return false;
     }
 

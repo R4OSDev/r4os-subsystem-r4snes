@@ -104,6 +104,7 @@ fn execute(app: *r4os.App, check_only: bool) !void {
             .generation_end_inclusive = after.generation,
             .actual_presentation_source = "SNES-PRESENT.TXT: successful Desktop display presents, filtered by generation interval",
             .apu_cpu_cycles = after.apu_cycles -| probe.before.apu_cycles,
+            .apu_source_hz = core.timing.apu_source_hz,
             .apu_native_frames = after.native -| probe.before.native,
             .audio_accepted_bytes = after.audio_bytes -| probe.before.audio_bytes,
             .audio_service_writes = after.audio_writes -| probe.before.audio_writes,

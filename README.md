@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.22.0 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.22.4 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU in a productive
 `R4SUBSYS1` application host. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
@@ -21,6 +21,14 @@ DMA operation, so a 16-bit `STA $2140` sees its new port-1 payload rather than
 the previous latch value. An optional exact user image is accepted only from
 `C:\R4OS\SUBSYSTEMS\r4os.snes\FIRMWARE\SPC700.IPL` and only at exactly 64
 bytes. The public module contains no IPL image.
+
+The S-SMP oscillator advances 2,048,000 source clocks per guest second.
+Default SPC bus cycles use two source clocks; the DSP uses one phase per two
+source clocks and retains its native 32,000 frames per second. TEST keeps its
+separate CPU and timer wait profiles. During semantic uploads, peripheral
+time advances without executing uploaded code; launch binds to the actual
+S-CPU acknowledgement read. Returning to the enabled IPL overlay enters the
+upload service again. Optional exact IPL execution keeps its normal bus path.
 
 The cycle-clocked S-DSP owns all 128 registers, eight voices, BRR decode and
 loops, Gaussian interpolation, pitch/noise/modulation, KON/KOFF, ADSR/GAIN,
@@ -61,8 +69,7 @@ deadline, covering the measured SMP4 AUDSVC latency while remaining below the
 completion is ambiguous, and degradation still cannot stall guest time or
 video. Close and every open-error path unwind in reverse
 order and are repeat-idempotent. This establishes automatic product-host
-operation without making a commercial-ROM playability claim before the final
-manual acceptance. Four deterministic cartridges generated exclusively from
+operation without making a commercial-ROM playability claim from the automatic fixtures alone. Four deterministic cartridges generated exclusively from
 R4OS source now drive the installed Explorer/Desktop path: `.sfc`, `.smc`
 with SRAM and Epson RTC, an invalid header, and a firmware-required DSP-1
 board. Two productive instances run concurrently for at least 60 seconds of

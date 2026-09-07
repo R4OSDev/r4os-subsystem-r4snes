@@ -312,6 +312,8 @@ fn stateDigest(machine: *const core.machine.Machine, cart: *const core.cartridge
     hash.update(&.{ machine.cpu.db, machine.cpu.pb, machine.cpu.p.byte(), @intFromBool(machine.cpu.waiting) });
     updateU64(&hash, machine.smp.cycles);
     updateU64(&hash, machine.smp.oscillator_ticks);
+    updateU64(&hash, machine.smp.oscillator_phase);
+    hash.update(&.{ machine.smp.dsp_source_remainder, machine.smp.semantic_timer_remainder });
     updateU64(&hash, machine.smp.dsp.sample_counter);
     updateU64(&hash, machine.smp.dsp.native_digest);
     updateU64(&hash, machine.smp.dsp.resampled_digest);

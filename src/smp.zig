@@ -1,6 +1,7 @@
 const implementation = @import("spc700.zig");
 
 pub const apu_bus_hz = implementation.apu_bus_hz;
+pub const apu_source_hz = implementation.apu_source_hz;
 pub const aram_size = implementation.aram_size;
 pub const exact_ipl_size = implementation.exact_ipl_size;
 pub const maximum_trace_cycles = implementation.maximum_trace_cycles;

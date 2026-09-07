@@ -62,6 +62,8 @@ test "integer NTSC and PAL clocks remain bounded partition invariant and pause c
         remaining -= count;
     }
     try expectSystemDigestEqual(&one, &many);
+    try std.testing.expectEqual(@as(u64, 700_000) * core.timing.apu_source_hz / core.timing.ntsc_master_hz, one.clock.apu_ticks);
+    try std.testing.expectEqual(one.clock.apu_ticks, one.smp.oscillator_ticks);
 
     one.clock.paused = true;
     var sink = Sink{ .harness = &one };
@@ -536,4 +538,59 @@ test "complete word operation crossing refresh carries overshoot as budget credi
     const due = 20_000 * machine.clock.profile().master_hz / core.timing.nanoseconds_per_second;
     try std.testing.expectEqual(due - surplus, machine.host_budget.budget(20_000, machine.clock.profile().master_hz, 32_768));
     try std.testing.expectEqual(@as(u64, 0), machine.host_budget.ahead_master_cycles);
+}
+
+test "productive semantic IPL launch never executes accumulated upload time" {
+    const allocator = std.testing.allocator;
+    const image = try makeCpuImage(allocator);
+    defer allocator.free(image);
+    var cart = try core.cartridge.Cartridge.parse(allocator, image);
+    defer cart.deinit();
+    for ([_]u32{ 4096, 32768 }) |limit| {
+        const machine = try allocator.create(core.machine.Machine);
+        defer allocator.destroy(machine);
+        try core.machine.Machine.powerInPlace(machine, 1, &cart, null);
+        defer machine.close();
+        _ = machine.runHostSlice(&cart, limit, 0);
+        for ([_]u64{ 2_000_000, 202_000_000 }) |now| {
+            machine.cpu.reset_pending = false;
+            machine.cpu.waiting = true;
+            try std.testing.expectEqual(core.smp.SemanticIplState.waiting_command, machine.smp.semantic_ipl_state);
+            while (true) {
+                const result = machine.runHostSlice(&cart, limit, now);
+                try std.testing.expectEqual(@as(?core.machine.RunFault, null), result.fault);
+                if (machine.host_budget.pending_master_cycles == 0) break;
+            }
+            try std.testing.expectEqual(machine.smp.oscillator_ticks, machine.smp.cycles);
+            try std.testing.expect(machine.smp.dsp.stats.native_frames > 0);
+            const before = machine.smp.cycles;
+            machine.smp.cpuWritePort(2, 0x00);
+            machine.smp.cpuWritePort(3, 0x02);
+            machine.smp.cpuWritePort(1, 1);
+            machine.smp.cpuWritePort(0, 0xcc);
+            machine.smp.serviceSemanticIpl();
+            for ([_]u8{ 0xab, 0x20, 0x5f, 0xc0, 0xff }, 0..) |byte, i| { // INC $20; JMP IPL
+                machine.smp.cpuWritePort(1, byte);
+                machine.smp.cpuWritePort(0, @intCast(i));
+                machine.smp.serviceSemanticIpl();
+            }
+            machine.smp.cpuWritePort(1, 0);
+            machine.smp.cpuWritePort(0, 6);
+            machine.smp.serviceSemanticIpl();
+            machine.smp.aram[0x20] = 0;
+            machine.cpu = .{ .reset_pending = false, .pc = 0x100 };
+            machine.bus.wram[0x100..0x103].* = .{ 0xad, 0x40, 0x21 }; // LDA $2140 acknowledges start
+            machine.host_budget.pending_master_cycles = 1;
+            const launch = machine.runHostSlice(&cart, 1, now);
+            try std.testing.expectEqual(@as(?core.machine.RunFault, null), launch.fault);
+            try std.testing.expectEqual(core.smp.SemanticIplState.running, machine.smp.semantic_ipl_state);
+            try std.testing.expect(machine.smp.cycles - before < 32);
+            try std.testing.expect(machine.smp.aram[0x20] <= 1);
+            // Only subsequent guest time may execute more of the new code.
+            const progress = machine.runHostSlice(&cart, 256, now + 10_000);
+            try std.testing.expectEqual(@as(?core.machine.RunFault, null), progress.fault);
+            try std.testing.expect(machine.smp.aram[0x20] > 0);
+            try std.testing.expectEqual(core.smp.SemanticIplState.waiting_command, machine.smp.semantic_ipl_state);
+        }
+    }
 }

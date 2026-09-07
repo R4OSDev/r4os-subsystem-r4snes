@@ -1,7 +1,8 @@
 const std = @import("std");
 const sdsp = @import("sdsp.zig");
 
-pub const apu_bus_hz: u64 = 1_024_000;
+pub const apu_source_hz = @import("timing.zig").apu_source_hz;
+pub const apu_bus_hz = @import("timing.zig").apu_bus_hz;
 pub const aram_size: usize = 64 * 1024;
 pub const exact_ipl_size: usize = 64;
 pub const maximum_trace_cycles: usize = 32;
@@ -97,6 +98,8 @@ pub const Io = struct {
 
 const Alu = enum { adc, and_, asl, cmp, dec, eor, inc, ld, lsr, or_, rol, ror, sbc };
 const Register = enum { a, x, y, sp };
+const cycle_wait = [_]u8{ 2, 4, 10, 20 };
+const timer_wait = [_]u8{ 2, 4, 8, 16 };
 
 pub const Smp = struct {
     a: u8 = 0,
@@ -105,7 +108,9 @@ pub const Smp = struct {
     sp: u8 = 0xef,
     pc: u16 = 0,
     psw: u8 = 0x02,
-    cycles: u64 = 0,
+    cycles: u64 = 0, // consumed 2.048 MHz source clocks, not SPC bus cycles
+    dsp_source_remainder: u1 = 0,
+    semantic_timer_remainder: u8 = 0,
     stopped: bool = false,
     waiting: bool = false,
     aram: [aram_size]u8 = [_]u8{0} ** aram_size,
@@ -149,6 +154,10 @@ pub const Smp = struct {
         self.sp = 0xef;
         self.psw = 0x02;
         self.cycles = 0;
+        self.oscillator_phase = 0;
+        self.oscillator_ticks = 0;
+        self.dsp_source_remainder = 0;
+        self.semantic_timer_remainder = 0;
         self.stopped = false;
         self.waiting = false;
         self.dsp.reset();
@@ -188,6 +197,7 @@ pub const Smp = struct {
         self.io.cpu_to_smp = [_]u8{0} ** 4;
         self.io.smp_to_cpu = .{ 0xaa, 0xbb, 0, 0 };
         self.semantic_ipl_state = .waiting_command;
+        self.semantic_timer_remainder = 0;
         self.semantic_destination = 0;
         self.semantic_received = 0;
         self.semantic_counter = 0;
@@ -298,10 +308,26 @@ pub const Smp = struct {
 
     pub fn advanceOscillator(self: *Smp, master_hz: u64, master_clocks: u64) u64 {
         if (master_hz == 0) return 0;
-        const total: u128 = @as(u128, self.oscillator_phase) + @as(u128, master_clocks) * apu_bus_hz;
+        const total: u128 = @as(u128, self.oscillator_phase) + @as(u128, master_clocks) * apu_source_hz;
         const produced: u64 = @intCast(total / master_hz);
         self.oscillator_phase = @intCast(total % master_hz);
         self.oscillator_ticks +%= produced;
+        if (self.ipl_mode == .semantic and self.semantic_ipl_state != .running) {
+            // The upload service has no SPC instruction stream. Keep its
+            // peripherals current so the uploaded program inherits no debt.
+            const elapsed = self.oscillator_ticks -| self.cycles;
+            self.cycles += elapsed;
+            self.advanceDsp(elapsed);
+            const selector = self.io.internal_wait_states;
+            const timer_scaled: u128 = @as(u128, elapsed) * timer_wait[selector] + self.semantic_timer_remainder;
+            self.semantic_timer_remainder = @intCast(timer_scaled % cycle_wait[selector]);
+            var remaining: u64 = @intCast(timer_scaled / cycle_wait[selector]);
+            while (remaining != 0) {
+                const part: u32 = @intCast(@min(remaining, std.math.maxInt(u32)));
+                self.advanceTimers(part);
+                remaining -= part;
+            }
+        }
         return produced;
     }
 
@@ -384,15 +410,23 @@ pub const Smp = struct {
     }
 
     fn advanceCycle(self: *Smp, address: ?u16, internal: bool) void {
-        const cycle_wait = [_]u8{ 2, 4, 10, 20 };
-        const timer_wait = [_]u8{ 2, 4, 8, 16 };
         var selector: u2 = self.io.external_wait_states;
         if (internal or address == null or ((address.? & 0xfff0) == 0x00f0) or
             (address.? >= 0xffc0 and self.io.ipl_enabled)) selector = self.io.internal_wait_states;
         self.cycles +%= cycle_wait[selector];
-        self.dsp.runClocks(&self.aram, cycle_wait[selector]);
+        self.advanceDsp(cycle_wait[selector]);
+        self.advanceTimers(timer_wait[selector]);
+    }
+
+    fn advanceDsp(self: *Smp, source_clocks: u64) void {
+        const total = source_clocks + self.dsp_source_remainder;
+        self.dsp_source_remainder = @truncate(total);
+        self.dsp.runClocks(&self.aram, total / 2);
+    }
+
+    fn advanceTimers(self: *Smp, clocks: u32) void {
         const timers_active = self.io.timers_enabled and !self.io.timers_disabled;
-        for (&self.timers) |*timer| timer.advance(timer_wait[selector], timers_active);
+        for (&self.timers) |*timer| timer.advance(clocks, timers_active);
     }
 
     fn fetch(self: *Smp) u8 {
