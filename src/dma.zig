@@ -179,6 +179,16 @@ pub const Controller = struct {
         return !self.busy();
     }
 
+    /// Report the controller's live requests, including suspended/requeued
+    /// channels. A write to MDMAEN is a request, not a persistent enable mask.
+    pub fn manualMask(self: *const Controller) u8 {
+        var mask: u8 = 0;
+        for (self.channels, 0..) |channel, index| {
+            if (channel.dma_active) mask |= @as(u8, 1) << @as(u3, @intCast(index));
+        }
+        return mask;
+    }
+
     pub fn lastTrace(self: *const Controller) []const TraceEntry {
         return self.trace[0..self.trace_len];
     }
@@ -224,7 +234,7 @@ pub const Controller = struct {
 
     pub fn abortAll(self: *Controller) void {
         for (&self.channels) |*channel| {
-            if (channel.dma_active) self.aborted_bytes +%= if (channel.transfer_size == 0) 65_536 else channel.transfer_size;
+            if (diagnostics and channel.dma_active) self.aborted_bytes +%= if (channel.transfer_size == 0) 65_536 else channel.transfer_size;
             channel.dma_active = false;
         }
         self.phase = .idle;
@@ -336,7 +346,7 @@ pub const Controller = struct {
         const address = (@as(u32, channel.a_bank) << 16) | channel.a_address;
         const transfer = port.transferByte(channel, self.transfer_index, address, self.revision);
         self.dma_clock_counter +%= transfer.master_cycles;
-        self.manual_bytes +%= 1;
+        if (diagnostics) self.manual_bytes +%= 1;
         self.appendTransfer(index, transfer, self.phase);
         if (!channel.fixed()) {
             if (channel.decrement()) channel.a_address -%= 1 else channel.a_address +%= 1;
@@ -652,11 +662,12 @@ pub const Controller = struct {
 
     fn recordHdmaTransfer(self: *Controller, channel: usize, transfer: TransferResult) void {
         self.dma_clock_counter +%= transfer.master_cycles;
-        self.hdma_bytes +%= 1;
+        if (diagnostics) self.hdma_bytes +%= 1;
         self.appendTransfer(channel, transfer, self.phase);
     }
 
     fn append(self: *Controller, entry: TraceEntry) void {
+        if (!diagnostics) return;
         if (self.trace_len < trace_capacity) {
             self.trace[self.trace_len] = entry;
             self.trace_len += 1;
@@ -709,3 +720,4 @@ fn isHdmaPhase(phase: Phase) bool {
         else => false,
     };
 }
+const diagnostics = @import("config.zig").diagnostics;

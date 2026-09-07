@@ -395,6 +395,49 @@ fn serviceDma(port: anytype) !void {
         try std.testing.expect(result.progressed);
     }
     try std.testing.expect(steps < 100_000);
+    try std.testing.expectEqual(@as(u8, 0), port.scpu.dma.manualMask());
+}
+
+test "completed DMA restores machine WAI batching and requeued channels remain live" {
+    const allocator = std.testing.allocator;
+    const image = try makeCpuImage(allocator);
+    defer allocator.free(image);
+    var cart = try core.cartridge.Cartridge.parse(allocator, image);
+    defer cart.deinit();
+    const machine = try allocator.create(core.machine.Machine);
+    defer allocator.destroy(machine);
+    try core.machine.Machine.powerInPlace(machine, 1, &cart, null);
+    defer machine.close();
+    machine.cpu.reset_pending = false;
+    machine.cpu.waiting = true;
+    machine.scpu.dma.channels[0] = .{ .a_bank = 0x7e, .transfer_size = 1 };
+    machine.scpu.dma.channels[1] = .{ .a_bank = 0x7e, .transfer_size = 2 };
+    machine.scpu.dma.requestManual(1, 6);
+    machine.scpu.dma.requestManual(2, 6);
+    machine.scpu.dma.requestManual(0, 6);
+    try std.testing.expectEqual(@as(u8, 3), machine.scpu.dma.manualMask());
+    try std.testing.expect(!machine.scpu.cpuMayRun());
+    const Clock = struct {
+        fn now(_: *anyopaque) u64 {
+            return 0;
+        }
+    };
+    var profile = core.performance.Profile{ .clock = .{ .context = machine, .read = Clock.now } };
+    machine.profile = &profile;
+    _ = machine.runHostSlice(&cart, 32_768, 0);
+    const run = machine.runHostSlice(&cart, 32_768, 2_000_000);
+    try std.testing.expectEqual(@as(?core.machine.RunFault, null), run.fault);
+    try std.testing.expectEqual(@as(u8, 0), machine.scpu.dma.manualMask());
+    try std.testing.expectEqual(@as(u64, 3), machine.scpu.dma.manual_bytes);
+    try std.testing.expect(machine.scpu.cpuMayRun() and machine.cpu.waiting);
+    // A stale MDMAEN mirror would force more than 5000 six-clock idles.
+    try std.testing.expect(profile.operations < 1024);
+    machine.scpu.dma.channels[0].transfer_size = 1;
+    machine.scpu.dma.requestManual(1, 6);
+    try std.testing.expectEqual(@as(u8, 1), machine.scpu.dma.manualMask());
+    try std.testing.expect(!machine.scpu.cpuMayRun());
+    machine.scpu.dma.abortAll();
+    try std.testing.expectEqual(@as(u8, 0), machine.scpu.dma.manualMask());
 }
 
 fn firstDmaTransfer(controller: *const core.dma.Controller) core.dma.TraceEntry {
@@ -465,4 +508,32 @@ fn makeCpuImage(allocator: std.mem.Allocator) ![]u8 {
     header[0x1e] = @truncate(checksum);
     header[0x1f] = @truncate(checksum >> 8);
     return rom;
+}
+
+test "complete word operation crossing refresh carries overshoot as budget credit" {
+    const allocator = std.testing.allocator;
+    const image = try makeCpuImage(allocator);
+    defer allocator.free(image);
+    var cart = try core.cartridge.Cartridge.parse(allocator, image);
+    defer cart.deinit();
+    const machine = try allocator.create(core.machine.Machine);
+    defer allocator.destroy(machine);
+    try core.machine.Machine.powerInPlace(machine, 1, &cart, null);
+    defer machine.close();
+    machine.cpu = .{ .reset_pending = false, .emulation = false, .pc = 0x100, .p = .{ .accumulator_width = false, .index_width = false } };
+    machine.bus.wram[0x100..0x103].* = .{ 0xee, 0x00, 0x02 }; // INC.w $0200
+    machine.clock.h_counter = 530;
+    machine.clock.master_cycles = 530;
+    machine.host_budget = .{ .paused = false, .last_guest_nanoseconds = 0, .pending_master_cycles = 1 };
+    const result = machine.runHostSlice(&cart, 1, 0);
+    try std.testing.expectEqual(@as(?core.machine.RunFault, null), result.fault);
+    try std.testing.expectEqual(@as(u8, 1), machine.bus.wram[0x200]);
+    try std.testing.expectEqual(@as(u64, 40), machine.clock.refresh_wait_master_cycles);
+    try std.testing.expect(result.executed_master_cycles > 65);
+    const surplus = result.executed_master_cycles - result.granted_master_cycles;
+    try std.testing.expect(surplus <= core.machine.maximum_operation_overshoot_master_cycles);
+    try std.testing.expectEqual(surplus, machine.host_budget.ahead_master_cycles);
+    const due = 20_000 * machine.clock.profile().master_hz / core.timing.nanoseconds_per_second;
+    try std.testing.expectEqual(due - surplus, machine.host_budget.budget(20_000, machine.clock.profile().master_hz, 32_768));
+    try std.testing.expectEqual(@as(u64, 0), machine.host_budget.ahead_master_cycles);
 }

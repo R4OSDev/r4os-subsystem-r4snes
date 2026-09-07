@@ -1,6 +1,53 @@
 const std = @import("std");
 const core = @import("core");
 
+test "batched timers match single-clock edges including target wrap and partitions" {
+    for ([_]u8{ 16, 128 }) |frequency| {
+        for ([_]u8{ 0, 1, 17, 255 }) |target| {
+            for (0..16) |flags| {
+                var one = core.smp.Timer{
+                    .frequency = frequency,
+                    .stage0 = frequency - 1,
+                    .stage1 = flags & 1 != 0,
+                    .line = flags & 2 != 0,
+                    .enabled = flags & 4 != 0,
+                    .target = target,
+                    .stage2 = ([_]u8{ 0, 2, 254, 255 })[flags & 3],
+                    .output = 15,
+                };
+                var partitioned = one;
+                var reference = one;
+                const globally_enabled = flags & 8 != 0;
+                for ([_]u32{ 0, 1, 127, 8193, 65535 }) |clocks| {
+                    one.advance(clocks, globally_enabled);
+                    var remaining = clocks;
+                    while (remaining != 0) {
+                        const part = @min(remaining, 251);
+                        partitioned.advance(part, globally_enabled);
+                        remaining -= part;
+                    }
+                    for (0..clocks) |_| {
+                        reference.stage0 += 1;
+                        if (reference.stage0 < frequency) continue;
+                        reference.stage0 = 0;
+                        reference.stage1 = !reference.stage1;
+                        const level = reference.stage1 and globally_enabled;
+                        const falling = reference.line and !level;
+                        reference.line = level;
+                        if (!falling or !reference.enabled) continue;
+                        reference.stage2 +%= 1;
+                        if (reference.stage2 != target) continue;
+                        reference.stage2 = 0;
+                        reference.output +%= 1;
+                    }
+                    try std.testing.expectEqualDeep(reference, one);
+                    try std.testing.expectEqualDeep(reference, partitioned);
+                }
+            }
+        }
+    }
+}
+
 test "SPC700 NOP exposes its opcode and dummy read" {
     var smp = core.smp.Smp{};
     smp.bus_mode = .vector_ram;

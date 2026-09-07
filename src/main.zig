@@ -63,6 +63,8 @@ const e2e_fixture_firmware_path = "C:\\TEMP\\R4SNES-DSP-REQUIRED.SFC";
 const e2e_end_key = "end";
 
 pub fn r4_app_main(app: *r4os.App) i32 {
+    if (std.ascii.eqlIgnoreCase(app.args(), "/PERFTEST")) return @import("performance_host.zig").run(app, false);
+    if (std.ascii.eqlIgnoreCase(app.args(), "/PERFCHECK")) return @import("performance_host.zig").run(app, true);
     if (std.mem.indexOf(u8, app.args(), "/PERSISTTEST") != null) return persistenceSelfTest(app);
     if (std.mem.indexOf(u8, app.args(), "/HOSTTEST") != null) return hostSelfTest(app);
     if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
@@ -350,10 +352,10 @@ noinline fn runProduct(app: *r4os.App) i32 {
         const persistence_ok = !battery or (save_files and persistence_stats.errors == 0 and persistence_stats.started != 0 and persistence_stats.completed != 0);
         const e2e_ok = exit_code == 0 and end_ok and close_result == 0 and !guest.resourcesOpen() and
             guest_ns != 0 and guest_cycles != 0 and ppu_frames != 0 and published_frames != 0 and
-            drift_cycles <= product_host.slice_budget_master_cycles + 64 and
+            drift_cycles <= product_host.slice_budget_master_cycles + core.machine.maximum_operation_overshoot_master_cycles and
             pending_cycles <= product_host.slice_budget_master_cycles and
             guest_stats.maximum_slice_grant <= product_host.slice_budget_master_cycles and
-            guest_stats.maximum_slice_execution <= product_host.slice_budget_master_cycles + 64 and
+            guest_stats.maximum_slice_execution <= product_host.slice_budget_master_cycles + core.machine.maximum_operation_overshoot_master_cycles and
             controller_witness != 0 and runtime_stats.input_events != 0 and
             audio_stats.writes != 0 and audio_stats.write_failures == 0 and
             dsp_stats.frames_rendered != 0 and dsp_stats.frames_dropped == 0 and

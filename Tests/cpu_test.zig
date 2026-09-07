@@ -88,6 +88,7 @@ test "all legal opcodes instantiate emulation and four native width decoders" {
             try std.testing.expect(outcome.has_opcode);
             try std.testing.expectEqual(@as(u8, @intCast(byte)), outcome.opcode);
             try std.testing.expect(outcome.micro_operations != 0);
+            try std.testing.expect(outcome.micro_operations <= core.cpu.maximum_operation_bus_cycles);
             if (variant.emulation) {
                 try std.testing.expect(cpu.p.index_width);
                 try std.testing.expect(cpu.p.accumulator_width);

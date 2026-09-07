@@ -32,15 +32,36 @@ pub const Timer = struct {
         self.output = 0;
     }
 
-    fn advance(self: *Timer, clocks: u32, globally_enabled: bool) void {
-        var remaining = clocks;
-        while (remaining != 0) : (remaining -= 1) {
-            self.stage0 += 1;
-            if (self.stage0 < self.frequency) continue;
-            self.stage0 = 0;
-            self.stage1 = !self.stage1;
-            self.synchronizeLine(globally_enabled);
+    pub fn advance(self: *Timer, clocks: u32, globally_enabled: bool) void {
+        const total = @as(u64, self.stage0) + clocks;
+        const transitions = total / self.frequency;
+        self.stage0 = @intCast(total % self.frequency);
+        if (transitions == 0) return;
+
+        // The first edge also reconciles a changed global gate/line state.
+        // Remaining edges alternate regularly and can be counted at once.
+        self.stage1 = !self.stage1;
+        self.synchronizeLine(globally_enabled);
+        const remaining = transitions - 1;
+        const falling = (remaining + @intFromBool(self.stage1)) / 2;
+        if (self.enabled and globally_enabled) self.advanceCounter(falling);
+        if (remaining & 1 != 0) self.stage1 = !self.stage1;
+        self.line = self.stage1 and globally_enabled;
+    }
+
+    fn advanceCounter(self: *Timer, edges: u64) void {
+        // A target write can put stage2 beyond the new target. Its first
+        // match then requires an eight-bit wrap, rather than target modulo.
+        const distance: u8 = self.target -% self.stage2;
+        const first: u16 = if (distance == 0) 256 else distance;
+        if (edges < first) {
+            self.stage2 +%= @truncate(edges);
+            return;
         }
+        const period: u16 = if (self.target == 0) 256 else self.target;
+        const rest = edges - first;
+        self.output +%= @truncate(1 + rest / period);
+        self.stage2 = @intCast(rest % period);
     }
 
     fn synchronizeLine(self: *Timer, globally_enabled: bool) void {
@@ -183,10 +204,12 @@ pub const Smp = struct {
     }
 
     pub fn cpuWritePort(self: *Smp, port: u2, value: u8) void {
-        self.io.port_epoch +%= 1;
         self.io.cpu_to_smp[port] = value;
-        self.io.cpu_port_epoch[port] = self.io.port_epoch;
-        self.io.cpu_port_tick[port] = self.oscillator_ticks;
+        if (diagnostics) {
+            self.io.port_epoch +%= 1;
+            self.io.cpu_port_epoch[port] = self.io.port_epoch;
+            self.io.cpu_port_tick[port] = self.oscillator_ticks;
+        }
         // The S-CPU may use a 16-bit store at $2140: port 0 is written before
         // port 1 inside the same instruction. Defer the semantic IPL edge to
         // the instruction boundary so it observes the new data byte instead
@@ -283,18 +306,20 @@ pub const Smp = struct {
     }
 
     pub fn beginTrace(self: *Smp) void {
+        if (!diagnostics) return;
         self.trace_len = 0;
         self.fault = null;
         self.trace_enabled = true;
     }
 
     pub fn endTrace(self: *Smp) []const BusCycle {
+        if (!diagnostics) return &.{};
         self.trace_enabled = false;
         return self.trace[0..self.trace_len];
     }
 
     pub fn step(self: *Smp) !void {
-        self.trace_len = 0;
+        if (diagnostics) self.trace_len = 0;
         self.fault = null;
         if (self.stopped or self.waiting) {
             self.lowPowerCycles();
@@ -308,6 +333,7 @@ pub const Smp = struct {
     }
 
     fn record(self: *Smp, cycle: BusCycle) void {
+        if (!diagnostics) return;
         if (!self.trace_enabled) return;
         if (self.trace_len >= self.trace.len) {
             self.fault = .trace_overflow;
@@ -549,10 +575,12 @@ pub const Smp = struct {
             },
             0xf4...0xf7 => {
                 const port = address - 0xf4;
-                self.io.port_epoch +%= 1;
                 self.io.smp_to_cpu[port] = value;
-                self.io.smp_port_epoch[port] = self.io.port_epoch;
-                self.io.smp_port_tick[port] = self.oscillator_ticks;
+                if (diagnostics) {
+                    self.io.port_epoch +%= 1;
+                    self.io.smp_port_epoch[port] = self.io.port_epoch;
+                    self.io.smp_port_tick[port] = self.oscillator_ticks;
+                }
             },
             0xf8, 0xf9 => self.io.auxiliary[address - 0xf8] = value,
             0xfa...0xfc => self.timers[address - 0xfa].target = value,
@@ -1405,3 +1433,4 @@ test "oscillator accumulation is partition invariant" {
     try std.testing.expectEqual(once.oscillator_ticks, split.oscillator_ticks);
     try std.testing.expectEqual(once.oscillator_phase, split.oscillator_phase);
 }
+const diagnostics = @import("config.zig").diagnostics;

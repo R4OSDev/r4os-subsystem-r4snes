@@ -157,7 +157,7 @@ fn report(machine: *const core.machine.Machine, guest_ns: u64, nonzero_audio_byt
             machine.cpu.stopped,
             machine.scpu.nmi_enabled,
             machine.scpu.irq_flag,
-            machine.scpu.dma_enable,
+            machine.scpu.dma.manualMask(),
             machine.scpu.hdma_enable,
         },
     );
@@ -214,3 +214,4 @@ fn report(machine: *const core.machine.Machine, guest_ns: u64, nonzero_audio_byt
         },
     );
 }
+pub const r4snes_trace_enabled = true;

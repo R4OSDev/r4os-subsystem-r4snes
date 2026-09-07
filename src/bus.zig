@@ -41,8 +41,10 @@ pub const Bus = struct {
 
     pub fn read(self: *Bus, cart: *cartridge.Cartridge, mmio: anytype, raw_address: u32) Access {
         const address = raw_address & address_mask;
-        self.last_address = address;
-        self.reads +%= 1;
+        if (diagnostics) {
+            self.last_address = address;
+            self.reads +%= 1;
+        }
 
         if (wramIndex(address)) |index| {
             return self.completeRead(self.wram[index], 8, .wram, .cpu);
@@ -65,8 +67,10 @@ pub const Bus = struct {
 
     pub fn write(self: *Bus, cart: *cartridge.Cartridge, mmio: anytype, raw_address: u32, value: u8) Access {
         const address = raw_address & address_mask;
-        self.last_address = address;
-        self.writes +%= 1;
+        if (diagnostics) {
+            self.last_address = address;
+            self.writes +%= 1;
+        }
         self.cpu_open_bus = value;
 
         if (wramIndex(address)) |index| {
@@ -182,3 +186,4 @@ fn mmioCycles(address: u32) u8 {
     const offset: u16 = @truncate(address);
     return if (offset >= 0x4000 and offset <= 0x41FF) 12 else 6;
 }
+const diagnostics = @import("config.zig").diagnostics;

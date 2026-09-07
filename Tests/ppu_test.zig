@@ -1,6 +1,89 @@
 const std = @import("std");
 const core = @import("core");
 
+test "PPU shares main sub decoding and invalidates cached VRAM rows within a line" {
+    var ppu = core.ppu.Ppu{};
+    hideAllSprites(&ppu);
+    configureSolidBackground(&ppu, 1, 1, 0x001f);
+    setColour(&ppu, 2, 0x03e0);
+    write(&ppu, 0x212d, 1);
+    ppu.work = .{};
+    ppu.renderScanline(0);
+    try std.testing.expectEqual(@as(u64, 256), ppu.work.background_pixels);
+    try std.testing.expectEqual(@as(u64, 1), ppu.work.decoded_rows);
+    try std.testing.expectEqual(@as(u64, 32), ppu.work.tilemap_reads);
+    try std.testing.expectEqual(@as(u8, 1), ppu.cgram_internal_address);
+
+    var clock = core.timing.Clock{ .h_counter = 88, .v_counter = 1 };
+    ppu.onMasterTick(&clock);
+    try std.testing.expectEqual(@as(u32, 0xffff0000), ppu.working_frame[0]);
+    write(&ppu, 0x2100, 0x8f);
+    write(&ppu, 0x2115, 0x80);
+    write(&ppu, 0x2116, 0);
+    write(&ppu, 0x2117, 0x20);
+    write(&ppu, 0x2118, 0);
+    write(&ppu, 0x2119, 0xff);
+    write(&ppu, 0x2100, 0x0f);
+    clock.h_counter = 92;
+    ppu.onMasterTick(&clock);
+    try std.testing.expectEqual(@as(u32, 0xffff0000), ppu.working_frame[0]);
+    try std.testing.expectEqual(@as(u32, 0xff00ff00), ppu.working_frame[1]);
+    try std.testing.expectEqual(@as(u8, 2), ppu.cgram_internal_address);
+
+    // New character base selects another physical row without a VRAM write.
+    write(&ppu, 0x210b, 0);
+    clock.h_counter = 96;
+    ppu.onMasterTick(&clock);
+    try std.testing.expectEqual(@as(u32, 0xff000000), ppu.working_frame[2]);
+    // The sub path resets the palette latch to backdrop even if main used BG1.
+    write(&ppu, 0x210b, 2);
+    write(&ppu, 0x212d, 0);
+    clock.h_counter = 100;
+    ppu.onMasterTick(&clock);
+    try std.testing.expectEqual(@as(u32, 0xff00ff00), ppu.working_frame[3]);
+    try std.testing.expectEqual(@as(u8, 0), ppu.cgram_internal_address);
+}
+
+test "PPU clears visible storage only and preserves geometry growth and blank generations" {
+    var ppu = core.ppu.Ppu{};
+    hideAllSprites(&ppu);
+    configureSolidBackground(&ppu, 1, 1, 0x001f);
+    _ = ppu.renderCompleteFrame();
+    _ = ppu.takeDamage();
+    ppu.work = .{};
+    const unchanged = ppu.renderCompleteFrame();
+    try std.testing.expectEqual(@as(u64, 256 * 224), ppu.work.cleared_pixels);
+    try std.testing.expectEqual(@as(u64, 0), ppu.work.published_writes);
+    try std.testing.expectEqual(@as(u64, 1), unchanged.generation);
+    try std.testing.expect(ppu.takeDamage() == null);
+
+    // Start a new progressive field, then grow to the maximum geometry before
+    // rendering its new area. Unvisited rows and columns must start black.
+    var clock = core.timing.Clock{ .frame = 1 };
+    ppu.onMasterTick(&clock);
+    clock.v_counter = 1;
+    clock.h_counter = 88;
+    ppu.onMasterTick(&clock);
+    write(&ppu, 0x2133, 0x0d);
+    try std.testing.expectEqual(@as(u32, 0xffff0000), ppu.working_frame[0]);
+    try std.testing.expectEqual(@as(u32, 0xff000000), ppu.working_frame[511]);
+    try std.testing.expectEqual(@as(u32, 0xff000000), ppu.working_frame[477 * 512 + 511]);
+    write(&ppu, 0x2133, 0);
+    write(&ppu, 0x2133, 0x0d);
+    try std.testing.expectEqual(@as(u32, 0xffff0000), ppu.working_frame[0]);
+    write(&ppu, 0x2100, 0x8f);
+    const blank = ppu.renderCompleteFrame();
+    _ = ppu.takeDamage();
+    ppu.work = .{};
+    try std.testing.expectEqual(blank.generation, ppu.renderCompleteFrame().generation);
+    try std.testing.expectEqual(@as(u64, 0), ppu.work.cleared_pixels);
+    try std.testing.expectEqual(@as(u64, 0), ppu.work.published_writes);
+    try std.testing.expect(ppu.takeDamage() == null);
+    write(&ppu, 0x2133, 0);
+    _ = ppu.renderCompleteFrame();
+    for (ppu.published_frame[256 * 224 ..]) |pixel| try std.testing.expectEqual(@as(u32, 0xff000000), pixel);
+}
+
 test "PPU VRAM CGRAM and OAM ports preserve latches remapping and active-display locks" {
     var ppu = core.ppu.Ppu{};
 

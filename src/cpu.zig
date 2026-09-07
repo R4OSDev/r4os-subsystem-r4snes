@@ -59,7 +59,10 @@ pub const StepResult = struct {
 
 pub const CpuError = error{TraceOverflow};
 
-const trace_capacity = 32;
+// Conservative bound covering instructions, reset and interrupt sequences.
+// The diagnostic trace checks this same operation bound for every decoder.
+pub const maximum_operation_bus_cycles: usize = 32;
+const trace_capacity = maximum_operation_bus_cycles;
 const address_mask: u32 = 0x00ff_ffff;
 
 const AddressIntent = enum { read, write, modify };
@@ -120,7 +123,7 @@ pub const Cpu = struct {
         // An NMI may become pending inside the accounted span; WAI remains
         // set until the following CPU operation acknowledges that edge.
         std.debug.assert(self.waiting and elapsed != 0);
-        self.trace_len = 0;
+        if (diagnostics) self.trace_len = 0;
         self.master_cycles +%= elapsed;
     }
 
@@ -134,7 +137,7 @@ pub const Cpu = struct {
     }
 
     pub fn step(self: *Cpu, port: anytype) CpuError!StepResult {
-        self.trace_len = 0;
+        if (diagnostics) self.trace_len = 0;
         const cycles_before = self.master_cycles;
 
         if (self.reset_pending) {
@@ -171,7 +174,7 @@ pub const Cpu = struct {
         const byte = try self.fetch(port);
         const instruction = opcode.descriptor(byte);
         try self.execute(port, instruction);
-        self.instructions +%= 1;
+        if (diagnostics) self.instructions +%= 1;
         return self.makeResult(.executed, true, byte, cycles_before);
     }
 
@@ -1180,9 +1183,12 @@ pub const Cpu = struct {
     }
 
     fn record(self: *Cpu, operation: MicroOperation) CpuError!void {
-        if (self.trace_len == trace_capacity) return error.TraceOverflow;
-        self.trace[self.trace_len] = operation;
-        self.trace_len += 1;
+        if (diagnostics) {
+            if (self.trace_len == trace_capacity) return error.TraceOverflow;
+            self.trace[self.trace_len] = operation;
+            self.trace_len += 1;
+        }
         self.master_cycles +%= operation.master_cycles;
     }
 };
+const diagnostics = @import("config.zig").diagnostics;

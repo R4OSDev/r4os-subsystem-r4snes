@@ -1,3 +1,4 @@
+const diagnostics = @import("config.zig").diagnostics;
 const std = @import("std");
 
 pub const native_sample_rate: u32 = 32_000;
@@ -696,7 +697,7 @@ pub const Dsp = struct {
         self.last_native = .{ left, right };
         self.sample_counter +%= 1;
         self.stats.native_frames +%= 1;
-        hashFrame(&self.native_digest, left, right);
+        if (diagnostics) hashFrame(&self.native_digest, left, right);
         if (self.capture_enabled) self.resample(.{ left, right });
     }
 
@@ -736,7 +737,7 @@ pub const Dsp = struct {
         self.stats.resampled_frames +%= 1;
         self.stats.frames_queued +%= 1;
         if (left == 0 and right == 0) self.stats.silence_frames +%= 1;
-        hashFrame(&self.resampled_digest, left, right);
+        if (diagnostics) hashFrame(&self.resampled_digest, left, right);
     }
 
     fn clearPcm(self: *Dsp) void {

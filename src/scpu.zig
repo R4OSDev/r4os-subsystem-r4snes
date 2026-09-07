@@ -45,7 +45,6 @@ pub const Scpu = struct {
     h_latch_high: bool = false,
     v_latch_high: bool = false,
     counters_latched: bool = false,
-    dma_enable: u8 = 0,
     hdma_enable: u8 = 0,
     dma: dma_mod.Controller = .{},
     interrupt_polls: u64 = 0,
@@ -185,7 +184,6 @@ pub const Scpu = struct {
             0x4209 => self.vtime = (self.vtime & 0x100) | value,
             0x420a => self.vtime = (self.vtime & 0x0ff) | (@as(u16, value & 1) << 8),
             0x420b => {
-                self.dma_enable = value;
                 self.dma.requestManual(value, 6);
             },
             0x420c => {
@@ -253,7 +251,7 @@ pub const Scpu = struct {
             if (self.h_irq_enabled or self.v_irq_enabled) {
                 self.pollInterrupts(clock, cpu);
             } else {
-                self.interrupt_polls +%= 1;
+                if (diagnostics) self.interrupt_polls +%= 1;
                 self.irq_match = false;
             }
         }
@@ -267,7 +265,7 @@ pub const Scpu = struct {
     }
 
     fn pollInterrupts(self: *Scpu, clock: *const timing.Clock, cpu: *cpu_mod.Cpu) void {
-        self.interrupt_polls +%= 1;
+        if (diagnostics) self.interrupt_polls +%= 1;
         const enabled = self.h_irq_enabled or self.v_irq_enabled;
         const h_target: u16 = (self.htime + 1) << 2;
         const h_match = !self.h_irq_enabled or clock.h_counter == h_target;
@@ -360,7 +358,7 @@ pub const Scpu = struct {
     }
 
     fn mixEvent(self: *Scpu, value: u64) void {
-        self.event_digest = (self.event_digest ^ value) *% 0x100000001b3;
+        if (diagnostics) self.event_digest = (self.event_digest ^ value) *% 0x100000001b3;
     }
 };
 
@@ -432,7 +430,7 @@ fn EventSink(comptime Device: type) type {
         pub fn onSkippedMasterTick(self: *Self, clock: *const timing.Clock) void {
             // With IRQ comparison disabled, a poll has no behavioural effect;
             // preserve its diagnostic counter without entering Scpu.
-            if ((clock.master_cycles & 3) == 0) self.scpu.interrupt_polls +%= 1;
+            if (diagnostics and (clock.master_cycles & 3) == 0) self.scpu.interrupt_polls +%= 1;
         }
     };
 }
@@ -650,3 +648,4 @@ pub fn DmaBusPort(comptime Device: type) type {
         }
     };
 }
+const diagnostics = @import("config.zig").diagnostics;

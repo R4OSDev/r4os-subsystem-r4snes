@@ -175,7 +175,7 @@ fn runCase(
         return error.HostPatternDidNotDrain;
     }
     if (pattern == .regression and !regression_checked) return error.RegressionCaseNotReached;
-    if (metrics.maximum_grant > slice_limit or metrics.maximum_execution > @as(u64, slice_limit) + 64)
+    if (metrics.maximum_grant > slice_limit or metrics.maximum_execution > @as(u64, slice_limit) + core.machine.maximum_operation_overshoot_master_cycles)
         return error.SliceBoundExceeded;
     if (machine.smp.dsp.queuedFrames() != 0 or machine.smp.dsp.stats.frames_dropped != 0 or
         machine.smp.dsp.stats.underflow_frames != 0 or

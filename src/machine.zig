@@ -9,6 +9,13 @@ const ppu = @import("ppu.zig");
 const scpu = @import("scpu.zig");
 const smp = @import("smp.zig");
 const timing = @import("timing.zig");
+const performance = @import("performance.zig");
+
+// Slowest bus access is 12 clocks; a complete bounded operation can encounter
+// one 40-clock refresh (the sum is shorter than a scanline). A positive grant
+// may therefore be crossed by at most one fewer clock than that whole span.
+pub const maximum_operation_overshoot_master_cycles =
+    cpu.maximum_operation_bus_cycles * 12 + timing.refresh_master_cycles - 1;
 
 pub const RunFault = enum {
     closed,
@@ -33,6 +40,7 @@ pub const RunResult = struct {
 const SystemMmio = struct {
     display: *ppu.Ppu,
     audio: *smp.Smp,
+    profile: ?*performance.Profile = null,
 
     pub fn read(self: *SystemMmio, address: u32, cpu_open_bus: u8, ppu_open_bus: u8) bus.MmioRead {
         const offset: u16 = @truncate(address);
@@ -56,7 +64,9 @@ const SystemMmio = struct {
     }
 
     pub fn onMasterTick(self: *SystemMmio, clock: *const timing.Clock) void {
+        const started = if (self.profile) |p| p.now() else 0;
         self.display.onMasterTick(clock);
+        if (self.profile) |p| p.add(.ppu, p.now() -| started);
     }
 
     pub fn filteredMasterTickRequired(self: *const SystemMmio, clock: *const timing.Clock) bool {
@@ -85,6 +95,7 @@ pub const Machine = struct {
     slices: u64 = 0,
     maximum_operation_overshoot: u64 = 0,
     closed: bool = false,
+    profile: ?*performance.Profile = null,
 
     pub fn init(instance_id: u64) Machine {
         return .{ .instance_id = instance_id };
@@ -175,8 +186,13 @@ pub const Machine = struct {
     }
 
     fn runOperation(self: *Machine, cart: *cartridge.Cartridge, maximum_master_cycles: u32) ?RunFault {
+        // Clock calls only in one operation out of 1024, and only when an
+        // explicit profile is attached. Normal emulation never reads them.
+        const profile = if (self.profile) |p| p.operation() else null;
+        var phase_started = if (profile) |p| p.now() else 0;
+        const ppu_before = if (profile) |p| p.elapsed(.ppu) else 0;
         self.cpu.setIrqLine(self.scpu.irq_flag or cart.sa1CpuIrqPending() or cart.cx4CpuIrqPending());
-        var mmio = SystemMmio{ .display = &self.ppu, .audio = &self.smp };
+        var mmio = SystemMmio{ .display = &self.ppu, .audio = &self.smp, .profile = profile };
         var port = scpu.TimedPortWithDevice(*SystemMmio){
             .bus = &self.bus,
             .cartridge = cart,
@@ -190,8 +206,10 @@ pub const Machine = struct {
         if (port.cpuReady()) {
             if (self.cpu.canFastForwardWaiting() and
                 self.scpu.math_operation == .none and
-                self.scpu.dma_enable == 0 and self.scpu.hdma_enable == 0)
+                self.scpu.hdma_enable == 0)
             {
+                // cpuReady() above consults the actual DMA controller. A
+                // completed MDMAEN request must not keep WAI on single idles.
                 _ = port.fastForwardWaiting(maximum_master_cycles);
             } else {
                 _ = self.cpu.step(&port) catch return .cpu;
@@ -199,6 +217,11 @@ pub const Machine = struct {
         } else {
             const result = port.serviceDmaStep();
             if (!result.progressed) return .dma_stalled;
+        }
+        if (profile) |p| {
+            const now = p.now();
+            p.add(.cpu, (now -| phase_started) -| (p.elapsed(.ppu) -| ppu_before));
+            phase_started = now;
         }
         // Observe a port-0 IPL edge only after the complete S-CPU/DMA
         // operation. A 16-bit store to $2140 writes the new port-1 payload
@@ -211,7 +234,14 @@ pub const Machine = struct {
         // clock and removes the dominant product-host hot path.
         _ = self.smp.advanceOscillator(self.clock.profile().master_hz, elapsed);
         if (self.serviceSmp()) return .smp;
-        return self.serviceCoprocessors(cart, elapsed);
+        if (profile) |p| {
+            const now = p.now();
+            p.add(.apu, now -| phase_started);
+            phase_started = now;
+        }
+        const result = self.serviceCoprocessors(cart, elapsed);
+        if (profile) |p| p.add(.coprocessor, p.now() -| phase_started);
+        return result;
     }
 
     fn serviceSmp(self: *Machine) bool {

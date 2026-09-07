@@ -34,6 +34,14 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
     });
     performance_core.addImport("r4os", performance_r4os);
+    const release_check_root = b.createModule(.{
+        .root_source_file = b.path("Tests/release_profile_test.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    release_check_root.addImport("core", performance_core);
+    const release_check = b.addExecutable(.{ .name = "r4snes-release-profile-test", .root_module = release_check_root });
+    const run_release_check = b.addRunArtifact(release_check);
     const performance_root = b.createModule(.{
         .root_source_file = b.path("Tests/performance_harness.zig"),
         .target = b.graph.host,
@@ -45,6 +53,7 @@ pub fn build(b: *std.Build) void {
         .root_module = performance_root,
     });
     const run_performance = b.addRunArtifact(performance_harness);
+    if (b.args) |args| run_performance.addArgs(args);
 
     const cartridge_probe_root = b.createModule(.{
         .root_source_file = b.path("Tests/cartridge_probe.zig"),
@@ -223,14 +232,16 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Build R4SNES and run deterministic owner tests");
     test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_release_check.step);
     test_step.dependOn(&run_wav_analyzer.step);
     test_step.dependOn(&run_maturity.step);
 
     const unit_step = b.step("unit-test", "Run bounded R4SNES owner tests without maturity or performance profiles");
     unit_step.dependOn(&run_unit_tests.step);
+    unit_step.dependOn(&run_release_check.step);
     unit_step.dependOn(&run_wav_analyzer.step);
 
-    const performance_step = b.step("performance-test", "Measure one deterministic NTSC guest second in ReleaseFast");
+    const performance_step = b.step("performance-test", "Explicit five-sample active NTSC scene in ReleaseFast, or --check-scene without measurement");
     performance_step.dependOn(&run_performance.step);
 
     const cartridge_probe_step = b.step("cartridge-probe", "Run a local cartridge with per-second CPU, PPU and SMP telemetry");

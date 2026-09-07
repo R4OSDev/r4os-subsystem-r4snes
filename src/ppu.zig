@@ -1,5 +1,6 @@
 const bus = @import("bus.zig");
 const timing = @import("timing.zig");
+const diagnostics = @import("config.zig").diagnostics;
 
 pub const frame_width: usize = 256;
 pub const hires_width: usize = 512;
@@ -46,6 +47,25 @@ const Candidate = struct {
     priority: u8 = 0,
     layer: u3 = 5,
     colour_math: bool = false,
+    palette_address: ?u8 = null,
+};
+
+const BackgroundCache = struct {
+    map_valid: bool = false,
+    map_address: u16 = 0,
+    map_entry: u16 = 0,
+    row_valid: bool = false,
+    row_address: u16 = 0,
+    row_bpp: u4 = 0,
+    row: [8]u8 = .{0} ** 8,
+};
+
+pub const WorkStats = struct {
+    background_pixels: u64 = 0,
+    tilemap_reads: u64 = 0,
+    decoded_rows: u64 = 0,
+    cleared_pixels: u64 = 0,
+    published_writes: u64 = 0,
 };
 
 const Window = struct {
@@ -139,6 +159,8 @@ pub const Ppu = struct {
     object_size_select: u3 = 0,
 
     backgrounds: [4]Background = [_]Background{.{}} ** 4,
+    background_cache: [4]BackgroundCache = [_]BackgroundCache{.{}} ** 4,
+    work: WorkStats = .{},
     bg_scroll_latch: u8 = 0,
     bg_horizontal_latch: u8 = 0,
 
@@ -155,7 +177,10 @@ pub const Ppu = struct {
     /// frames are packed to their current native geometry before exposure.
     working_frame: [frame_capacity]u32 = [_]u32{0xff000000} ** frame_capacity,
     published_frame: [frame_capacity]u32 = [_]u32{0xff000000} ** frame_capacity,
-    sub_line: [hires_width]u32 = [_]u32{0xff000000} ** hires_width,
+    initialized_width: u16 = hires_width,
+    initialized_height: u16 = interlace_overscan_height,
+    storage_black: bool = true,
+    published_black: bool = true,
     frame_generation: u64 = 0,
     frame_digest: u64 = fnv_offset,
     last_published_beam_frame: u64 = ~@as(u64, 0),
@@ -239,6 +264,9 @@ pub const Ppu = struct {
 
     fn renderScanlineField(self: *Ppu, y: u16, field: bool) void {
         if (y >= self.visibleHeight()) return;
+        // Model callers may fill VRAM directly between complete scanlines.
+        self.invalidateBackgroundCache();
+        self.ensureFrameStorage();
         self.prepareSpriteLine(y);
         var x: u16 = 0;
         while (x < self.nativeWidth()) : (x += 1) self.renderPixel(x, y, field);
@@ -451,6 +479,7 @@ pub const Ppu = struct {
             },
             else => if (offset < 0x2100 or offset > 0x213f) return false,
         }
+        if (offset == 0x2105 or offset == 0x2133) self.ensureFrameStorage();
         return true;
     }
 
@@ -471,26 +500,49 @@ pub const Ppu = struct {
     }
 
     fn beginField(self: *Ppu, field: bool) void {
-        if (!self.interlace) {
-            @memset(self.working_frame[0..], 0xff000000);
-            self.interlace_pair_started = false;
-        } else if (!field) {
-            @memset(self.working_frame[0..], 0xff000000);
-            self.interlace_pair_started = true;
-        } else if (!self.interlace_pair_started) {
-            @memset(self.working_frame[0..], 0xff000000);
+        self.invalidateBackgroundCache();
+        if (!self.interlace or !field or !self.interlace_pair_started) {
+            if (!self.storage_black) {
+                self.initialized_width = 0;
+                self.initialized_height = 0;
+                self.storage_black = true;
+            }
+            self.ensureFrameStorage();
         }
+        if (!self.interlace) self.interlace_pair_started = false else if (!field) self.interlace_pair_started = true;
         self.range_over = false;
         self.time_over = false;
         self.sprite_line_valid = false;
         self.oam_address = self.oam_base_address;
     }
 
+    /// Only clear the visible rectangle. Geometry growth clears newly exposed
+    /// columns/rows before use; shrinking never discards earlier field pixels.
+    /// A paired interlace field keeps the first field's initialized contents.
+    fn ensureFrameStorage(self: *Ppu) void {
+        const width = @max(self.nativeWidth(), self.initialized_width);
+        const height = @max(self.nativeHeight(), self.initialized_height);
+        if (width == self.initialized_width and height == self.initialized_height) return;
+        for (0..height) |y| {
+            const start: usize = if (y < self.initialized_height) self.initialized_width else 0;
+            const row = y * hires_width;
+            @memset(self.working_frame[row + start .. row + width], 0xff000000);
+            if (diagnostics) self.work.cleared_pixels += width - start;
+        }
+        self.initialized_width = width;
+        self.initialized_height = height;
+    }
+
     fn publishFrame(self: *Ppu, beam_frame: u64) void {
+        self.ensureFrameStorage();
         const width = self.nativeWidth();
         const height = self.nativeHeight();
         const count = @as(usize, width) * height;
         const geometry_changed = width != self.published_width or height != self.published_height or self.frame_generation == 0;
+        if (!geometry_changed and self.storage_black and self.published_black) {
+            self.last_published_beam_frame = beam_frame;
+            return;
+        }
         var changed = geometry_changed;
         var min_x: u16 = width;
         var min_y: u16 = height;
@@ -502,21 +554,23 @@ pub const Ppu = struct {
             while (x < width) : (x += 1) {
                 const destination = @as(usize, y) * width + x;
                 const next = self.working_frame[@as(usize, y) * hires_width + x];
-                if (!geometry_changed and self.published_frame[destination] != next) {
+                if (geometry_changed or self.published_frame[destination] != next) {
                     changed = true;
                     min_x = @min(min_x, x);
                     min_y = @min(min_y, y);
                     max_x = @max(max_x, x);
                     max_y = @max(max_y, y);
+                    self.published_frame[destination] = next;
+                    if (diagnostics) self.work.published_writes += 1;
                 }
-                self.published_frame[destination] = next;
             }
         }
         if (!changed) {
             self.last_published_beam_frame = beam_frame;
             return;
         }
-        if (count < frame_capacity) @memset(self.published_frame[count..], 0xff000000);
+        const previous_count = @as(usize, self.published_width) * self.published_height;
+        if (count < previous_count) @memset(self.published_frame[count..previous_count], 0xff000000);
         var digest = fnv_offset;
         for (self.published_frame[0..count]) |pixel| {
             digest = mix(digest, @truncate(pixel));
@@ -526,6 +580,7 @@ pub const Ppu = struct {
         }
         self.frame_digest = digest;
         self.frame_generation +%= 1;
+        self.published_black = self.storage_black;
         self.published_width = width;
         self.published_height = height;
         self.damage_pending = true;
@@ -548,38 +603,44 @@ pub const Ppu = struct {
         const output_y: u16 = if (self.interlace) y * 2 + @intFromBool(field) else y;
         const index = @as(usize, output_y) * hires_width + x;
         if (self.forced_blank) {
-            self.working_frame[index] = 0xff000000;
-            self.sub_line[x] = 0xff000000;
+            if (!self.storage_black) self.working_frame[index] = 0xff000000;
             return;
         }
+        self.storage_black = false;
         // With no main/sub layers, clipping or colour math the hardware emits
         // the backdrop on both paths. This common boot/menu state needs no
         // candidate construction or window composition.
         if (self.main_enable == 0 and self.sub_enable == 0 and self.clip_mode == 0 and self.colour_math_enable == 0) {
             const backdrop = self.toXrgb(self.colour(0));
             self.working_frame[index] = backdrop;
-            self.sub_line[x] = backdrop;
             return;
         }
         const logical_x: u16 = if (self.nativeWidth() == hires_width) x >> 1 else x;
         const layer_x: u16 = if (self.mode == 5 or self.mode == 6) x else logical_x;
-        const main = self.outputCandidate(self.main_enable, self.main_window_enable, layer_x, logical_x, y, field);
-        const sub = self.outputCandidate(self.sub_enable, self.sub_window_enable, layer_x, logical_x, y, field);
+        var backgrounds: [4]?Candidate = .{null} ** 4;
+        const main = self.outputCandidate(self.main_enable, self.main_window_enable, layer_x, logical_x, y, field, &backgrounds);
+        const sub = self.outputCandidate(self.sub_enable, self.sub_window_enable, layer_x, logical_x, y, field, &backgrounds);
         const main_colour = self.composeMain(main, sub, logical_x);
         const output_colour = if ((self.pseudo_hires or self.mode == 5 or self.mode == 6) and (x & 1) == 0)
             self.composeMain(sub, main, logical_x)
         else
             main_colour;
         self.working_frame[index] = self.toXrgb(output_colour);
-        self.sub_line[x] = self.toXrgb(sub.colour);
     }
 
-    fn outputCandidate(self: *Ppu, enable: u5, window_enable: u5, raw_x: u16, logical_x: u16, y: u16, field: bool) Candidate {
+    fn outputCandidate(self: *Ppu, enable: u5, window_enable: u5, raw_x: u16, logical_x: u16, y: u16, field: bool, backgrounds: *[4]?Candidate) Candidate {
         var best = Candidate{ .present = true, .colour = self.colour(0), .priority = 0, .layer = 5 };
         for (0..4) |index| {
             if ((enable & (@as(u5, 1) << @intCast(index))) == 0) continue;
             if ((window_enable & (@as(u5, 1) << @intCast(index))) != 0 and self.windowTest(index, @truncate(logical_x))) continue;
-            const candidate = self.backgroundPixel(index, raw_x, y, field);
+            const candidate = backgrounds[index] orelse blk: {
+                const decoded = self.backgroundPixel(index, raw_x, y, field);
+                backgrounds[index] = decoded;
+                break :blk decoded;
+            };
+            // CGRAM's active-display port observes palette fetch order, even
+            // for a losing candidate. Reuse the pixels, retain that latch.
+            if (candidate.palette_address) |address| self.cgram_internal_address = address;
             if (candidate.present and candidate.priority > best.priority) best = candidate;
         }
         if ((enable & 0x10) != 0 and ((window_enable & 0x10) == 0 or !self.windowTest(4, @truncate(logical_x))) and self.object_present[logical_x]) {
@@ -597,6 +658,7 @@ pub const Ppu = struct {
     }
 
     fn backgroundPixel(self: *Ppu, index: usize, raw_x: u16, raw_y: u16, field: bool) Candidate {
+        if (diagnostics) self.work.background_pixels += 1;
         if (self.mode == 7) return self.mode7Pixel(index, raw_x, raw_y);
         const bpp = bitsPerPixel(self.mode, index) orelse return .{};
         const hires = self.mode == 5 or self.mode == 6;
@@ -616,7 +678,7 @@ pub const Ppu = struct {
         const tile_height: u16 = if (bg.tile_size_16) 16 else 8;
         const tile_x: u16 = x / tile_width;
         const tile_y: u16 = y / tile_height;
-        const entry = self.tilemapEntry(index, tile_x, tile_y);
+        const entry = self.cachedTilemapEntry(index, tile_x, tile_y);
         const high_priority = (entry & 0x2000) != 0;
         const horizontal_flip = (entry & 0x4000) != 0;
         const vertical_flip = (entry & 0x8000) != 0;
@@ -630,18 +692,21 @@ pub const Ppu = struct {
         if (bg.tile_size_16) character +%= @as(u16, pixel_y >> 3) << 4;
         pixel_x &= 7;
         pixel_y &= 7;
-        const colour_index = self.planarPixel(bg.character_base, character, bpp, pixel_x, pixel_y);
+        const colour_index = self.cachedPlanarPixel(index, bg.character_base, character, bpp, pixel_x, pixel_y);
         if (colour_index == 0) return .{};
         const group: u3 = @truncate(entry >> 10);
-        const colour_word = if (self.direct_colour and index == 0 and (self.mode == 3 or self.mode == 4) and bpp == 8)
+        const direct = self.direct_colour and index == 0 and (self.mode == 3 or self.mode == 4) and bpp == 8;
+        const palette = backgroundPaletteIndex(self.mode, index, bpp, group, colour_index);
+        const colour_word = if (direct)
             directColour(group, colour_index)
         else
-            self.colour(backgroundPaletteIndex(self.mode, index, bpp, group, colour_index));
+            self.colour(palette);
         return .{
             .present = true,
             .colour = colour_word,
             .priority = backgroundPriority(self.mode, self.bg3_priority, index, high_priority),
             .layer = @truncate(index),
+            .palette_address = if (direct) null else @truncate(palette),
         };
     }
 
@@ -681,12 +746,12 @@ pub const Ppu = struct {
         if (index == 0) {
             if (palette == 0) return .{};
             const colour_word = if (self.direct_colour) directColour(0, palette) else self.colour(palette);
-            return .{ .present = true, .colour = colour_word, .priority = if (self.mode7_extbg) 3 else 2, .layer = 0 };
+            return .{ .present = true, .colour = colour_word, .priority = if (self.mode7_extbg) 3 else 2, .layer = 0, .palette_address = if (self.direct_colour) null else palette };
         }
         const high = (palette & 0x80) != 0;
         palette &= 0x7f;
         if (palette == 0) return .{};
-        return .{ .present = true, .colour = self.colour(palette), .priority = if (high) 5 else 1, .layer = 1 };
+        return .{ .present = true, .colour = self.colour(palette), .priority = if (high) 5 else 1, .layer = 1, .palette_address = palette };
     }
 
     fn composeMain(self: *Ppu, main: Candidate, sub: Candidate, logical_x: u16) u16 {
@@ -753,6 +818,10 @@ pub const Ppu = struct {
     }
 
     fn tilemapEntry(self: *const Ppu, index: usize, raw_tile_x: u16, raw_tile_y: u16) u16 {
+        return self.vramWord(self.tilemapAddress(index, raw_tile_x, raw_tile_y));
+    }
+
+    fn tilemapAddress(self: *const Ppu, index: usize, raw_tile_x: u16, raw_tile_y: u16) u16 {
         const bg = self.backgrounds[index];
         const width: u16 = if ((bg.screen_size & 1) != 0) 64 else 32;
         const height: u16 = if ((bg.screen_size & 2) != 0) 64 else 32;
@@ -762,21 +831,48 @@ pub const Ppu = struct {
         const vertical_block: u16 = if (tile_y >= 32) (if (width == 64) 2048 else 1024) else 0;
         const word_address = (bg.screen_base +% horizontal_block +% vertical_block +%
             ((tile_y & 31) << 5) +% (tile_x & 31)) & 0x7fff;
-        return self.vramWord(word_address);
+        return word_address;
     }
 
-    fn planarPixel(self: *const Ppu, character_base: u16, character: u16, bpp: u4, x: u8, y: u8) u8 {
-        const words_per_character: u16 = @as(u16, bpp) * 4;
-        const base = character_base +% character *% words_per_character;
-        const mask: u8 = @as(u8, 0x80) >> @intCast(x & 7);
-        var result: u8 = 0;
-        var pair: u4 = 0;
-        while (pair < bpp / 2) : (pair += 1) {
-            const word = self.vramWord(base +% @as(u16, pair) * 8 +% y);
-            if ((@as(u8, @truncate(word)) & mask) != 0) result |= @as(u8, 1) << @intCast(pair * 2);
-            if ((@as(u8, @truncate(word >> 8)) & mask) != 0) result |= @as(u8, 2) << @intCast(pair * 2);
+    fn invalidateBackgroundCache(self: *Ppu) void {
+        for (&self.background_cache) |*cache| {
+            cache.map_valid = false;
+            cache.row_valid = false;
         }
-        return result;
+    }
+
+    fn cachedTilemapEntry(self: *Ppu, index: usize, x: u16, y: u16) u16 {
+        const address = self.tilemapAddress(index, x, y);
+        const cache = &self.background_cache[index];
+        if (!cache.map_valid or cache.map_address != address) {
+            cache.map_entry = self.vramWord(address);
+            cache.map_address = address;
+            cache.map_valid = true;
+            if (diagnostics) self.work.tilemap_reads += 1;
+        }
+        return cache.map_entry;
+    }
+
+    fn cachedPlanarPixel(self: *Ppu, index: usize, character_base: u16, character: u16, bpp: u4, x: u8, y: u8) u8 {
+        const words_per_character: u16 = @as(u16, bpp) * 4;
+        const address = (character_base +% character *% words_per_character +% y) & 0x7fff;
+        const cache = &self.background_cache[index];
+        if (!cache.row_valid or cache.row_address != address or cache.row_bpp != bpp) {
+            cache.row = .{0} ** 8;
+            var pair: u4 = 0;
+            while (pair < bpp / 2) : (pair += 1) {
+                const word = self.vramWord(address +% @as(u16, pair) * 8);
+                inline for (0..8) |pixel| {
+                    const bits = ((word >> (7 - pixel)) & 1) | (((word >> (15 - pixel)) & 1) << 1);
+                    cache.row[pixel] |= @as(u8, @intCast(bits)) << @intCast(pair * 2);
+                }
+            }
+            cache.row_address = address;
+            cache.row_bpp = bpp;
+            cache.row_valid = true;
+            if (diagnostics) self.work.decoded_rows += 1;
+        }
+        return cache.row[x & 7];
     }
 
     pub fn prepareSpriteLine(self: *Ppu, y: u16) void {
@@ -920,6 +1016,7 @@ pub const Ppu = struct {
         if (self.vramAccessible()) {
             const index = @as(usize, self.remappedVramAddress()) * 2 + @intFromBool(high);
             self.vram[index] = value;
+            self.invalidateBackgroundCache();
         }
         if (high == self.vram_increment_high) self.incrementVram();
     }
