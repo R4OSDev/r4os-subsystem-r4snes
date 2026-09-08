@@ -316,7 +316,8 @@ pub const Ppu = struct {
     }
 
     pub fn synchronizeClock(self: *const Ppu, clock: *timing.Clock) void {
-        clock.interlace = self.interlace;
+        clock.interlace_requested = self.interlace;
+        clock.overscan = self.overscan;
     }
 
     pub fn memoryDigest(self: *const Ppu) u64 {

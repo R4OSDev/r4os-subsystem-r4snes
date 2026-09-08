@@ -137,7 +137,7 @@ test "5A22 multiplier and divider expose progressive integer results" {
     try std.testing.expectEqual(@as(u16, 1_000), h.scpu.rdmpy);
 }
 
-test "refresh steals forty clocks and interrupt edges drive the CPU lines" {
+test "refresh steals forty clocks and delayed interrupt flags retain their hold time" {
     var h = Harness{};
     h.clock.h_counter = 536;
     h.clock.refresh_position = 538;
@@ -146,14 +146,20 @@ test "refresh steals forty clocks and interrupt edges drive the CPU lines" {
     try std.testing.expectEqual(@as(u64, 1), h.clock.refresh_events);
     try std.testing.expectEqual(@as(u64, 40), h.clock.refresh_wait_master_cycles);
 
-    h.write(0x4207, 1); // target ((1 + 1) * 4) = clock 8
+    h.write(0x4207, 1); // delayed compare at H=18, line at H=22
     h.write(0x4208, 0);
     h.write(0x4200, 0x10);
     h.clock.h_counter = 0;
     h.clock.v_counter = 1;
     h.clock.master_cycles = 0;
-    h.advance(9);
+    h.advance(18);
+    try std.testing.expect(!h.scpu.irq_flag);
+    h.advance(1);
     try std.testing.expect(h.scpu.irq_flag);
+    try std.testing.expect(!h.cpu.irq_line);
+    try std.testing.expectEqual(@as(u8, 0x80), h.read(0x4211, 0).value);
+    try std.testing.expect(h.scpu.irq_flag);
+    h.advance(4);
     try std.testing.expect(h.cpu.irq_line);
     try std.testing.expectEqual(@as(u8, 0x80), h.read(0x4211, 0).value);
     try std.testing.expect(!h.cpu.irq_line);
@@ -162,9 +168,19 @@ test "refresh steals forty clocks and interrupt edges drive the CPU lines" {
     h.clock.v_counter = h.clock.profile().vblank_start;
     h.clock.h_counter = 0;
     h.scpu.last_vblank = false;
+    h.advance(2);
+    try std.testing.expect(!h.cpu.nmi_pending);
+    try std.testing.expect(!h.scpu.nmi_flag);
     h.advance(1);
+    try std.testing.expect(h.scpu.nmi_flag);
+    try std.testing.expect(!h.cpu.nmi_pending);
+    try std.testing.expectEqual(@as(u8, 0x82), h.read(0x4210, 0).value);
+    try std.testing.expect(h.scpu.nmi_flag);
+    h.advance(4);
     try std.testing.expect(h.cpu.nmi_pending);
     try std.testing.expect(h.scpu.nmi_flag);
+    try std.testing.expectEqual(@as(u8, 0x82), h.read(0x4210, 0).value);
+    try std.testing.expect(!h.scpu.nmi_flag);
 }
 
 test "keyboard map serial pad and focus policy cover every fixed port-one bit" {
@@ -432,6 +448,7 @@ test "completed DMA restores machine WAI batching and requeued channels remain l
     try std.testing.expectEqual(@as(u8, 0), machine.scpu.dma.manualMask());
     try std.testing.expectEqual(@as(u64, 3), machine.scpu.dma.manual_bytes);
     try std.testing.expect(machine.scpu.cpuMayRun() and machine.cpu.waiting);
+    try std.testing.expect(!machine.cpu.interrupt_poll_locked);
     // A stale MDMAEN mirror would force more than 5000 six-clock idles.
     try std.testing.expect(profile.operations < 1024);
     machine.scpu.dma.channels[0].transfer_size = 1;
@@ -593,4 +610,173 @@ test "productive semantic IPL launch never executes accumulated upload time" {
             try std.testing.expectEqual(core.smp.SemanticIplState.waiting_command, machine.smp.semantic_ipl_state);
         }
     }
+}
+
+// Reference timelines: Ares 7b51c8a CPU IRQ/counter code and Mesen2 b9fa69d
+// InternalRegisters/SnesPpu. These exercise short boundaries, not game runs.
+test "beam modes place VBlank NMI joypad and HDMA at 225 or 240 in both regions" {
+    for ([_]core.timing.Region{ .ntsc, .pal }) |region| {
+        for ([_]bool{ false, true }) |overscan| {
+            var h = Harness{ .clock = core.timing.Clock.init(region) };
+            h.clock.overscan = overscan;
+            const start: u16 = if (overscan) 240 else 225;
+            h.write(0x4200, 0x81);
+            h.clock.v_counter = start - 1;
+            h.clock.h_counter = 1362;
+            h.clock.master_cycles = 1362;
+            try std.testing.expectEqual(@as(u8, 0), h.read(0x4212, 0).value & 0x80);
+            h.advance(2);
+            try std.testing.expectEqual(start, h.clock.v_counter);
+            try std.testing.expectEqual(@as(u8, 0x80), h.read(0x4212, 0).value & 0x80);
+            try std.testing.expect(!h.scpu.nmi_flag and !h.cpu.nmi_pending);
+            h.advance(3);
+            try std.testing.expect(h.scpu.nmi_flag and !h.cpu.nmi_pending);
+            h.advance(4);
+            try std.testing.expect(h.cpu.nmi_pending);
+            h.clock.h_counter = 256;
+            h.clock.master_cycles = 256;
+            h.advance(1);
+            try std.testing.expectEqual(@as(u6, 0), h.scpu.auto_joy_counter);
+            h.write(0x420c, 1);
+            h.clock.v_counter = start - 1;
+            h.clock.h_counter = 1103;
+            h.advance(2);
+            try std.testing.expect(h.scpu.dma.hdma_run_pending);
+            h.scpu.dma.hdma_run_pending = false;
+            h.clock.v_counter = start;
+            h.clock.h_counter = 1103;
+            h.advance(2);
+            try std.testing.expect(!h.scpu.dma.hdma_run_pending);
+        }
+    }
+}
+
+test "beam modes capture interlace and retain 263 or 313 lines on the even field" {
+    const SinkOnly = struct {
+        pub fn onMasterTick(_: @This(), _: *const core.timing.Clock, _: bool, _: bool) void {}
+    };
+    for ([_]core.timing.Region{ .ntsc, .pal }) |region| {
+        for ([_]bool{ false, true }) |field| {
+            var clock = core.timing.Clock.init(region);
+            clock.field = field;
+            clock.interlace_requested = true;
+            clock.v_counter = 127;
+            clock.h_counter = 1363;
+            _ = clock.runSlice(1, SinkOnly{});
+            try std.testing.expect(clock.interlace);
+            const expected: u16 = (if (region == .ntsc) @as(u16, 262) else 312) + @as(u16, @intFromBool(!field));
+            try std.testing.expectEqual(expected, clock.profile().scanlines);
+            // A late SETINI change cannot shorten this already captured field.
+            clock.interlace_requested = false;
+            clock.v_counter = expected - 1;
+            const line: u16 = if (region == .pal and field) 1368 else 1364;
+            try std.testing.expectEqual(line, clock.lineMasterCycles());
+            clock.h_counter = line - 1;
+            const before = clock.master_cycles;
+            _ = clock.runSlice(1, SinkOnly{});
+            try std.testing.expectEqual(@as(u16, 0), clock.v_counter);
+            try std.testing.expectEqual(!field, clock.field);
+            try std.testing.expectEqual(@as(u64, 1), clock.frame);
+            try std.testing.expectEqual(before + 1, clock.master_cycles);
+            try std.testing.expectEqual(expected - 1, clock.beamBefore(2).v);
+            try std.testing.expectEqual(line - 2, clock.beamBefore(2).h);
+        }
+    }
+    var short = core.timing.Clock{ .field = true, .v_counter = 240, .h_counter = 1359 };
+    _ = short.runSlice(1, SinkOnly{});
+    try std.testing.expectEqual(@as(u16, 241), short.v_counter);
+    try std.testing.expectEqual(@as(u16, 1358), short.beamBefore(2).h);
+}
+
+test "production HDMA captures six eight and twelve clock CPU phases and locks interrupt polling" {
+    const image = try makeCpuImage(std.testing.allocator);
+    defer std.testing.allocator.free(image);
+    var cart = try core.cartridge.Cartridge.parse(std.testing.allocator, image);
+    defer cart.deinit();
+    for ([_]u8{ 6, 8, 12 }, [_]u64{ 42, 40, 48 }, [_]u8{ 6, 6, 10 }) |speed, expected, completion| {
+        var h = Harness{};
+        var device = PpuDmaDevice{};
+        var port = core.scpu.TimedPortWithDevice(*PpuDmaDevice){
+            .bus = &h.bus,
+            .cartridge = &cart,
+            .scpu = &h.scpu,
+            .clock = &h.clock,
+            .controllers = &h.ports,
+            .cpu = &h.cpu,
+            .device = &device,
+        };
+        h.clock.v_counter = 1;
+        h.clock.h_counter = 1102;
+        h.clock.master_cycles = 1102;
+        h.write(0x420c, 1);
+        h.scpu.dma.channels[0] = .{ .control = 1, .a_bank = 0x7e, .b_address = 0x20, .hdma_table_address = 0x200, .line_counter = 0x81, .hdma_do_transfer = true };
+        h.bus.wram[0x200..0x203].* = .{ 0x5a, 0xc3, 0 };
+        const elapsed = switch (speed) {
+            6 => port.idle(0),
+            8 => port.read(0x7e0000).master_cycles,
+            12 => port.read(0x4016).master_cycles,
+            else => unreachable,
+        };
+        try std.testing.expectEqual(speed, elapsed);
+        try std.testing.expect(!port.cpuReady());
+        try std.testing.expectEqual(speed, h.scpu.dma.resume_cpu_master_cycles);
+        h.scpu.dma.captureHdmaCpuPhase(6);
+        try std.testing.expectEqual(speed, h.scpu.dma.resume_cpu_master_cycles);
+        const before = h.clock.master_cycles;
+        var steps: usize = 0;
+        var last: core.dma.StepResult = .{ .phase = .idle, .progressed = false };
+        while (!port.cpuReady() and steps < 32) : (steps += 1) last = port.serviceDmaStep();
+        try std.testing.expect(port.cpuReady() and last.completed);
+        try std.testing.expectEqual(expected, h.clock.master_cycles - before);
+        try std.testing.expectEqual(completion, last.master_cycles);
+        try std.testing.expectEqualSlices(u8, &.{ 0x5a, 0xc3 }, device.registers[0x20..0x22]);
+        try std.testing.expect(h.cpu.interrupt_poll_locked);
+        h.cpu.reset_pending = false;
+        h.cpu.pc = 0x8000;
+        h.cpu.requestNmi();
+        try std.testing.expectEqual(core.cpu.StepState.executed, (try h.cpu.step(&port)).state);
+        try std.testing.expect(h.cpu.nmi_pending and !h.cpu.interrupt_poll_locked);
+        try std.testing.expectEqual(core.cpu.StepState.interrupt, (try h.cpu.step(&port)).state);
+    }
+}
+
+test "production NMITIMEN lock and WAI stop at the delayed NMI delivery" {
+    const image = try makeCpuImage(std.testing.allocator);
+    defer std.testing.allocator.free(image);
+    var cart = try core.cartridge.Cartridge.parse(std.testing.allocator, image);
+    defer cart.deinit();
+    var h = Harness{};
+    var port = core.scpu.TimedPort{ .bus = &h.bus, .cartridge = &cart, .scpu = &h.scpu, .clock = &h.clock, .controllers = &h.ports, .cpu = &h.cpu, .device = .{} };
+    h.cpu = .{ .reset_pending = false, .pc = 0x8000 };
+    h.scpu.nmi_flag = true;
+    _ = port.write(0x4200, 0x80);
+    try std.testing.expect(h.cpu.interrupt_poll_locked and h.cpu.nmi_pending);
+    try std.testing.expectEqual(core.cpu.StepState.executed, (try h.cpu.step(&port)).state);
+    try std.testing.expectEqual(core.cpu.StepState.interrupt, (try h.cpu.step(&port)).state);
+    h.cpu = .{ .reset_pending = false, .waiting = true };
+    h.scpu = .{ .nmi_enabled = true };
+    h.clock = .{ .v_counter = 224, .h_counter = 1362, .master_cycles = 1362 };
+    try std.testing.expectEqual(@as(u32, 3), port.fastForwardWaiting(2000));
+    try std.testing.expect(!h.cpu.nmi_pending);
+    try std.testing.expectEqual(@as(u32, 2), port.fastForwardWaiting(2000));
+    try std.testing.expect(h.scpu.nmi_flag and !h.cpu.nmi_pending);
+    try std.testing.expectEqual(@as(u32, 4), port.fastForwardWaiting(2000));
+    try std.testing.expect(h.cpu.nmi_pending);
+    try std.testing.expectEqual(@as(u16, 7), h.clock.h_counter);
+
+    // The real Machine uses the filtered event sink, unlike the direct port
+    // above. A nine-clock grant must end on the same delayed NMI, not skip it.
+    const machine = try std.testing.allocator.create(core.machine.Machine);
+    defer std.testing.allocator.destroy(machine);
+    try core.machine.Machine.powerInPlace(machine, 1, &cart, null);
+    defer machine.close();
+    machine.cpu = .{ .reset_pending = false, .waiting = true };
+    machine.scpu.nmi_enabled = true;
+    machine.clock = .{ .v_counter = 224, .h_counter = 1362, .master_cycles = 1362 };
+    machine.host_budget = .{ .paused = false, .last_guest_nanoseconds = 0, .pending_master_cycles = 9 };
+    const result = machine.runHostSlice(&cart, 9, 0);
+    try std.testing.expectEqual(@as(?core.machine.RunFault, null), result.fault);
+    try std.testing.expectEqual(@as(u64, 9), result.executed_master_cycles);
+    try std.testing.expectEqual(@as(u16, 7), machine.clock.h_counter);
+    try std.testing.expect(machine.scpu.nmi_flag and machine.cpu.nmi_pending and machine.cpu.waiting);
 }

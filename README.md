@@ -4,13 +4,21 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.22.5 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.22.9 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU in a productive
 `R4SUBSYS1` application host. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
 color math, fixed color, mosaic, VMAIN, hires, overscan and interlace. It
 publishes only complete changed native XRGB32 generations at 256 or 512 pixels
 wide and 224, 239, 448 or 478 pixels high.
+
+The beam uses Overscan to choose VBlank at line 225 or 240 in either region.
+Interlace is captured for field timing at line 128; even fields have 263 NTSC
+or 313 PAL lines, while odd fields retain 262 or 312. NMI/IRQ comparison,
+four-clock flag holds and CPU delivery are separate events. NMITIMEN writes
+and DMA completion suppress the immediate interrupt poll until a CPU bus
+cycle resumes; WAI batching retains the delayed interrupt wake boundary.
+Standalone HDMA retains the 6/8/12-clock CPU phase present at its trigger.
 
 The S-SMP now owns a complete bus-phased SPC700, 64 KiB ARAM, TEST/CONTROL,
 three timers, DSP register access and four ordered CPU/APU port latches. A

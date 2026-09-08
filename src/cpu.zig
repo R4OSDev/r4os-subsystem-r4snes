@@ -91,6 +91,7 @@ pub const Cpu = struct {
     abort_pending: bool = false,
     nmi_pending: bool = false,
     irq_line: bool = false,
+    interrupt_poll_locked: bool = false,
     instruction_address: u32 = 0,
     abort_restart_address: u32 = 0,
     master_cycles: u64 = 0,
@@ -157,7 +158,7 @@ pub const Cpu = struct {
                 return self.makeResult(.interrupt, false, 0, cycles_before);
             }
             // A masked IRQ still releases WAI, but does not vector.
-            if (self.irq_line) {
+            if (self.irq_line and !self.interrupt_poll_locked) {
                 self.waiting = false;
                 try self.idle(port);
                 return self.makeResult(.awakened, false, 0, cycles_before);
@@ -1013,6 +1014,7 @@ pub const Cpu = struct {
 
     fn pendingInterrupt(self: *const Cpu) ?Interrupt {
         if (self.abort_pending) return .abort;
+        if (self.interrupt_poll_locked) return null;
         if (self.nmi_pending) return .nmi;
         if (self.irq_line and !self.p.irq_disable) return .irq;
         return null;
@@ -1173,8 +1175,8 @@ pub const Cpu = struct {
     }
 
     fn idleInstruction(self: *Cpu, port: anytype, enables_irq: bool) CpuError!void {
-        const interrupt_after = self.abort_pending or self.nmi_pending or
-            (self.irq_line and (!self.p.irq_disable or enables_irq));
+        const interrupt_after = self.abort_pending or (!self.interrupt_poll_locked and
+            (self.nmi_pending or (self.irq_line and (!self.p.irq_disable or enables_irq))));
         if (interrupt_after) {
             try self.readDiscard(port, self.programAddress());
         } else {

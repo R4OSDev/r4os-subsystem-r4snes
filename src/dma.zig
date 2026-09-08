@@ -213,6 +213,16 @@ pub const Controller = struct {
         }
     }
 
+    pub fn captureHdmaCpuPhase(self: *Controller, master_cycles: u8) void {
+        // A pending/active transfer keeps the CPU phase it interrupted.
+        // HDMA nested in manual DMA shares that DMA's original phase.
+        if (self.phase != .idle or self.hdma_init_pending or self.hdma_run_pending) return;
+        self.resume_cpu_master_cycles = switch (master_cycles) {
+            6, 8, 12 => master_cycles,
+            else => 6,
+        };
+    }
+
     pub fn setHdmaEnabled(self: *Controller, mask: u8) void {
         self.hdma_enabled = mask;
     }

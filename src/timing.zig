@@ -31,7 +31,7 @@ pub const Profile = struct {
     pub fn forRegion(region: Region) Profile {
         return switch (region) {
             .ntsc => .{ .master_hz = ntsc_master_hz, .scanlines = 262, .vblank_start = 225 },
-            .pal => .{ .master_hz = pal_master_hz, .scanlines = 312, .vblank_start = 240 },
+            .pal => .{ .master_hz = pal_master_hz, .scanlines = 312, .vblank_start = 225 },
         };
     }
 };
@@ -104,6 +104,10 @@ pub const Clock = struct {
     frame: u64 = 0,
     field: bool = false,
     interlace: bool = false,
+    interlace_requested: bool = false,
+    overscan: bool = false,
+    previous_line_master_cycles: u16 = nominal_line_master_cycles,
+    previous_field_scanlines: u16 = 262,
     paused: bool = false,
     refresh_position: u16 = 538,
     refresh_active_remaining: u8 = 0,
@@ -113,11 +117,26 @@ pub const Clock = struct {
     apu_ticks: u64 = 0,
 
     pub fn init(region: Region) Clock {
-        return .{ .region = region };
+        return .{ .region = region, .previous_field_scanlines = Profile.forRegion(region).scanlines };
     }
 
     pub fn profile(self: *const Clock) Profile {
-        return Profile.forRegion(self.region);
+        var value = Profile.forRegion(self.region);
+        value.vblank_start = if (self.overscan) 240 else 225;
+        value.scanlines += @intFromBool(self.interlace and !self.field);
+        return value;
+    }
+
+    pub const Beam = struct { h: u16, v: u16 };
+
+    /// The interrupt circuit sees a delayed beam, including the preceding
+    /// short/long line and the extra line of the preceding interlace field.
+    pub fn beamBefore(self: *const Clock, clocks: u16) Beam {
+        if (clocks <= self.h_counter) return .{ .h = self.h_counter - clocks, .v = self.v_counter };
+        return .{
+            .h = self.h_counter + self.previous_line_master_cycles - clocks,
+            .v = if (self.v_counter != 0) self.v_counter - 1 else self.previous_field_scanlines - 1,
+        };
     }
 
     pub fn lineMasterCycles(self: *const Clock) u16 {
@@ -208,9 +227,14 @@ pub const Clock = struct {
         self.master_cycles +%= 1;
         self.h_counter += 1;
         if (self.h_counter >= self.lineMasterCycles()) {
+            self.previous_line_master_cycles = self.lineMasterCycles();
             self.h_counter = 0;
             self.v_counter += 1;
+            // SETINI may change live, but field timing captures interlace
+            // before the special late-field lines rather than at each write.
+            if (self.v_counter == 128) self.interlace = self.interlace_requested;
             if (self.v_counter >= self.profile().scanlines) {
+                self.previous_field_scanlines = self.profile().scanlines;
                 self.v_counter = 0;
                 self.frame +%= 1;
                 self.field = !self.field;

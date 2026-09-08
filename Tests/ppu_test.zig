@@ -451,7 +451,8 @@ test "PPU interlace publishes only after a complete pair of fields and synchroni
     write(&ppu, 0x2133, 0x01);
     var clock = core.timing.Clock.init(.ntsc);
     ppu.synchronizeClock(&clock);
-    try std.testing.expect(clock.interlace);
+    try std.testing.expect(clock.interlace_requested);
+    try std.testing.expect(!clock.interlace);
     ppu.onMasterTick(&clock);
     clock.v_counter = ppu.visibleHeight() + 1;
     ppu.onMasterTick(&clock);
@@ -464,6 +465,14 @@ test "PPU interlace publishes only after a complete pair of fields and synchroni
     ppu.onMasterTick(&clock);
     try std.testing.expectEqual(@as(u64, 1), ppu.frame_generation);
     try std.testing.expectEqual(@as(u16, 448), ppu.frameInfo().height);
+    write(&ppu, 0x2133, 0x05);
+    ppu.synchronizeClock(&clock);
+    try std.testing.expect(clock.overscan);
+    try std.testing.expectEqual(@as(u16, 240), clock.profile().vblank_start);
+    write(&ppu, 0x2133, 0);
+    ppu.synchronizeClock(&clock);
+    try std.testing.expect(!clock.overscan and !clock.interlace_requested);
+    try std.testing.expectEqual(@as(u16, 225), clock.profile().vblank_start);
 }
 
 fn write(ppu: *core.ppu.Ppu, address: u32, value: u8) void {

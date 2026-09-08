@@ -23,6 +23,11 @@ pub const Scpu = struct {
     vtime: u16 = 0x1ff,
     nmi_flag: bool = false,
     irq_flag: bool = false,
+    irq_line: bool = false,
+    irq_hold_until: u64 = 0,
+    nmi_hold_until: u64 = 0,
+    nmi_delivery_pending: bool = false,
+    cpu_cycle_master_cycles: u8 = 6,
     irq_match: bool = false,
     last_vblank: bool = false,
     wrmpya: u8 = 0xff,
@@ -94,13 +99,16 @@ pub const Scpu = struct {
             },
             0x4210 => {
                 const value = (cpu_open_bus & 0x70) | 0x02 | (if (self.nmi_flag) @as(u8, 0x80) else 0);
-                self.nmi_flag = false;
+                if (clock.master_cycles >= self.nmi_hold_until) self.nmi_flag = false;
                 return internal(value);
             },
             0x4211 => {
                 const value = (cpu_open_bus & 0x7f) | (if (self.irq_flag) @as(u8, 0x80) else 0);
-                self.irq_flag = false;
-                cpu.setIrqLine(false);
+                if (clock.master_cycles >= self.irq_hold_until) {
+                    self.irq_flag = false;
+                    self.irq_line = false;
+                    cpu.setIrqLine(false);
+                }
                 return internal(value);
             },
             0x4212 => {
@@ -158,9 +166,11 @@ pub const Scpu = struct {
                 self.h_irq_enabled = (value & 0x10) != 0;
                 self.v_irq_enabled = (value & 0x20) != 0;
                 self.nmi_enabled = (value & 0x80) != 0;
-                if (!was_nmi_enabled and self.nmi_enabled and clock.inVblank()) cpu.requestNmi();
+                if (!was_nmi_enabled and self.nmi_enabled and self.nmi_flag) cpu.requestNmi();
+                cpu.interrupt_poll_locked = true;
                 if (!self.h_irq_enabled and !self.v_irq_enabled) {
                     self.irq_flag = false;
+                    self.irq_line = false;
                     self.irq_match = false;
                     cpu.setIrqLine(false);
                 }
@@ -231,23 +241,8 @@ pub const Scpu = struct {
         if (refresh_start) self.mixEvent(0x52454652455348);
         if (refresh_wait and clock.refresh_active_remaining % 8 == 0) self.aluEdge();
 
-        // Vblank can only change at a scanline boundary. Evaluating it on all
-        // 1,364 clocks of the line is redundant and particularly expensive
-        // under an instruction-translating host such as QEMU TCG.
-        if (clock.h_counter == 0) {
-            const vblank = clock.inVblank();
-            if (vblank and !self.last_vblank) {
-                self.nmi_flag = true;
-                if (self.nmi_enabled) cpu.requestNmi();
-                self.mixEvent(0x4e4d49);
-            } else if (!vblank and self.last_vblank) {
-                self.nmi_flag = false;
-                self.auto_joy_counter = 33;
-            }
-            self.last_vblank = vblank;
-        }
-
-        if ((clock.master_cycles & 3) == 0) {
+        if ((clock.h_counter & 3) == 2) {
+            self.pollNmi(clock, cpu);
             if (self.h_irq_enabled or self.v_irq_enabled) {
                 self.pollInterrupts(clock, cpu);
             } else {
@@ -256,24 +251,62 @@ pub const Scpu = struct {
             }
         }
         if ((clock.master_cycles & 127) == 0) self.joypadEdge(clock, ports);
-        if (clock.v_counter == 0 and clock.h_counter == 12) self.dma.beginFrame();
-        if (clock.v_counter < clock.profile().vblank_start and clock.h_counter == 1_104) self.dma.beginHblank();
+        if (clock.v_counter == 0 and clock.h_counter == 12) {
+            self.dma.captureHdmaCpuPhase(self.cpu_cycle_master_cycles);
+            self.dma.beginFrame();
+        }
+        if (clock.v_counter < clock.profile().vblank_start and clock.h_counter == 1_104) {
+            self.dma.captureHdmaCpuPhase(self.cpu_cycle_master_cycles);
+            self.dma.beginHblank();
+        }
     }
 
     pub fn cpuMayRun(self: *const Scpu) bool {
         return self.dma.cpuMayRun();
     }
 
+    fn pollNmi(self: *Scpu, clock: *const timing.Clock, cpu: *cpu_mod.Cpu) void {
+        if (self.nmi_delivery_pending and clock.master_cycles >= self.nmi_hold_until) {
+            self.nmi_delivery_pending = false;
+            if (self.nmi_enabled) cpu.requestNmi();
+        }
+        const vblank = clock.beamBefore(2).v >= clock.profile().vblank_start;
+        if (vblank != self.last_vblank) {
+            self.nmi_flag = vblank;
+            if (vblank) {
+                self.nmi_hold_until = clock.master_cycles + 4;
+                self.nmi_delivery_pending = true;
+                self.mixEvent(0x4e4d49);
+            } else {
+                self.auto_joy_counter = 33;
+            }
+        }
+        self.last_vblank = vblank;
+    }
+
+    fn interruptTickRequired(self: *const Scpu, clock: *const timing.Clock) bool {
+        if ((clock.h_counter & 3) != 2) return false;
+        return self.h_irq_enabled or self.v_irq_enabled or self.nmi_delivery_pending or
+            clock.h_counter == 2 or clock.inVblank() != self.last_vblank;
+    }
+
     fn pollInterrupts(self: *Scpu, clock: *const timing.Clock, cpu: *cpu_mod.Cpu) void {
         if (diagnostics) self.interrupt_polls +%= 1;
         const enabled = self.h_irq_enabled or self.v_irq_enabled;
+        const line = enabled and self.irq_flag and (self.irq_line or clock.master_cycles >= self.irq_hold_until);
+        if (line != self.irq_line) {
+            self.irq_line = line;
+            cpu.setIrqLine(line);
+        }
+        const compared = clock.beamBefore(10);
+        const excluded = clock.beamBefore(6);
         const h_target: u16 = (self.htime + 1) << 2;
-        const h_match = !self.h_irq_enabled or clock.h_counter == h_target;
-        const v_match = !self.v_irq_enabled or clock.v_counter == self.vtime;
-        const match = enabled and h_match and v_match and (clock.v_counter != 0 or clock.h_counter != 0);
+        const h_match = !self.h_irq_enabled or compared.h == h_target;
+        const v_match = !self.v_irq_enabled or compared.v == self.vtime;
+        const match = enabled and h_match and v_match and (excluded.v != 0 or excluded.h != 0);
         if (match and !self.irq_match) {
             self.irq_flag = true;
-            cpu.setIrqLine(true);
+            self.irq_hold_until = clock.master_cycles + 4;
             self.mixEvent(0x495251);
         }
         self.irq_match = match;
@@ -423,14 +456,14 @@ fn EventSink(comptime Device: type) type {
             if (clock.h_counter == 0 or clock.h_counter == 12) return true;
             if (clock.v_counter < clock.profile().vblank_start and clock.h_counter == 1_104) return true;
             if ((clock.master_cycles & 127) == 0) return true;
-            if ((self.scpu.h_irq_enabled or self.scpu.v_irq_enabled) and (clock.master_cycles & 3) == 0) return true;
+            if (self.scpu.interruptTickRequired(clock)) return true;
             return self.device.filteredMasterTickRequired(clock);
         }
 
         pub fn onSkippedMasterTick(self: *Self, clock: *const timing.Clock) void {
             // With IRQ comparison disabled, a poll has no behavioural effect;
             // preserve its diagnostic counter without entering Scpu.
-            if (diagnostics and (clock.master_cycles & 3) == 0) self.scpu.interrupt_polls +%= 1;
+            if (diagnostics and (clock.h_counter & 3) == 2) self.scpu.interrupt_polls +%= 1;
         }
     };
 }
@@ -473,8 +506,10 @@ pub fn TimedPortWithDevice(comptime Device: type) type {
         const DeviceMmio = MmioWithDevice(Device);
 
         pub fn read(self: *Self, address: u32) bus_mod.Access {
+            self.cpu.interrupt_poll_locked = false;
             var adapter = self.makeMmio();
             var access = self.bus.read(self.cartridge, &adapter, address);
+            self.scpu.cpu_cycle_master_cycles = access.master_cycles;
             var events = self.makeSink();
             access.master_cycles = self.clock.advanceCpuCycle(access.master_cycles, &events);
             self.scpu.aluEdge();
@@ -482,15 +517,19 @@ pub fn TimedPortWithDevice(comptime Device: type) type {
         }
 
         pub fn write(self: *Self, address: u32, value: u8) bus_mod.Access {
+            self.cpu.interrupt_poll_locked = false;
             self.scpu.aluEdge();
             var adapter = self.makeMmio();
             var access = self.bus.write(self.cartridge, &adapter, address, value);
+            self.scpu.cpu_cycle_master_cycles = access.master_cycles;
             var events = self.makeSink();
             access.master_cycles = self.clock.advanceCpuCycle(access.master_cycles, &events);
             return access;
         }
 
         pub fn idle(self: *Self, _: u32) u8 {
+            self.cpu.interrupt_poll_locked = false;
+            self.scpu.cpu_cycle_master_cycles = 6;
             var events = self.makeSink();
             const elapsed = self.clock.advanceCpuCycle(6, &events);
             self.scpu.aluEdge();
@@ -505,11 +544,22 @@ pub fn TimedPortWithDevice(comptime Device: type) type {
         pub fn fastForwardWaiting(self: *Self, maximum_master_cycles: u32) u32 {
             std.debug.assert(maximum_master_cycles != 0);
             std.debug.assert(self.cpu.canFastForwardWaiting());
+            // Batched WAI still resumes CPU idle cycles after DMA. Its first
+            // cycle releases the same one-cycle interrupt lock as idle().
+            self.cpu.interrupt_poll_locked = false;
+            self.scpu.cpu_cycle_master_cycles = 6;
             const until_scanline_event: u32 = if (self.clock.h_counter == 0)
                 1
             else
                 @as(u32, self.clock.lineMasterCycles() - self.clock.h_counter) + 1;
-            const requested = @min(maximum_master_cycles, until_scanline_event);
+            // Delayed NMI delivery and enabled IRQ comparisons remain wake
+            // boundaries even when the rest of WAI is accounted in one span.
+            const until_interrupt_poll: u32 = if (self.scpu.h_irq_enabled or self.scpu.v_irq_enabled or
+                self.scpu.nmi_delivery_pending or self.clock.inVblank() != self.scpu.last_vblank)
+                @as(u32, (2 + 4 - (self.clock.h_counter & 3)) & 3) + 1
+            else
+                until_scanline_event;
+            const requested = @min(maximum_master_cycles, @min(until_scanline_event, until_interrupt_poll));
             var events = self.makeSink();
             const elapsed = self.clock.runSlice(requested, &events);
             self.cpu.accountWaitingMasterCycles(elapsed);
@@ -530,7 +580,9 @@ pub fn TimedPortWithDevice(comptime Device: type) type {
                 .cpu = self.cpu,
                 .device = self.device,
             };
-            return self.scpu.dma.step(&dma_port);
+            const result = self.scpu.dma.step(&dma_port);
+            if (result.progressed and result.completed) self.cpu.interrupt_poll_locked = true;
+            return result;
         }
 
         fn makeMmio(self: *Self) DeviceMmio {

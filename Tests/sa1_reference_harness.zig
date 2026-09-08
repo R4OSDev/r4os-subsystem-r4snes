@@ -209,7 +209,7 @@ fn execute(
     var instructions: usize = 0;
     var completion: u8 = 0;
     while (instructions < instruction_limit and machine.clock.master_cycles < master_clock_limit) : (instructions += 1) {
-        machine.cpu.setIrqLine(machine.scpu.irq_flag or cart.sa1CpuIrqPending());
+        machine.cpu.setIrqLine(machine.scpu.irq_line or cart.sa1CpuIrqPending());
         if (port.cpuReady()) {
             _ = machine.cpu.step(&port) catch |fault| {
                 std.debug.print("SA-1 reference {s}: CPU fault={s} at {x:0>2}:{x:0>4}\n", .{ case.name, @errorName(fault), machine.cpu.pb, machine.cpu.pc });

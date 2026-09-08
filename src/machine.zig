@@ -201,7 +201,7 @@ pub const Machine = struct {
         const profile = if (self.profile) |p| p.operation() else null;
         var phase_started = if (profile) |p| p.now() else 0;
         const ppu_before = if (profile) |p| p.elapsed(.ppu) else 0;
-        self.cpu.setIrqLine(self.scpu.irq_flag or cart.sa1CpuIrqPending() or cart.cx4CpuIrqPending());
+        self.cpu.setIrqLine(self.scpu.irq_line or cart.sa1CpuIrqPending() or cart.cx4CpuIrqPending());
         var mmio = SystemMmio{ .display = &self.ppu, .audio = &self.smp, .clock = &self.clock, .operation_start = self.clock.master_cycles, .profile = profile };
         var port = scpu.TimedPortWithDevice(*SystemMmio){
             .bus = &self.bus,
