@@ -459,6 +459,17 @@ pub const Cartridge = struct {
         return null;
     }
 
+    pub fn runSuperFxClocks(self: *Cartridge, clocks: u64, maximum_instructions: usize) ?superfx.RunResult {
+        if (self.superfx_device) |*device| {
+            const result = device.runClocks(self.rom_storage, self.sram_storage, clocks, maximum_instructions);
+            if (device.takeDirtyRange()) |dirty| {
+                if (self.board.battery) self.markSramDirty(dirty.first, dirty.end);
+            }
+            return result;
+        }
+        return null;
+    }
+
     pub fn runSa1Slice(self: *Cartridge, maximum_instructions: usize) ?sa1.RunResult {
         if (self.sa1_device) |*device| {
             const result = device.runSlice(self.rom_storage, self.sram_storage, maximum_instructions);
@@ -504,6 +515,15 @@ pub const Cartridge = struct {
     pub fn runSt018Slice(self: *Cartridge, maximum_steps: usize) ?st018.RunResult {
         if (self.st018_device) |*device| {
             const result = device.runSlice(maximum_steps);
+            self.collectSt018Dirty(device);
+            return result;
+        }
+        return null;
+    }
+
+    pub fn runSt018Clocks(self: *Cartridge, clocks: u64, maximum_steps: usize) ?st018.RunResult {
+        if (self.st018_device) |*device| {
+            const result = device.runClocks(clocks, maximum_steps);
             self.collectSt018Dirty(device);
             return result;
         }

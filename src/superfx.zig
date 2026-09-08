@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const access_master_cycles: u8 = 6;
+pub const frequency_hz: u32 = 21_440_000;
 pub const cache_bytes: usize = 512;
 pub const cache_lines: usize = 32;
 pub const minimum_ram_bytes: usize = 32 * 1024;
@@ -220,13 +221,23 @@ pub const Device = struct {
     }
 
     pub fn runSlice(self: *Device, rom: []const u8, ram: []u8, maximum_instructions: usize) RunResult {
+        return self.runBudget(rom, ram, maximum_instructions, null);
+    }
+
+    pub fn runClocks(self: *Device, rom: []const u8, ram: []u8, maximum_clocks: u64, maximum_instructions: usize) RunResult {
+        return self.runBudget(rom, ram, maximum_instructions, maximum_clocks);
+    }
+
+    fn runBudget(self: *Device, rom: []const u8, ram: []u8, maximum_instructions: usize, maximum_clocks: ?u64) RunResult {
         const start_clocks = self.cycles;
         var executed: usize = 0;
         self.fault = .none;
         self.waiting_rom = false;
         self.waiting_ram = false;
 
-        while (executed < maximum_instructions and self.running()) {
+        while (executed < maximum_instructions and self.running() and
+            (maximum_clocks == null or self.cycles -% start_clocks < maximum_clocks.?))
+        {
             self.executeOne(rom, ram) catch |err| {
                 switch (err) {
                     error.RomBusUnavailable => {
@@ -243,6 +254,20 @@ pub const Device = struct {
             executed += 1;
         }
 
+        // STOP halts instruction fetch, not an already started RAM/ROM
+        // transfer. Product clock grants keep those short buffers moving.
+        if (maximum_clocks) |limit| {
+            if (!self.running()) {
+                const remaining = limit -| (self.cycles -% start_clocks);
+                if (remaining != 0) {
+                    // Both pending buffers have at most 255 clocks left. A
+                    // stopped chip can account the rest without an idle loop.
+                    const idle: u8 = @intCast(@min(remaining, 255));
+                    self.advanceClocks(rom, ram, idle) catch {};
+                    self.cycles +%= remaining - idle;
+                }
+            }
+        }
         const state: RunState = if (self.waiting_rom)
             .waiting_rom
         else if (self.waiting_ram)

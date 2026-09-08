@@ -381,3 +381,40 @@ fn finalizeChecksum(image: []u8, header: []u8) void {
     header[0x1e] = @truncate(checksum);
     header[0x1f] = @truncate(checksum >> 8);
 }
+
+test "Machine clocks CX4 at 20 MHz in both regions independent of host partitions" {
+    const clock_test = @import("chip_clock_helpers.zig");
+    const allocator = std.testing.allocator;
+    const image = try makeCx4Image(allocator, rom_bytes, 0xf3, 0);
+    defer allocator.free(image);
+    for ([_]core.timing.Region{ .ntsc, .pal }) |region| {
+        var one = try core.cartridge.Cartridge.parse(allocator, image);
+        defer one.deinit();
+        var many = try core.cartridge.Cartridge.parse(allocator, image);
+        defer many.deinit();
+        // Original arithmetic program uses the actual cache-fill and IRQ path.
+        for ([_]*core.cartridge.Cartridge{ &one, &many }) |cart| {
+            installProgram(@constCast(cart.rom_storage), &.{ 0x6412, 0x8434, 0xe060, 0xfc00 });
+            const d = &cart.cx4_device.?;
+            writeIo(d, cart.rom_storage, cart.sram_storage, 0x7f49, 0);
+            writeIo(d, cart.rom_storage, cart.sram_storage, 0x7f4a, 0x80);
+            writeIo(d, cart.rom_storage, cart.sram_storage, 0x7f4b, 0);
+            writeIo(d, cart.rom_storage, cart.sram_storage, 0x7f48, 0);
+            writeIo(d, cart.rom_storage, cart.sram_storage, 0x7f4f, 0);
+            d.irq_disabled = true;
+        }
+        const a = try clock_test.power(&one);
+        defer clock_test.close(a);
+        const b = try clock_test.power(&many);
+        defer clock_test.close(b);
+        a.clock.region = region;
+        b.clock.region = region;
+        try clock_test.advance(a, &one, 3000);
+        for ([_]u32{ 1, 19, 207, 773, 2000 }) |part| try clock_test.advance(b, &many, part);
+        const due = 3000 * @as(u64, 20_000_000) / a.clock.profile().master_hz;
+        try std.testing.expectEqual(due, one.cx4_device.?.cycle_count);
+        try std.testing.expectEqual(due, many.cx4_device.?.cycle_count);
+        try std.testing.expectEqual(@as(u24, 0x46), one.cx4_device.?.gpr[0]);
+        try std.testing.expectEqual(one.cx4_device.?.stateDigest(), many.cx4_device.?.stateDigest());
+    }
+}

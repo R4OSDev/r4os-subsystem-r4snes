@@ -2,6 +2,11 @@ const board = @import("board.zig");
 const epson = @import("epson_rtc.zig");
 
 pub const access_master_cycles: u8 = 6;
+pub const frequency_hz: u32 = 21_477_272;
+pub const maximum_decode_work: usize = 256;
+
+const Operation = enum { idle, dcu_delay, dcu_seek, multiply, divide };
+pub const ClockResult = struct { clocks: u64 = 0, decode_calls: usize = 0, work_pending: bool = false };
 
 pub const Fault = enum(u8) {
     none,
@@ -203,6 +208,13 @@ pub const Device = struct {
     rtc: epson.Device = .{},
     has_rtc: bool = true,
     fault: Fault = .none,
+    cycles: u64 = 0,
+    dcu_pending: bool = false,
+    multiply_pending: bool = false,
+    divide_pending: bool = false,
+    operation: Operation = .idle,
+    delay_remaining: u8 = 0,
+    seek_remaining: u32 = 0,
 
     pub fn power(self: *Device) void {
         const rtc = self.rtc;
@@ -255,6 +267,78 @@ pub const Device = struct {
         self.rtc.advanceSeconds(seconds);
     }
 
+    /// DCU setup/ALU have chip-clock delays. The seek itself is zero-time
+    /// decoder work in the reference model, so yield its host work without
+    /// inventing extra chip clocks or letting the S-CPU pass its completion.
+    pub fn runClocks(self: *Device, rom: []const u8, clocks: u64, decode_limit: usize) ClockResult {
+        var result: ClockResult = .{};
+        const work_limit = @min(decode_limit, maximum_decode_work);
+        while (true) {
+            if (self.operation == .idle) {
+                if (self.dcu_pending) {
+                    self.dcu_pending = false;
+                    self.regs[0x0C] &= 0x7F;
+                    self.operation = .dcu_delay;
+                    self.delay_remaining = 20;
+                } else if (self.multiply_pending) {
+                    self.multiply_pending = false;
+                    self.regs[0x2F] |= 0x81;
+                    self.operation = .multiply;
+                    self.delay_remaining = 30;
+                } else if (self.divide_pending) {
+                    self.divide_pending = false;
+                    self.regs[0x2F] |= 0x80;
+                    self.operation = .divide;
+                    self.delay_remaining = 40;
+                } else {
+                    self.cycles +%= clocks - result.clocks;
+                    result.clocks = clocks;
+                    return result;
+                }
+            }
+            if (self.delay_remaining != 0) {
+                const advance: u8 = @intCast(@min(clocks - result.clocks, self.delay_remaining));
+                self.delay_remaining -= advance;
+                result.clocks += advance;
+                self.cycles +%= advance;
+                if (self.delay_remaining != 0) return result;
+            }
+            switch (self.operation) {
+                .dcu_delay => {
+                    if (!self.prepareDcu(rom)) {
+                        self.operation = .idle;
+                        continue;
+                    }
+                    self.operation = .dcu_seek;
+                },
+                .dcu_seek => {
+                    const data = dataSlice(rom);
+                    while (self.seek_remaining != 0 and result.decode_calls < work_limit) {
+                        _ = self.decompressor.decode(data);
+                        self.seek_remaining -= 1;
+                        result.decode_calls += 1;
+                    }
+                    if (self.seek_remaining != 0) {
+                        result.work_pending = true;
+                        return result;
+                    }
+                    self.regs[0x0C] |= 0x80;
+                    self.dcu_offset = 0;
+                    self.operation = .idle;
+                },
+                .multiply => {
+                    self.multiply();
+                    self.operation = .idle;
+                },
+                .divide => {
+                    self.divide();
+                    self.operation = .idle;
+                },
+                .idle => unreachable,
+            }
+        }
+    }
+
     fn readPort(self: *Device, rom: []const u8, port: u16, open_bus: u8) u8 {
         if (port >= 0x4840 and port <= 0x4842) return self.rtc.readPort(port, open_bus);
         if (port < 0x4800 or port > 0x483F) return open_bus;
@@ -304,7 +388,7 @@ pub const Device = struct {
             0x4806 => {
                 self.regs[index] = value;
                 self.regs[0x0C] &= 0x7F;
-                self.beginDcu(rom);
+                self.dcu_pending = true;
             },
             0x4807, 0x4809, 0x480A => self.regs[index] = value,
             0x480B => self.regs[index] = value & 3,
@@ -330,11 +414,13 @@ pub const Device = struct {
             0x4820...0x4824, 0x4826 => self.regs[index] = value,
             0x4825 => {
                 self.regs[index] = value;
-                self.multiply();
+                self.regs[0x2F] |= 0x81;
+                self.multiply_pending = true;
             },
             0x4827 => {
                 self.regs[index] = value;
-                self.divide();
+                self.regs[0x2F] |= 0x80;
+                self.divide_pending = true;
             },
             0x482E => self.regs[index] = value & 1,
             0x4830 => self.regs[index] = value & 0x87,
@@ -352,26 +438,23 @@ pub const Device = struct {
             self.dataRomRead(rom, address +% 3);
     }
 
-    fn beginDcu(self: *Device, rom: []const u8) void {
+    fn prepareDcu(self: *Device, rom: []const u8) bool {
         if (self.dcu_mode > 2) {
             self.fault = .invalid_decompression_mode;
-            return;
+            return false;
         }
         const data = dataSlice(rom);
         if (data.len == 0) {
             self.fault = .missing_data_rom;
-            return;
+            return false;
         }
         self.decompressor.init(data, self.dcu_mode, self.dcu_address) catch {
             self.fault = .missing_data_rom;
-            return;
+            return false;
         };
-        _ = self.decompressor.decode(data);
-        var seek: u16 = if ((self.regs[0x0B] & 2) != 0) word(self.regs[5], self.regs[6]) else 0;
-        while (seek != 0) : (seek -= 1) _ = self.decompressor.decode(data);
-        self.regs[0x0C] |= 0x80;
-        self.dcu_offset = 0;
+        self.seek_remaining = 1 + @as(u32, if ((self.regs[0x0B] & 2) != 0) word(self.regs[5], self.regs[6]) else 0);
         self.fault = .none;
+        return true;
     }
 
     fn dcuRead(self: *Device, rom: []const u8) u8 {

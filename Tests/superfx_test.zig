@@ -526,3 +526,44 @@ fn finalizeChecksum(rom: []u8, header: []u8) void {
     header[0x1E] = @truncate(checksum);
     header[0x1F] = @truncate(checksum >> 8);
 }
+
+test "Machine grants SuperFX real clocks across cache modes and host partitions" {
+    const clock_test = @import("chip_clock_helpers.zig");
+    const allocator = std.testing.allocator;
+    const image = try makeSuperFxImage(allocator, 512 * 1024, 0x15, 0x20, 6, .ntsc_u);
+    defer allocator.free(image);
+    var counts: [4]u64 = undefined;
+    for (0..4) |mode| {
+        var one = try core.cartridge.Cartridge.parse(allocator, image);
+        defer one.deinit();
+        var many = try core.cartridge.Cartridge.parse(allocator, image);
+        defer many.deinit();
+        for ([_]*core.cartridge.Cartridge{ &one, &many }) |cart| {
+            @memset(@constCast(cart.rom_storage)[0..512], 0x01);
+            const device = &cart.superfx_device.?;
+            device.scmr = 0x18;
+            device.clsr = mode & 1 != 0;
+            if (mode >= 2) {
+                @memset(&device.cache, 0x01);
+                @memset(&device.cache_valid, true);
+            }
+            startDevice(device, cart.sram_storage, 0);
+        }
+        const a = try clock_test.power(&one);
+        defer clock_test.close(a);
+        const b = try clock_test.power(&many);
+        defer clock_test.close(b);
+        try clock_test.advance(a, &one, 500);
+        for ([_]u32{ 1, 7, 83, 2, 207, 200 }) |part| try clock_test.advance(b, &many, part);
+        const due = 500 * @as(u64, core.superfx.frequency_hz) / core.timing.ntsc_master_hz;
+        try std.testing.expect(one.superfx_device.?.cycles >= due);
+        try std.testing.expect(one.superfx_device.?.cycles < due + 98);
+        try std.testing.expectEqual(one.superfx_device.?.cycles, many.superfx_device.?.cycles);
+        try std.testing.expectEqual(one.superfx_device.?.stateDigest(), many.superfx_device.?.stateDigest());
+        try std.testing.expectEqual(@as(u64, 0), a.chip_budget.pending);
+        counts[mode] = one.superfx_device.?.instructions;
+    }
+    try std.testing.expect(counts[1] > counts[0]);
+    try std.testing.expect(counts[2] > counts[0]);
+    try std.testing.expect(counts[3] > counts[2]);
+}

@@ -389,6 +389,7 @@ test "S-DD1 and SPC7110 exact header profiles reject contradictions and unknown 
 
 test "SPC7110 production DCU emits every mode exactly and is slice deterministic" {
     const allocator = std.testing.allocator;
+    const clock_test = @import("chip_clock_helpers.zig");
     const image = try makeEnhancementImage(allocator, .spc7110_epson_rtc, 2 * 1024 * 1024, 3);
     defer allocator.free(image);
     var source: [65536]u8 = undefined;
@@ -397,6 +398,8 @@ test "SPC7110 production DCU emits every mode exactly and is slice deterministic
     finalizeChecksum(image, .hi_rom);
     var cart = try core.cartridge.Cartridge.parse(allocator, image);
     defer cart.deinit();
+    const machine = try clock_test.power(&cart);
+    defer clock_test.close(machine);
     var bus = core.bus.Bus{};
     const mmio = core.bus.NullMmio{};
     const expected_hex = [_][]const u8{
@@ -416,7 +419,12 @@ test "SPC7110 production DCU emits every mode exactly and is slice deterministic
         _ = bus.write(&cart, mmio, 0x004803, 0x0F);
         _ = bus.write(&cart, mmio, 0x004804, 0x00);
         _ = bus.write(&cart, mmio, 0x004806, 0x00);
+        try std.testing.expectEqual(@as(u8, 0), bus.read(&cart, mmio, 0x00480C).value & 0x80);
+        try clock_test.advance(machine, &cart, 19);
+        try std.testing.expectEqual(@as(u8, 0), bus.read(&cart, mmio, 0x00480C).value & 0x80);
+        try clock_test.advance(machine, &cart, 1);
         try std.testing.expectEqual(core.spc7110.Fault.none, cart.spc7110_device.?.fault);
+        try std.testing.expectEqual(@as(u8, 0x80), bus.read(&cart, mmio, 0x00480C).value & 0x80);
         var actual: [64]u8 = undefined;
         var at: usize = 0;
         for ([_]usize{ 3, 1, 12, 5, 17, 26 }) |slice| {
@@ -440,6 +448,10 @@ test "SPC7110 production DCU emits every mode exactly and is slice deterministic
         _ = bus.write(&cart, mmio, 0x004803, 0x0F);
         _ = bus.write(&cart, mmio, 0x004804, 0x00);
         _ = bus.write(&cart, mmio, 0x004806, 0x00);
+        try std.testing.expectEqual(@as(u8, 0), bus.read(&cart, mmio, 0x00480C).value & 0x80);
+        try clock_test.advance(machine, &cart, 19);
+        try std.testing.expectEqual(@as(u8, 0), bus.read(&cart, mmio, 0x00480C).value & 0x80);
+        try clock_test.advance(machine, &cart, 1);
         try std.testing.expectEqual(core.spc7110.Fault.invalid_decompression_mode, cart.spc7110_device.?.fault);
         try std.testing.expectEqual(@as(u8, 0), bus.read(&cart, mmio, 0x004800).value);
     }
@@ -447,6 +459,7 @@ test "SPC7110 production DCU emits every mode exactly and is slice deterministic
 
 test "SPC7110 data port mapping arithmetic SRAM gate reset and open bus are exact" {
     const allocator = std.testing.allocator;
+    const clock_test = @import("chip_clock_helpers.zig");
     const image = try makeEnhancementImage(allocator, .spc7110_epson_rtc, 2 * 1024 * 1024, 3);
     defer allocator.free(image);
     image[0] = 0x11;
@@ -459,6 +472,8 @@ test "SPC7110 data port mapping arithmetic SRAM gate reset and open bus are exac
     finalizeChecksum(image, .hi_rom);
     var cart = try core.cartridge.Cartridge.parse(allocator, image);
     defer cart.deinit();
+    const machine = try clock_test.power(&cart);
+    defer clock_test.close(machine);
     var bus = core.bus.Bus{};
     const mmio = core.bus.NullMmio{};
 
@@ -497,12 +512,22 @@ test "SPC7110 data port mapping arithmetic SRAM gate reset and open bus are exac
     _ = bus.write(&cart, mmio, 0x004821, 0x12);
     _ = bus.write(&cart, mmio, 0x004824, 0x10);
     _ = bus.write(&cart, mmio, 0x004825, 0x00);
+    try std.testing.expectEqual(@as(u8, 0x80), bus.read(&cart, mmio, 0x00482F).value & 0x80);
+    try clock_test.advance(machine, &cart, 29);
+    try std.testing.expectEqual(@as(u8, 0x80), bus.read(&cart, mmio, 0x00482F).value & 0x80);
+    try clock_test.advance(machine, &cart, 1);
+    try std.testing.expectEqual(@as(u8, 0), bus.read(&cart, mmio, 0x00482F).value & 0x80);
     try expectPorts(&bus, &cart, mmio, 0x4828, &.{ 0x40, 0x23, 0x01, 0x00 });
     _ = bus.write(&cart, mmio, 0x00482E, 1);
     _ = bus.write(&cart, mmio, 0x004820, 0xFE);
     _ = bus.write(&cart, mmio, 0x004821, 0xFF);
     _ = bus.write(&cart, mmio, 0x004824, 3);
     _ = bus.write(&cart, mmio, 0x004825, 0);
+    try std.testing.expectEqual(@as(u8, 0x80), bus.read(&cart, mmio, 0x00482F).value & 0x80);
+    try clock_test.advance(machine, &cart, 29);
+    try std.testing.expectEqual(@as(u8, 0x80), bus.read(&cart, mmio, 0x00482F).value & 0x80);
+    try clock_test.advance(machine, &cart, 1);
+    try std.testing.expectEqual(@as(u8, 0), bus.read(&cart, mmio, 0x00482F).value & 0x80);
     try expectPorts(&bus, &cart, mmio, 0x4828, &.{ 0xFA, 0xFF, 0xFF, 0xFF });
     _ = bus.write(&cart, mmio, 0x00482E, 0);
     _ = bus.write(&cart, mmio, 0x004820, 0xE8);
@@ -511,9 +536,19 @@ test "SPC7110 data port mapping arithmetic SRAM gate reset and open bus are exac
     _ = bus.write(&cart, mmio, 0x004823, 0);
     _ = bus.write(&cart, mmio, 0x004826, 7);
     _ = bus.write(&cart, mmio, 0x004827, 0);
+    try std.testing.expectEqual(@as(u8, 0x80), bus.read(&cart, mmio, 0x00482F).value & 0x80);
+    try clock_test.advance(machine, &cart, 39);
+    try std.testing.expectEqual(@as(u8, 0x80), bus.read(&cart, mmio, 0x00482F).value & 0x80);
+    try clock_test.advance(machine, &cart, 1);
+    try std.testing.expectEqual(@as(u8, 0), bus.read(&cart, mmio, 0x00482F).value & 0x80);
     try expectPorts(&bus, &cart, mmio, 0x4828, &.{ 0x8E, 0, 0, 0, 6, 0 });
     _ = bus.write(&cart, mmio, 0x004826, 0);
     _ = bus.write(&cart, mmio, 0x004827, 0);
+    try std.testing.expectEqual(@as(u8, 0x80), bus.read(&cart, mmio, 0x00482F).value & 0x80);
+    try clock_test.advance(machine, &cart, 39);
+    try std.testing.expectEqual(@as(u8, 0x80), bus.read(&cart, mmio, 0x00482F).value & 0x80);
+    try clock_test.advance(machine, &cart, 1);
+    try std.testing.expectEqual(@as(u8, 0), bus.read(&cart, mmio, 0x00482F).value & 0x80);
     try expectPorts(&bus, &cart, mmio, 0x4828, &.{ 0, 0, 0, 0, 0xE8, 0x03 });
 
     try std.testing.expectEqual(@as(u8, 0), bus.read(&cart, mmio, 0x006000).value);
@@ -812,4 +847,56 @@ fn finalizeChecksum(image: []u8, mapping: core.board.Mapping) void {
     header[0x1D] = @truncate(complement >> 8);
     header[0x1E] = @truncate(checksum);
     header[0x1F] = @truncate(checksum >> 8);
+}
+
+test "Machine yields maximum SPC7110 seek in fixed chunks without advancing CPU time" {
+    const clock_test = @import("chip_clock_helpers.zig");
+    const allocator = std.testing.allocator;
+    const image = try makeEnhancementImage(allocator, .spc7110_epson_rtc, 2 * 1024 * 1024, 3);
+    defer allocator.free(image);
+    var cart = try core.cartridge.Cartridge.parse(allocator, image);
+    defer cart.deinit();
+    @memset(@constCast(cart.rom_storage)[0x100000..0x100004], 0);
+    const machine = try clock_test.power(&cart);
+    defer clock_test.close(machine);
+    const mmio = core.bus.NullMmio{};
+    _ = machine.bus.write(&cart, mmio, 0x004804, 0);
+    _ = machine.bus.write(&cart, mmio, 0x00480B, 2);
+    _ = machine.bus.write(&cart, mmio, 0x004805, 0xff);
+    _ = machine.bus.write(&cart, mmio, 0x004806, 0xff);
+    const d = &cart.spc7110_device.?;
+    try std.testing.expectEqual(@as(u64, 0), d.cycles);
+    try std.testing.expectEqual(@as(u32, 0), d.seek_remaining);
+    machine.host_budget.pending_master_cycles = 4000;
+    const first = machine.runHostSlice(&cart, 4000, 0);
+    try std.testing.expectEqual(@as(?core.machine.RunFault, null), first.fault);
+    try std.testing.expect(first.executed_master_cycles > 0 and first.executed_master_cycles < 4000);
+    try std.testing.expectEqual(@as(u32, 65536 - 256), d.seek_remaining);
+    try std.testing.expectEqual(@as(u64, 20), d.cycles);
+    try std.testing.expect(machine.coprocessor_pending);
+    const before_cpu = machine.clock.master_cycles;
+    const before_debt = machine.host_budget.pending_master_cycles;
+    const second = machine.runHostSlice(&cart, 4000, 0);
+    try std.testing.expectEqual(@as(u64, 0), second.executed_master_cycles);
+    try std.testing.expectEqual(before_cpu, machine.clock.master_cycles);
+    try std.testing.expectEqual(before_debt, machine.host_budget.pending_master_cycles);
+    try std.testing.expectEqual(@as(u32, 65536 - 512), d.seek_remaining);
+    try std.testing.expectEqual(@as(u8, 0), d.regs[0x0c] & 0x80);
+    // Reset cancels unfinished work; a short seek then proves completion.
+    d.reset();
+    _ = machine.runHostSlice(&cart, 0, 0);
+    try std.testing.expect(!machine.coprocessor_pending);
+    _ = machine.bus.write(&cart, mmio, 0x004804, 0);
+    _ = machine.bus.write(&cart, mmio, 0x00480B, 2);
+    _ = machine.bus.write(&cart, mmio, 0x004805, 1);
+    _ = machine.bus.write(&cart, mmio, 0x004806, 1);
+    const clocks = d.cycles;
+    const setup = d.runClocks(cart.rom_storage, 20, 256);
+    try std.testing.expectEqual(@as(usize, 256), setup.decode_calls);
+    try std.testing.expect(setup.work_pending);
+    const finish = d.runClocks(cart.rom_storage, 0, 256);
+    try std.testing.expectEqual(@as(usize, 2), finish.decode_calls);
+    try std.testing.expect(!finish.work_pending);
+    try std.testing.expectEqual(clocks + 20, d.cycles);
+    try std.testing.expectEqual(@as(u8, 0x80), d.regs[0x0c] & 0x80);
 }

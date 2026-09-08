@@ -656,3 +656,52 @@ fn hexNibble(value: u8) !u8 {
         else => error.InvalidHash,
     };
 }
+
+test "Machine grants ST018 bus clocks and carries whole ARM instruction overshoot" {
+    const clock_test = @import("chip_clock_helpers.zig");
+    const allocator = std.testing.allocator;
+    const firmware = try makeFirmware(allocator);
+    defer allocator.free(firmware);
+    installBridgeProgram(firmware);
+    const image = try makeSt018Image(allocator, 1024 * 1024, 0x02);
+    defer allocator.free(image);
+    for ([_]core.timing.Region{ .ntsc, .pal }) |region| {
+        var one = try core.cartridge.Cartridge.parseWithOptions(allocator, image, .{
+            .st018_firmware = firmware,
+            .st018_firmware_validation = .allow_open_test,
+        });
+        defer one.deinit();
+        var many = try core.cartridge.Cartridge.parseWithOptions(allocator, image, .{
+            .st018_firmware = firmware,
+            .st018_firmware_validation = .allow_open_test,
+        });
+        defer many.deinit();
+        for ([_]*core.cartridge.Cartridge{ &one, &many }) |cart| {
+            cart.st018_device.?.reset_delay = 0;
+            cart.st018_device.?.ready = true;
+        }
+        const a = try clock_test.power(&one);
+        defer clock_test.close(a);
+        const b = try clock_test.power(&many);
+        defer clock_test.close(b);
+        a.clock.region = region;
+        b.clock.region = region;
+        try clock_test.advance(a, &one, 500);
+        var total: u64 = 0;
+        for ([_]u32{ 1, 1, 1, 7, 39, 151, 300 }) |part| {
+            try clock_test.advance(b, &many, part);
+            total += part;
+            const due = total * @as(u64, chip.frequency_hz) / b.clock.profile().master_hz;
+            try std.testing.expect(many.st018_device.?.cycles >= due);
+            try std.testing.expect(many.st018_device.?.cycles <= due + 3);
+        }
+        try std.testing.expectEqual(one.st018_device.?.cycles, many.st018_device.?.cycles);
+        try std.testing.expectEqual(one.st018_device.?.stateDigest(), many.st018_device.?.stateDigest());
+        try std.testing.expect(one.st018_device.?.cpu.instruction_count < one.st018_device.?.cycles);
+        one.st018_device.?.setReset(true);
+        const before = one.st018_device.?.cycles;
+        _ = one.st018_device.?.runClocks(17, 17);
+        try std.testing.expectEqual(before + 17, one.st018_device.?.cycles);
+        try std.testing.expectEqual(chip.RunState.reset_hold, one.st018_device.?.runClocks(0, 17).state);
+    }
+}

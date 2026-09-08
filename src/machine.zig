@@ -101,6 +101,8 @@ pub const Machine = struct {
     persistence: persistence.State = .{},
     clock: timing.Clock = .{},
     host_budget: timing.HostBudget = .{},
+    chip_budget: timing.ChipBudget = .{},
+    coprocessor_pending: bool = false,
     rtc_master_phase: u64 = 0,
     slices: u64 = 0,
     maximum_operation_overshoot: u64 = 0,
@@ -155,6 +157,18 @@ pub const Machine = struct {
             self.clock.profile().master_hz,
             caller_limit,
         );
+        // A due zero-time decoder continuation must finish before the CPU
+        // observes its completion. One host turn resumes only a bounded chunk.
+        if (self.coprocessor_pending) {
+            if (self.serviceCoprocessors(cart, 0)) |fault| {
+                self.host_budget.reconcile(granted, 0);
+                return .{ .granted_master_cycles = granted, .fault = fault };
+            }
+            if (self.coprocessor_pending) {
+                self.host_budget.reconcile(granted, 0);
+                return .{ .granted_master_cycles = granted };
+            }
+        }
         if (granted == 0) return .{};
 
         const start = self.clock.master_cycles;
@@ -172,10 +186,11 @@ pub const Machine = struct {
                     .fault = fault,
                 };
             }
+            if (self.coprocessor_pending) break;
         }
         const executed = self.clock.master_cycles -% start;
         self.host_budget.reconcile(granted, executed);
-        self.maximum_operation_overshoot = @max(self.maximum_operation_overshoot, executed - granted);
+        self.maximum_operation_overshoot = @max(self.maximum_operation_overshoot, executed -| granted);
         self.advanceRtc(cart, executed);
         self.slices +%= 1;
         return .{
@@ -268,34 +283,58 @@ pub const Machine = struct {
     }
 
     fn serviceCoprocessors(self: *Machine, cart: *cartridge.Cartridge, elapsed: u64) ?RunFault {
-        const work: usize = @intCast(@min(elapsed, 4_096));
+        const maximum_work: usize = 4096;
+        const frequency: u64 = switch (cart.board.capability.enhancement) {
+            .super_fx => @import("superfx.zig").frequency_hz,
+            .cx4 => @import("cx4.zig").frequency_hz,
+            .dsp1_family, .st010_st011 => if (cart.nec_dsp_device) |device| device.revision.frequencyHz() else 0,
+            .st018 => @import("st018.zig").frequency_hz,
+            .spc7110_epson_rtc => @import("spc7110.zig").frequency_hz,
+            else => 0,
+        };
+        self.coprocessor_pending = false;
+        if (frequency != 0) self.chip_budget.advance(elapsed, self.clock.profile().master_hz, frequency);
+        const due = @min(self.chip_budget.pending, maximum_work);
         switch (cart.board.capability.enhancement) {
             .super_fx => {
-                const result = cart.runSuperFxSlice(@max(@as(usize, 1), work / 2)) orelse return null;
+                const result = cart.runSuperFxClocks(due, maximum_work) orelse return null;
+                self.chip_budget.consume(result.clocks);
                 if (result.state == .fault) return .super_fx;
+                // A chip waiting for CPU bus ownership cannot bank work and
+                // execute the entire stopped interval when that bus returns.
+                if (result.state == .waiting_rom or result.state == .waiting_ram) self.chip_budget.pending = 0;
             },
             .sa1 => {
-                const result = cart.runSa1UntilMasterClock(self.clock.master_cycles, 8_192) orelse return null;
+                const result = cart.runSa1UntilMasterClock(self.clock.master_cycles, 8192) orelse return null;
                 if (result.state == .fault) return .sa1;
             },
             .cx4 => {
-                const device = if (cart.cx4_device) |*value| value else return null;
-                const result = device.runUntilCycle(cart.rom_storage, cart.sram_storage, self.clock.master_cycles);
+                const result = cart.runCx4Slice(@intCast(due)) orelse return null;
+                self.chip_budget.consume(result.cycles);
                 if (result.fault != null) return .cx4;
             },
             .dsp1_family, .st010_st011 => {
-                // uPD77C25/96050 clocks are below the S-CPU master clock. A
-                // waiting command returns immediately, while active firmware
-                // receives a deterministic proportional instruction budget.
-                _ = cart.runNecDspSlice(@max(@as(usize, 1), work / 3));
+                const device = if (cart.nec_dsp_device) |*value| value else return null;
+                const before = device.cycles;
+                const result = cart.runNecDspSlice(@intCast(due)) orelse return null;
+                self.chip_budget.consume(device.cycles -% before);
+                if (result.state == .waiting_host or result.state == .closed or !device.firmware_installed)
+                    self.chip_budget.pending = 0;
             },
             .st018 => {
-                // ST018's 21.44-MHz source is effectively one step per SNES
-                // master clock for this bounded cooperative integration.
-                _ = cart.runSt018Slice(@max(@as(usize, 1), work));
+                const result = cart.runSt018Clocks(due, maximum_work) orelse return null;
+                self.chip_budget.consume(result.cycles);
+                if (result.state == .closed) self.chip_budget.pending = 0;
+            },
+            .spc7110_epson_rtc => {
+                const device = if (cart.spc7110_device) |*value| value else return null;
+                const result = device.runClocks(cart.rom_storage, due, @import("spc7110.zig").maximum_decode_work);
+                self.chip_budget.consume(result.clocks);
+                self.coprocessor_pending = result.work_pending;
             },
             else => {},
         }
+        self.coprocessor_pending = self.coprocessor_pending or self.chip_budget.pending != 0;
         return null;
     }
 

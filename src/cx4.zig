@@ -2,6 +2,7 @@ const std = @import("std");
 const board = @import("board.zig");
 
 pub const access_master_cycles: u8 = 8;
+pub const frequency_hz: u32 = 20_000_000;
 pub const data_ram_bytes: usize = 3 * 1024;
 pub const program_words: usize = 256;
 pub const data_rom_words: usize = 1024;

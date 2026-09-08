@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-Version 0.22.9 joins the bounded cartridge frontend, complete W65C816, timed
+Version 0.22.10 joins the bounded cartridge frontend, complete W65C816, timed
 5A22 and byte-interruptible DMA/HDMA with a dot-observed S-PPU in a productive
 `R4SUBSYS1` application host. The PPU owns
 VRAM/CGRAM/OAM and renders modes 0-7, Mode 7, sprites, windows, main/subscreen,
@@ -140,6 +140,16 @@ decompression, exact cartridge windows, data/arithmetic ports and their
 documented SRAM/RTC behavior. Seven synthetic streams match the unchanged
 Mesen2 and Snes9x decoders byte-for-byte; Ares is retained as a third reviewed
 state-machine source.
+
+The production Machine scheduler converts SNES master clocks into each chip's
+own clock domain with a retained fractional remainder: Super FX and ST018
+21.44 MHz, CX4 20 MHz, and NEC DSP 7.6/11/15 MHz by revision. Super FX cache,
+clock-select and memory costs and ST018 ARM bus/idle costs consume actual
+chip clocks. A completed instruction's extra clocks pay down future grants.
+SPC7110 DCU setup, multiplication and division retain pending state for
+20/30/40 chip clocks. Large DCU seeks yield after at most 256 decoder calls;
+the Machine holds CPU time while completing the due continuation. Existing
+short chip programs exercise the productive scheduler and status boundaries.
 
 Super FX is executable as GSU-1 or GSU-2. The owner implements all 256 opcode
 bytes and all ALT states, the real pipeline and branch delay slot, ROM/RAM

@@ -775,3 +775,56 @@ fn finalizeChecksum(image: []u8, header: []u8) void {
     header[0x1e] = @truncate(checksum);
     header[0x1f] = @truncate(checksum >> 8);
 }
+
+test "Machine applies NEC DSP revision frequencies and does not bank blocked handshake time" {
+    const clock_test = @import("chip_clock_helpers.zig");
+    const allocator = std.testing.allocator;
+    for ([_]ndsp.Revision{ .dsp1, .st010, .st011 }) |revision| {
+        const is_st = revision != .dsp1;
+        const image = if (is_st) try makeStImage(allocator, 1024 * 1024) else try makeImage(allocator, 1024 * 1024, 0x20, 0x03, 0, 0x33, false);
+        defer allocator.free(image);
+        const firmware = try allocator.alloc(u8, if (is_st) ndsp.st_firmware_bytes else ndsp.firmware_bytes);
+        defer allocator.free(firmware);
+        @memset(firmware, 0); // Original NOP program; no host-handshake shortcut.
+        for ([_]core.timing.Region{ .ntsc, .pal }) |region| {
+            var cart = try core.cartridge.Cartridge.parseWithOptions(allocator, image, .{
+                .nec_dsp_revision = revision,
+                .nec_dsp_firmware = firmware,
+                .nec_dsp_firmware_validation = .allow_open_test,
+            });
+            defer cart.deinit();
+            const machine = try clock_test.power(&cart);
+            defer clock_test.close(machine);
+            machine.clock.region = region;
+            var total: u64 = 0;
+            for ([_]u32{ 1, 29, 70, 900, 2000 }) |part| {
+                try clock_test.advance(machine, &cart, part);
+                total += part;
+                const due = total * @as(u64, revision.frequencyHz()) / machine.clock.profile().master_hz;
+                try std.testing.expectEqual(due, cart.nec_dsp_device.?.cycles);
+                try std.testing.expectEqual(due, cart.nec_dsp_device.?.instructions);
+            }
+        }
+    }
+    var firmware = makeHandshakeFirmware();
+    const image = try makeImage(allocator, 1024 * 1024, 0x20, 0x03, 0, 0x33, false);
+    defer allocator.free(image);
+    var cart = try core.cartridge.Cartridge.parseWithOptions(allocator, image, .{
+        .nec_dsp_revision = .dsp1,
+        .nec_dsp_firmware = &firmware,
+        .nec_dsp_firmware_validation = .allow_open_test,
+    });
+    defer cart.deinit();
+    const machine = try clock_test.power(&cart);
+    defer clock_test.close(machine);
+    try clock_test.advance(machine, &cart, 1000);
+    try std.testing.expect(cart.nec_dsp_device.?.waiting_host);
+    const before = cart.nec_dsp_device.?.cycles;
+    try clock_test.advance(machine, &cart, 1000);
+    try std.testing.expectEqual(before, cart.nec_dsp_device.?.cycles);
+    try std.testing.expectEqual(@as(u64, 0), machine.chip_budget.pending);
+    _ = cart.nec_dsp_device.?.readCpu(0x308000, 0);
+    _ = cart.nec_dsp_device.?.readCpu(0x308000, 0);
+    try clock_test.advance(machine, &cart, 3);
+    try std.testing.expect(cart.nec_dsp_device.?.cycles <= before + 2);
+}

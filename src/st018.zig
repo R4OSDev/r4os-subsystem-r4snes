@@ -213,6 +213,14 @@ pub const Device = struct {
     /// instruction. This keeps host work bounded and partition-invariant while
     /// the returned cycle count exposes the instruction's exact bus/idles.
     pub fn runSlice(self: *Device, maximum_steps: usize) RunResult {
+        return self.runBudget(maximum_steps, null);
+    }
+
+    pub fn runClocks(self: *Device, maximum_clocks: u64, maximum_steps: usize) RunResult {
+        return self.runBudget(maximum_steps, maximum_clocks);
+    }
+
+    fn runBudget(self: *Device, maximum_steps: usize, maximum_clocks: ?u64) RunResult {
         if (self.closed) return .{
             .state = .closed,
             .steps = 0,
@@ -224,9 +232,12 @@ pub const Device = struct {
         var steps: usize = 0;
         var instructions: usize = 0;
         var last_exception: ?armv3.Exception = null;
-        while (steps < maximum_steps) : (steps += 1) {
+        while (steps < maximum_steps and
+            (maximum_clocks == null or self.cycles -% start_cycles < maximum_clocks.?)) : (steps += 1)
+        {
             if (self.reset_hold) {
                 self.tick();
+                if (maximum_clocks != null) continue;
                 steps += 1;
                 return .{
                     .state = .reset_hold,
@@ -247,7 +258,7 @@ pub const Device = struct {
             if (outcome.exception) |fault| last_exception = fault;
         }
         return .{
-            .state = if (self.reset_delay != 0) .reset_delay else if (maximum_steps == 0) .budget_exhausted else .running,
+            .state = if (self.reset_hold) .reset_hold else if (self.reset_delay != 0) .reset_delay else if (maximum_steps == 0 or maximum_clocks == 0) .budget_exhausted else .running,
             .steps = steps,
             .instructions = instructions,
             .cycles = self.cycles -% start_cycles,

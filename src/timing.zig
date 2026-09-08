@@ -23,6 +23,29 @@ pub const Region = enum {
     pal,
 };
 
+/// One cartridge chip's rational clock domain. Whole instructions may finish
+/// past the due time; their actual extra clocks pay down future grants.
+pub const ChipBudget = struct {
+    fraction: u64 = 0,
+    pending: u64 = 0,
+    ahead: u64 = 0,
+
+    pub fn advance(self: *ChipBudget, master_cycles: u64, master_hz: u64, chip_hz: u64) void {
+        const scaled: u128 = @as(u128, master_cycles) * chip_hz + self.fraction;
+        self.fraction = @intCast(scaled % master_hz);
+        const due: u64 = @intCast(@min(scaled / master_hz, std.math.maxInt(u64)));
+        const prepaid = @min(due, self.ahead);
+        self.ahead -= prepaid;
+        self.pending +|= due - prepaid;
+    }
+
+    pub fn consume(self: *ChipBudget, clocks: u64) void {
+        const covered = @min(self.pending, clocks);
+        self.pending -= covered;
+        self.ahead +|= clocks - covered;
+    }
+};
+
 pub const Profile = struct {
     master_hz: u64,
     scanlines: u16,
