@@ -520,7 +520,7 @@ fn writeE2eRuntimeReport(
     const non_silent_frames = dsp_stats.frames_rendered -| dsp_stats.silence_frames;
     const prefix_len = (std.fmt.bufPrint(
         report_storage[0..],
-        "R4SNES E2E runtime: {s} id={s} extension={s} end={s} battery={d} rtc={d} guest_ns={d} guest_cycles={d} master_hz={d} drift_cycles={d} pending_cycles={d} ppu_frames={d} slices={d} max_slice_grant={d} max_slice_execution={d} max_step_gap_ns={d} input={d} controller=0x{x:0>4} completion={d} frames={d} dropped_presents={d} audio_writes={d} audio_busy={d} audio_failures={d} audio_late={d} audio_discarded={d} audio_suppressed={d}",
+        "R4SNES E2E runtime: {s} id={s} extension={s} end={s} battery={d} rtc={d} guest_ns={d} guest_cycles={d} master_hz={d} drift_cycles={d} pending_cycles={d} ppu_frames={d} slices={d} max_slice_grant={d} max_slice_execution={d} max_step_gap_ns={d} input={d} controller=0x{x:0>4} completion={d} frames={d} dropped_presents={d} audio_writes={d} audio_busy={d} audio_failures={d} audio_late={d} audio_discarded={d} audio_paused={d} audio_muted={d} audio_suppressed={d}",
         .{
             if (ok) "OK" else "FAILED",
             trace.id,
@@ -548,6 +548,8 @@ fn writeE2eRuntimeReport(
             audio_stats.write_failures,
             audio_stats.late_resyncs,
             audio_stats.discarded_bytes,
+            audio_stats.paused_bytes,
+            audio_stats.muted_bytes,
             audio_stats.suppressed_bytes,
         },
     ) catch return false).len;
