@@ -42,6 +42,7 @@ pub fn build(b: *std.Build) void {
     release_check_root.addImport("core", performance_core);
     const release_check = b.addExecutable(.{ .name = "r4snes-release-profile-test", .root_module = release_check_root });
     const run_release_check = b.addRunArtifact(release_check);
+    b.step("release-profile-test", "Run the existing focused ReleaseFast and instrumentation equivalence check").dependOn(&run_release_check.step);
     const performance_root = b.createModule(.{
         .root_source_file = b.path("Tests/performance_harness.zig"),
         .target = b.graph.host,

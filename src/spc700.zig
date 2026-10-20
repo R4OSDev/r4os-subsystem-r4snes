@@ -1,5 +1,6 @@
 const std = @import("std");
 const sdsp = @import("sdsp.zig");
+const performance = @import("performance.zig");
 
 pub const apu_source_hz = @import("timing.zig").apu_source_hz;
 pub const apu_bus_hz = @import("timing.zig").apu_bus_hz;
@@ -115,6 +116,7 @@ pub const Smp = struct {
     waiting: bool = false,
     aram: [aram_size]u8 = [_]u8{0} ** aram_size,
     dsp: sdsp.Dsp = .{},
+    profile: ?*performance.Profile = null,
     io: Io = .{},
     timers: [3]Timer = .{
         .{ .frequency = 128 },
@@ -421,7 +423,9 @@ pub const Smp = struct {
     fn advanceDsp(self: *Smp, source_clocks: u64) void {
         const total = source_clocks + self.dsp_source_remainder;
         self.dsp_source_remainder = @truncate(total);
+        const started = if (self.profile) |p| p.now() else 0;
         self.dsp.runClocks(&self.aram, total / 2);
+        if (self.profile) |p| p.add(.dsp, p.now() -| started);
     }
 
     fn advanceTimers(self: *Smp, clocks: u32) void {

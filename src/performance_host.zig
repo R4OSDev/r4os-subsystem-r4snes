@@ -13,6 +13,7 @@ pub fn run(app: *r4os.App, check_only: bool) i32 {
         const sys = app.system();
         sys.write("R4SNES integrated profile FAILED: ");
         sys.println(@errorName(fault));
+        _ = sys.fileWrite("C:\\TEMP\\SNES-PERF.ERROR", @errorName(fault));
         return 98;
     };
     return 0;
@@ -66,6 +67,7 @@ fn execute(app: *r4os.App, check_only: bool) !void {
         probe.base = guest.driver();
         probe.runtime = &runtime;
         probe.profile = .{ .clock = .{ .context = &probe, .read = Probe.readClock } };
+        const clock_pair_ns = core.performance.calibrate(probe.profile.clock);
         const code = runtime.run(&sys, probe.driver(), probe.hostDriver());
         const end_ns = probe.now();
         guest.machine.?.profile = null;
@@ -119,15 +121,27 @@ fn execute(app: *r4os.App, check_only: bool) !void {
             .audio_discarded_bytes = after.discarded -| probe.before.discarded,
             .audio_playback_frames = @as(?u64, null), // No per-stream hardware cursor in ABI.
             .sampled_operations = probe.profile.sampled_operations,
+            .cpu_operations = probe.profile.cpu_operations,
+            .dma_operations = probe.profile.dma_operations,
+            .observed_master_cycles = probe.profile.master_cycles,
+            .profile_clock_regressions = probe.profile.clock_regressions,
             .profile_clock_reads = probe.profile.clock_reads,
+            .clock_pair_min_ns = clock_pair_ns,
+            .sample_interval = core.performance.sample_interval,
+            .pending_master_cycles = guest.machine.?.host_budget.pending_master_cycles,
+            .maximum_pending_master_cycles = probe.maximum_pending,
+            .maximum_pcm_queue_bytes = probe.maximum_pcm_queue,
             .sampled_exclusive_wall_ns = probe.profile.elapsed_ns,
             .sampled_phase_calls = probe.profile.calls,
-            .phase_order = "cpu,ppu,apu,coprocessor",
+            .phase_order = core.performance.phase_order,
             .enhancement = "none",
             .phase_time_is_cpu_accounting = false,
         };
         const json = try std.json.Stringify.valueAlloc(allocator, record, .{});
         defer allocator.free(json);
+        const serial_record = try std.fmt.allocPrint(allocator, "R4SNES-PERF {s}", .{json});
+        defer allocator.free(serial_record);
+        sys.println(serial_record);
         if (report_len + json.len + 2 > report.len) return error.ReportTooLarge;
         @memcpy(report[report_len..][0..json.len], json);
         report_len += json.len;
@@ -202,6 +216,8 @@ const Probe = struct {
     before: Snapshot = undefined,
     stage_ns: [6]u64 = .{0} ** 6,
     stage_calls: [6]u64 = .{0} ** 6,
+    maximum_pending: u64 = 0,
+    maximum_pcm_queue: usize = 0,
 
     fn now(self: *Probe) u64 {
         return self.sys.monotonicNanoseconds() orelse 0;
@@ -288,6 +304,10 @@ const Probe = struct {
         self.end(0, started);
         if (result.status == .failed) return result;
         const machine = self.guest.machine.?;
+        if (self.measuring) {
+            self.maximum_pending = @max(self.maximum_pending, machine.host_budget.pending_master_cycles);
+            self.maximum_pcm_queue = @max(self.maximum_pcm_queue, self.runtime.audio.queue.available());
+        }
         const hz = machine.clock.profile().master_hz;
         if (!self.measuring and machine.clock.master_cycles >= @as(u128, scene.warmup_ns) * hz / std.time.ns_per_s) {
             self.before = self.snapshot();

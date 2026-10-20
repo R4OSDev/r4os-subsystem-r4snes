@@ -4,6 +4,16 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
+Version 0.22.13 separates sampled CPU/bus, DMA, PPU, S-SMP, S-DSP and
+coprocessor wall spans. Nested PPU/DSP costs are subtracted from their
+enclosing spans. Profiling is instance-local and optional; normal emulation
+does not read profiling clocks. The existing ReleaseFast check compares
+exact work and WRAM/ARAM/frame/PCM output with profiling enabled and disabled.
+`release-profile-test` runs this focused check without the full owner suite.
+Integrated profiles also report queue/backlog peaks, clock-call calibration
+and bounded console/file JSON records. These are diagnostic elapsed times,
+not scheduler CPU accounting or physical display/audio completion.
+
 Version 0.22.11 reports paused and muted audio bytes separately in E2E results,
 so the existing integration check distinguishes intentional discard from loss.
 

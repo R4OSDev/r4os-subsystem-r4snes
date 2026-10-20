@@ -214,8 +214,11 @@ pub const Machine = struct {
         // Clock calls only in one operation out of 1024, and only when an
         // explicit profile is attached. Normal emulation never reads them.
         const profile = if (self.profile) |p| p.operation() else null;
+        self.smp.profile = profile;
+        defer self.smp.profile = null;
         var phase_started = if (profile) |p| p.now() else 0;
         const ppu_before = if (profile) |p| p.elapsed(.ppu) else 0;
+        const dsp_before = if (profile) |p| p.elapsed(.dsp) else 0;
         self.cpu.setIrqLine(self.scpu.irq_line or cart.sa1CpuIrqPending() or cart.cx4CpuIrqPending());
         var mmio = SystemMmio{ .display = &self.ppu, .audio = &self.smp, .clock = &self.clock, .operation_start = self.clock.master_cycles, .profile = profile };
         var port = scpu.TimedPortWithDevice(*SystemMmio){
@@ -228,7 +231,8 @@ pub const Machine = struct {
             .device = &mmio,
         };
         const before = self.clock.master_cycles;
-        if (port.cpuReady()) {
+        const cpu_ready = port.cpuReady();
+        if (cpu_ready) {
             if (self.cpu.canFastForwardWaiting() and
                 self.scpu.math_operation == .none and
                 self.scpu.hdma_enable == 0)
@@ -245,14 +249,20 @@ pub const Machine = struct {
         }
         if (profile) |p| {
             const now = p.now();
-            p.add(.cpu, (now -| phase_started) -| (p.elapsed(.ppu) -| ppu_before));
+            p.add(if (cpu_ready) .cpu_bus else .dma, (now -| phase_started) -|
+                (p.elapsed(.ppu) -| ppu_before) -| (p.elapsed(.dsp) -| dsp_before));
             phase_started = now;
         }
+        const dsp_after_cpu = if (profile) |p| p.elapsed(.dsp) else 0;
         // Observe a port-0 IPL edge only after the complete S-CPU/DMA
         // operation. A 16-bit store to $2140 writes the new port-1 payload
         // after its port-0 counter within that same indivisible operation.
         self.smp.serviceSemanticIpl();
         const elapsed = self.clock.master_cycles -% before;
+        if (self.profile) |p| {
+            if (cpu_ready) p.cpu_operations +|= 1 else p.dma_operations +|= 1;
+            p.master_cycles +|= elapsed;
+        }
         // S-SMP execution is already synchronized only at complete S-CPU or
         // DMA operations. Accumulating its oscillator phase once for that
         // exact span is arithmetically identical to one division per master
@@ -261,7 +271,7 @@ pub const Machine = struct {
         if (self.serviceSmp()) return .smp;
         if (profile) |p| {
             const now = p.now();
-            p.add(.apu, now -| phase_started);
+            p.add(.smp, (now -| phase_started) -| (p.elapsed(.dsp) -| dsp_after_cpu));
             phase_started = now;
         }
         const result = self.serviceCoprocessors(cart, elapsed);
