@@ -53,6 +53,8 @@ pub fn build(b: *std.Build) void {
         .name = "r4snes-performance-harness",
         .root_module = performance_root,
     });
+    const install_performance = b.addInstallArtifact(performance_harness, .{});
+    b.step("performance-build", "Build and install the explicit host benchmark without running it").dependOn(&install_performance.step);
     const run_performance = b.addRunArtifact(performance_harness);
     if (b.args) |args| run_performance.addArgs(args);
 
@@ -244,6 +246,7 @@ pub fn build(b: *std.Build) void {
 
     const performance_step = b.step("performance-test", "Explicit five-sample active NTSC scene in ReleaseFast, or --check-scene without measurement");
     performance_step.dependOn(&run_performance.step);
+    performance_step.dependOn(&install_performance.step);
 
     const cartridge_probe_step = b.step("cartridge-probe", "Run a local cartridge with per-second CPU, PPU and SMP telemetry");
     cartridge_probe_step.dependOn(&run_cartridge_probe.step);

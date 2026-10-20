@@ -20,6 +20,7 @@ pub fn run(app: *r4os.App, check_only: bool) i32 {
 }
 
 fn execute(app: *r4os.App, check_only: bool) !void {
+    const options = try core.performance_options.guest(app.args());
     if (app.profile != .desktop) return error.DesktopRequired;
     const allocator = app.allocator() orelse return error.AllocatorMissing;
     const sys = app.system();
@@ -28,26 +29,35 @@ fn execute(app: *r4os.App, check_only: bool) !void {
     const draw = app.drawing() orelse return error.DrawingMissing;
     const audio = app.audio() orelse return error.AudioMissing;
     if (sys.monotonicNanoseconds() == null) return error.ClockMissing;
-    var report: [32768]u8 = undefined;
+    const report = try allocator.alloc(u8, 131072);
+    defer allocator.free(report);
     var report_len: usize = 0;
-    const sample_count = if (check_only) @as(usize, 1) else scene.samples * 2;
+    if (sys.fileWrite("C:\\TEMP\\SNES-PERF.JSONL", "") != 0) return error.ReportWriteFailed;
+    _ = sys.fileWrite("C:\\TEMP\\SNES-PERF.ERROR", "");
+    const sample_count = options.count(check_only);
     const measured_ns = if (check_only) scene.warmup_ns else scene.duration_ns;
     for (0..sample_count) |run_index| {
-        const sample = run_index / 2;
-        const instrumented = run_index % 2 == sample % 2;
+        const sample = options.sample(run_index);
+        const instrumented = options.detailed(run_index);
         const image = try allocator.alloc(u8, scene.image_bytes);
-        try scene.build(image);
+        try scene.buildForRegion(image, options.region);
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(image, &digest, .{});
         var time = TimeSource{ .sys = &sys };
         var store = core.persistence_r4os.AsyncStore.init(files, allocator);
-        var guest = product.Guest.init(allocator, store.backend(), .{ .context = &time, .now_fn = TimeSource.now }, sample + 1);
+        var guest = product.Guest.init(allocator, store.backend(), .{ .context = &time, .now_fn = TimeSource.now }, 1);
         try guest.openOwned(.{ .image = image });
-        defer _ = guest.close();
-        try guest.setGuestTimeLimit(scene.warmup_ns + measured_ns);
+        var guest_closed = false;
+        defer if (!guest_closed) { _ = guest.close(); };
+        const initial = core.performance.stateDigest(guest.machine.?);
+        try guest.setGuestTimeLimit(scene.warmup_ns);
+        // Anchor the production budget at guest time zero. Otherwise a late
+        // first host turn can make the exact warmup cap unreachable.
+        if (guest.driver().step(product.slice_budget_master_cycles, 0).status == .failed) return error.PrimeFailed;
         var raster_scratch: [video.tile_max_pixels]u32 = undefined;
         var window = try video.Host.init(desk, draw, try guest.initialSurface(), &raster_scratch);
-        defer window.video.deinit(video.Backend.fromDraw(&draw));
+        var window_closed = false;
+        defer if (!window_closed) window.video.deinit(video.Backend.fromDraw(&draw));
         window.setInputPolicy(.{ .key_text_mode = .key_and_text, .pointer_mode = .ignored });
         _ = window.setMinimumSize(core.ppu.frame_width, core.ppu.standard_height);
         try guest.attachVideo(&window.video);
@@ -68,10 +78,16 @@ fn execute(app: *r4os.App, check_only: bool) !void {
         probe.runtime = &runtime;
         probe.profile = .{ .clock = .{ .context = &probe, .read = Probe.readClock } };
         const clock_pair_ns = core.performance.calibrate(probe.profile.clock);
+        var clock_info: r4os.abi.MonotonicClockInfo = .{};
+        if (sys.monotonicClock(&clock_info) <= 0 or clock_info.flags & r4os.abi.monotonic_clock_flag_valid == 0) return error.ClockMissing;
+        probe.warmup_started_ns = probe.now();
         const code = runtime.run(&sys, probe.driver(), probe.hostDriver());
         const end_ns = probe.now();
         guest.machine.?.profile = null;
         const after = probe.snapshot();
+        var clock_end: r4os.abi.MonotonicClockInfo = .{};
+        if (sys.monotonicClock(&clock_end) <= 0 or clock_end.flags & r4os.abi.monotonic_clock_flag_valid == 0 or clock_end.generation != clock_info.generation or
+            clock_end.source != clock_info.source) return error.ClockChanged;
         if (code != 0 or !probe.measuring or runtime.audio.state == .degraded or
             guest.machine.?.smp.dsp.stats.frames_dropped != 0 or
             after.generated -| probe.before.generated < (if (check_only) @as(u64, 8) else 100) or
@@ -80,15 +96,32 @@ fn execute(app: *r4os.App, check_only: bool) !void {
             return error.InvalidMeasuredRun;
         const cpu_ticks = if (probe.cpu_start) |start| if (probe.taskTicks()) |end| end -| start else null else null;
         const record = .{
-            .profile = "r4os-window-audsvc-v1",
+            .profile = "r4os-window-audsvc-v2",
             .scene = scene.identity,
+            .region = @tagName(options.region),
             .rom_sha256 = std.fmt.bytesToHex(digest, .lower),
-            .sample = sample + 1,
+            .initial_state_sha256 = std.fmt.bytesToHex(initial, .lower),
+            .state_sha256 = std.fmt.bytesToHex(core.performance.stateDigest(guest.machine.?), .lower),
+            .frame_sha256 = std.fmt.bytesToHex(core.performance.frameDigest(guest.machine.?), .lower),
+            .pcm_sha256 = @as(?u64, null), // The transport does not expose a full playback stream.
+            .sample = sample,
             .instrumented = instrumented,
             .qualification_only = check_only,
             .warmup_guest_ns = scene.warmup_ns,
             .measured_guest_ns = measured_ns,
+            .warmup = .{ .wall_ns = probe.warmup_wall_ns, .guest_ns = scene.warmup_ns,
+                .master_cycles = probe.before.master, .generated_frames = probe.before.generated,
+                .apu_native_frames = probe.before.native, .audio_accepted_bytes = probe.before.audio_bytes },
+            .work_start_master = probe.before.master,
+            .work_end_master = after.master,
+            .master_hz = guest.machine.?.clock.profile().master_hz,
             .wall_ns = end_ns -| probe.started_ns,
+            .clock_source = clock_info.source,
+            .clock_resolution_ns = clock_info.resolution_ns,
+            .clock_generation = clock_info.generation,
+            .surface_width = guest.machine.?.ppu.published_width,
+            .surface_height = guest.machine.?.ppu.published_height,
+            .viewport = window.video.currentViewport(),
             .assigned_runtime_ticks = cpu_ticks,
             .runtime_tick_hz = sys.monotonicHz(),
             .stage_wall_ns = probe.stage_ns,
@@ -120,6 +153,7 @@ fn execute(app: *r4os.App, check_only: bool) !void {
             .audio_failures = after.audio_failures,
             .audio_discarded_bytes = after.discarded -| probe.before.discarded,
             .audio_playback_frames = @as(?u64, null), // No per-stream hardware cursor in ABI.
+            .actually_presented_frames = @as(?u64, null), // Desktop trace is global, not an app receipt.
             .sampled_operations = probe.profile.sampled_operations,
             .cpu_operations = probe.profile.cpu_operations,
             .dma_operations = probe.profile.dma_operations,
@@ -129,6 +163,7 @@ fn execute(app: *r4os.App, check_only: bool) !void {
             .clock_pair_min_ns = clock_pair_ns,
             .sample_interval = core.performance.sample_interval,
             .pending_master_cycles = guest.machine.?.host_budget.pending_master_cycles,
+            .maximum_operation_overshoot = guest.machine.?.maximum_operation_overshoot,
             .maximum_pending_master_cycles = probe.maximum_pending,
             .maximum_pcm_queue_bytes = probe.maximum_pcm_queue,
             .sampled_exclusive_wall_ns = probe.profile.elapsed_ns,
@@ -136,7 +171,13 @@ fn execute(app: *r4os.App, check_only: bool) !void {
             .phase_order = core.performance.phase_order,
             .enhancement = "none",
             .phase_time_is_cpu_accounting = false,
+            .cleanup_verified = true,
         };
+        window.video.deinit(video.Backend.fromDraw(&draw));
+        window_closed = true;
+        const close_code = guest.close();
+        guest_closed = true;
+        if (close_code != 0 or guest.resourcesOpen()) return error.CleanupFailed;
         const json = try std.json.Stringify.valueAlloc(allocator, record, .{});
         defer allocator.free(json);
         const serial_record = try std.fmt.allocPrint(allocator, "R4SNES-PERF {s}", .{json});
@@ -147,9 +188,10 @@ fn execute(app: *r4os.App, check_only: bool) !void {
         report_len += json.len;
         report[report_len] = '\n';
         report_len += 1;
+        if (sys.fileWrite("C:\\TEMP\\SNES-PERF.JSONL", report[0..report_len]) != @as(i32, @intCast(report_len))) return error.ReportWriteFailed;
     }
     if (sys.fileWrite("C:\\TEMP\\SNES-PERF.JSONL", report[0..report_len]) != @as(i32, @intCast(report_len))) return error.ReportWriteFailed;
-    sys.println(if (check_only) "R4SNES profile qualification: OK" else "R4SNES integrated profile: OK samples=5 variants=timing-on+timing-off scene=r4snes.active-scene.v1");
+    sys.println(if (check_only) "R4SNES profile qualification: OK" else "R4SNES integrated profile: OK samples=5 scene=r4snes.active-scene.v2");
 }
 
 const TimeSource = struct {
@@ -176,6 +218,7 @@ const TimeSource = struct {
 };
 
 const Snapshot = struct {
+    master: u64,
     beam: u64,
     generated: u64,
     submitted: u64,
@@ -211,6 +254,8 @@ const Probe = struct {
     runtime: *rt.Runtime = undefined,
     profile: core.performance.Profile = undefined,
     measuring: bool = false,
+    warmup_started_ns: u64 = 0,
+    warmup_wall_ns: u64 = 0,
     started_ns: u64 = 0,
     cpu_start: ?u64 = null,
     before: Snapshot = undefined,
@@ -240,6 +285,7 @@ const Probe = struct {
         _ = self.window.draw.guiFrameInfo(null, &info);
         const audio = self.runtime.audio.stats;
         return .{
+            .master = machine.clock.master_cycles,
             .beam = machine.clock.frame,
             .generated = machine.ppu.frame_generation,
             .submitted = self.window.video.stats.published_frames,
@@ -309,8 +355,11 @@ const Probe = struct {
             self.maximum_pcm_queue = @max(self.maximum_pcm_queue, self.runtime.audio.queue.available());
         }
         const hz = machine.clock.profile().master_hz;
-        if (!self.measuring and machine.clock.master_cycles >= @as(u128, scene.warmup_ns) * hz / std.time.ns_per_s) {
+        if (!self.measuring and machine.host_budget.pending_master_cycles == 0 and
+            machine.clock.master_cycles >= @as(u128, scene.warmup_ns) * hz / std.time.ns_per_s) {
             self.before = self.snapshot();
+            self.warmup_wall_ns = self.now() -| self.warmup_started_ns;
+            self.guest.setGuestTimeLimit(scene.warmup_ns + self.measured_ns) catch return rt.StepResult.fail(98);
             self.cpu_start = self.taskTicks();
             self.started_ns = self.now();
             self.measuring = true;

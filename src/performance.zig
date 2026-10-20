@@ -1,7 +1,8 @@
 // Optional sampled wall-time attribution for explicit performance runs.
-// A sampled operation contains CPU/PPU, then APU, then coprocessor work.
-// PPU time is subtracted from its enclosing CPU span, never added twice.
+// A sampled operation contains CPU/DMA with PPU, then SMP with DSP, then
+// coprocessor work. Nested PPU/DSP spans are subtracted from their owners.
 // These are elapsed call spans, not CPU scheduler accounting.
+const std = @import("std");
 pub const Phase = enum { cpu_bus, dma, ppu, smp, dsp, coprocessor };
 pub const phase_count = 6;
 pub const phase_order = "cpu_bus,dma,ppu,smp,dsp,coprocessor";
@@ -22,6 +23,28 @@ pub fn calibrate(clock: Clock) u64 {
         if (end >= begin) minimum = @min(minimum, end - begin);
     }
     return minimum;
+}
+
+// Explicit benchmark checks only, after timing. Never hash memory in a
+// productive step or interpret padding/pointers as deterministic state.
+pub fn stateDigest(machine: anytype) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(&machine.bus.wram);
+    hash.update(&machine.smp.aram);
+    hash.update(std.mem.asBytes(&machine.ppu.vram));
+    hash.update(std.mem.asBytes(&machine.clock.master_cycles));
+    hash.update(std.mem.asBytes(&machine.smp.cycles));
+    hash.update(std.mem.asBytes(&machine.cpu.pc));
+    hash.update(std.mem.asBytes(&machine.smp.pc));
+    var result: [32]u8 = undefined;
+    hash.final(&result);
+    return result;
+}
+
+pub fn frameDigest(machine: anytype) [32]u8 {
+    var result: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(&machine.ppu.published_frame), &result, .{});
+    return result;
 }
 
 pub const Profile = struct {

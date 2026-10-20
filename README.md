@@ -4,6 +4,26 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
+Version 0.22.14 adds explicit reproducible benchmark exports. Linux uses
+`./Benchmark.sh`, Windows `Benchmark.bat`; both call the same PS7 script:
+
+    ./Benchmark.sh -Profile Core -Region ntsc -Mode normal
+    ./Benchmark.sh -Profile Window -Region pal -Mode paired
+
+Core measures the production emulator in a native host executable without a
+window; it does not claim R4OS or QEMU CPU performance. Window creates one
+disposable SMP4 R4OS image with the productive WINSVC/AUDSVC path and the
+software framebuffer. Each region/mode has five fixed 3-second guest batches
+after 250-ms guest warmup; paired order alternates. Region, exact master work,
+initial/final state, frame and available PCM digests bind the comparison.
+`-CheckOnly` qualifies the active scene without a benchmark export.
+`-OutputRoot` chooses the export directory; defaults are under
+`Artifacts/Distribution/Diagnostics/SubsystemBenchmarks/<UUID>/run.json`.
+The schema preserves raw warmup/work data, errors, artifact identity and
+lossless counters. Disabled timings and unavailable physical output are null.
+Ordinary builds/tests never start this benchmark. See the workspace's
+`Docs/Diagnostics/SnesBenchmark.txt` for interpretation and limitations.
+
 Version 0.22.13 separates sampled CPU/bus, DMA, PPU, S-SMP, S-DSP and
 coprocessor wall spans. Nested PPU/DSP costs are subtracted from their
 enclosing spans. Profiling is instance-local and optional; normal emulation

@@ -11,6 +11,7 @@ pub const epson_rtc = @import("epson_rtc.zig");
 pub const fixture_rom = @import("fixture_rom.zig");
 pub const performance_scene = @import("performance_scene.zig");
 pub const performance = @import("performance.zig");
+pub const performance_options = @import("performance_options.zig");
 pub const host_adapter = @import("host_adapter.zig");
 pub const machine = @import("machine.zig");
 pub const nec_dsp = @import("nec_dsp.zig");

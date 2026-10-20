@@ -63,8 +63,8 @@ const e2e_fixture_firmware_path = "C:\\TEMP\\R4SNES-DSP-REQUIRED.SFC";
 const e2e_end_key = "end";
 
 pub fn r4_app_main(app: *r4os.App) i32 {
-    if (std.ascii.eqlIgnoreCase(app.args(), "/PERFTEST")) return @import("performance_host.zig").run(app, false);
-    if (std.ascii.eqlIgnoreCase(app.args(), "/PERFCHECK")) return @import("performance_host.zig").run(app, true);
+    if (core.performance_options.command(app.args(), "/PERFTEST")) return @import("performance_host.zig").run(app, false);
+    if (core.performance_options.command(app.args(), "/PERFCHECK")) return @import("performance_host.zig").run(app, true);
     if (std.mem.indexOf(u8, app.args(), "/PERSISTTEST") != null) return persistenceSelfTest(app);
     if (std.mem.indexOf(u8, app.args(), "/HOSTTEST") != null) return hostSelfTest(app);
     if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);

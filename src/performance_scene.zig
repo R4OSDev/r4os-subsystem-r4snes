@@ -3,13 +3,17 @@
 const std = @import("std");
 const fixture = @import("fixture_rom.zig");
 
-pub const identity = "r4snes.active-scene.v1";
+pub const identity = "r4snes.active-scene.v2";
 pub const image_bytes = 32 * 1024;
 pub const warmup_ns: u64 = 250 * std.time.ns_per_ms;
 pub const duration_ns: u64 = 3 * std.time.ns_per_s;
 pub const samples: usize = 5;
 
 pub fn build(out: []u8) !void {
+    return buildForRegion(out, .ntsc);
+}
+
+pub fn buildForRegion(out: []u8, region: @import("performance_options.zig").Region) !void {
     try fixture.build(out, .rom_only);
     // Eight 4-bpp tiles, shared by two backgrounds and 128 bounded sprites.
     for (0..8) |tile| {
@@ -80,8 +84,9 @@ pub fn build(out: []u8) !void {
 
     const header = out[0x7fc0..0x8000];
     @memset(header[0..21], ' ');
-    const title = "R4SNES ACTIVE PERF V1";
+    const title = "R4SNES ACTIVE PERF V2";
     @memcpy(header[0..title.len], title);
+    header[0x19] = if (region == .pal) 2 else 1;
     header[0x3c] = 0x00;
     header[0x3d] = 0xb0;
     @memset(header[0x1c..0x20], 0);
