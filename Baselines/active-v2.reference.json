@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "benchmark_family": "snes",
+  "subsystem_id": "r4os.snes",
+  "work_version": "snes-fixed-guest-v2",
+  "scene_id": "r4snes.active-scene.v2",
+  "selection": "First qualified normal runs of the declared local matrix; all five original batches retained, no score normalization.",
+  "data_location": "DevCenter immutable run_id or Artifacts/Distribution/Diagnostics/SubsystemBenchmarks/<run_id>/run.json. Hashes identify unchanged original export bytes, before API normalization.",
+  "comparison": "Resolve the full run and check exact workload, region, profile, instrumentation mode and execution/measurement conditions. Host/CPU/VM remain context; diagnostics are separate observer-cost evidence.",
+  "references": [
+    {
+      "run_id": "05fc7644-ef76-4b34-8263-e9eecedc7490",
+      "original_export_sha256": "ac19cb3a442129107e837ba21d01d8e7f2fe4bc4863a5487e382d6ce9a49e19d",
+      "host_id": "hetzner-owner",
+      "profile": "core-throughput",
+      "region": "ntsc",
+      "instrumentation_mode": "normal",
+      "emulator_artifact_sha256": "11d4099acfca7199a6302bebf1826bee37057ebcc397394453772c1f2ef0edc8",
+      "diagnostic_run_id": "d2b893de-4e5d-498c-9d4d-7bc14cc37fd7",
+      "diagnostic_export_sha256": "d1b10f0fae95f0d766aa28aca6edfacea5cf9641b30c2f38751cd05215165618"
+    },
+    {
+      "run_id": "693b4e9f-62e5-474e-8ba9-5725630e5fdf",
+      "original_export_sha256": "4bd0cbceb9d72f0da51d313c9578e2098da7f2f34039a18681386efa68817210",
+      "host_id": "hetzner-owner",
+      "profile": "core-throughput",
+      "region": "pal",
+      "instrumentation_mode": "normal",
+      "emulator_artifact_sha256": "11d4099acfca7199a6302bebf1826bee37057ebcc397394453772c1f2ef0edc8",
+      "diagnostic_run_id": "d88cd0b9-8ca9-499f-9284-10d86704ecdf",
+      "diagnostic_export_sha256": "ec396481c13f08a2fe6d5912fed4791762dbf55a9fd04363fbc6121c74d48620"
+    },
+    {
+      "run_id": "76c5748a-25b9-4f86-9f6e-e400900186b3",
+      "original_export_sha256": "70022aef41a10fae00c583476af6b0633fe644ea67592c3324f76011bb38f081",
+      "host_id": "hetzner-qemu",
+      "profile": "window-audio",
+      "region": "ntsc",
+      "instrumentation_mode": "normal",
+      "emulator_artifact_sha256": "5dde3fcdb53c5bab83f5e84e3d6a3ff4038ae83f71be9a82a47bbac25a3db1c7",
+      "diagnostic_run_id": "07adbdab-586f-43c6-9ecf-388ac5f7330c",
+      "diagnostic_export_sha256": "0a9d38d2d072c0d2dcc3d8979fd72b1d5d76ad4176e7c9754cc0b8cbc0cb54e4"
+    }
+  ]
+}

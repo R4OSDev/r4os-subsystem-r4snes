@@ -24,6 +24,24 @@ lossless counters. Disabled timings and unavailable physical output are null.
 Ordinary builds/tests never start this benchmark. See the workspace's
 `Docs/Diagnostics/SnesBenchmark.txt` for interpretation and limitations.
 
+The shared runner can upload an unchanged export and verify the complete GET:
+
+    ./Benchmark.sh -Profile Core -Region pal -Mode paired -Upload
+    ./Benchmark.sh -ImportRun <existing-run.json>
+
+The second command never builds or measures again. API URL comes from
+`-DevCenterUrl`, `R4OS_DEVCENTER_API_URL`, or the workspace's
+`Tools/BenchmarkHost.R4S`. Use the locally provisioned
+`R4OS_DEVCENTER_API_TOKEN` or `R4OS_DEVCENTER_API_TOKEN_FILE`; on this workspace
+the existing local DevCenter token file is also supported. Credentials never
+enter exports. Missing hosts are registered from the run's actual context;
+existing host metadata is preserved. UUID retries remain idempotent, conflicts
+fail, and every raw batch/warmup/context/artifact value is read back losslessly.
+On upload failure keep the same file and retry `-ImportRun`.
+`Baselines/active-v2.reference.json` pins the first qualified normal local
+NTSC/PAL core and NTSC window runs, their original export hashes, and paired
+diagnostic IDs. Actual samples stay in DevCenter or the local artifact cache.
+
 Version 0.22.13 separates sampled CPU/bus, DMA, PPU, S-SMP, S-DSP and
 coprocessor wall spans. Nested PPU/DSP costs are subtracted from their
 enclosing spans. Profiling is instance-local and optional; normal emulation

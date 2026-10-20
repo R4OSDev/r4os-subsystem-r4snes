@@ -4,12 +4,14 @@ param(
  [ValidateSet('normal','detail','paired')][string]$Mode='normal',
  [ValidateSet('active-v2')][string]$Scene='active-v2',
  [string]$HostId='', [string]$OutputRoot='', [switch]$CheckOnly,
+ [switch]$Upload, [string]$ImportRun='', [string]$DevCenterUrl='',
  [ValidateRange(30,1200)][int]$TimeoutSeconds=420
 )
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 $Mode=$Mode.ToLowerInvariant();$Region=$Region.ToLowerInvariant()
 $moduleRoot=$PSScriptRoot;$workspaceRoot=[IO.Path]::GetFullPath((Join-Path $moduleRoot '../../..'))
 . (Join-Path $moduleRoot 'Tools/BenchmarkData.ps1')
+. (Join-Path $moduleRoot 'Tools/BenchmarkUpload.ps1')
 function Read-R4SnesFields([string]$Path){
  $fields=@{};foreach($line in Get-Content $Path){$text=$line.Trim();if(!$text -or $text.StartsWith('#')){continue};$i=$text.IndexOf('=');if($i -gt 0){$fields[$text.Substring(0,$i)]=$text.Substring($i+1)}};return $fields
 }
@@ -40,6 +42,14 @@ $release=Read-R4SnesFields (Join-Path $workspaceRoot 'Repositories/Distribution/
 $hostSettings=@{}
 $hostSettingsPath=Join-Path $workspaceRoot 'Tools/BenchmarkHost.R4S'
 if(Test-Path $hostSettingsPath){$hostSettings=Read-R4SnesFields $hostSettingsPath}
+if(!$DevCenterUrl){$DevCenterUrl=$env:R4OS_DEVCENTER_API_URL}
+if(!$DevCenterUrl -and $hostSettings.ContainsKey('DEVCENTER_API_URL')){$DevCenterUrl=$hostSettings.DEVCENTER_API_URL}
+if($ImportRun){
+ if($CheckOnly){throw '-ImportRun cannot be combined with -CheckOnly'}
+ $null=Publish-R4SnesExport -Path $ImportRun -WorkspaceRoot $workspaceRoot -ApiUrl $DevCenterUrl
+ exit 0
+}
+if($CheckOnly -and $Upload){throw '-CheckOnly produces no export to upload'}
 if(!$HostId){
  $HostId=$env:R4OS_BENCHMARK_HOST_ID
  if(!$HostId -and $hostSettings.ContainsKey('HOST_ID')){$HostId=$hostSettings.HOST_ID}
@@ -110,16 +120,22 @@ $devkitRoot=[IO.Path]::GetFullPath((Join-Path $moduleRoot $settings.DEVKIT_ROOT)
 $zig=Join-Path (Join-Path $devkitRoot $settings.ZIG_ROOT) $(if($IsWindows){'zig.exe'}else{'zig'})
 $compiler=Invoke-R4SnesCommand $zig @('version') $moduleRoot
 $environment.compiler_version=$compiler.Output.Trim()
-foreach($scriptPath in @($PSCommandPath,(Join-Path $moduleRoot 'Tools/BenchmarkData.ps1'),(Join-Path $workspaceRoot 'Repositories/Distribution/Tools/SnesBenchmarkGuest.ps1'),(Join-Path $workspaceRoot 'Repositories/Distribution/Tools/ReadGuestFile.cs'))){
+foreach($scriptPath in @($PSCommandPath,(Join-Path $moduleRoot 'Tools/BenchmarkData.ps1'),(Join-Path $moduleRoot 'Tools/BenchmarkUpload.ps1'),(Join-Path $workspaceRoot 'Repositories/Distribution/Tools/SnesBenchmarkGuest.ps1'),(Join-Path $workspaceRoot 'Repositories/Distribution/Tools/ReadGuestFile.cs'))){
  $used+=@{name=[IO.Path]::GetFileName($scriptPath);role='host-runner';sha256=(Get-FileHash $scriptPath).Hash.ToLowerInvariant()}
 }
 $failed=$false
+$exportPaths=[Collections.Generic.List[string]]::new()
 foreach($variant in $(if($Mode -eq 'paired'){@('normal','detail')}else{@($Mode)})){
  $selected=@($records|Where-Object {$_.instrumented -eq ($variant -eq 'detail')})
  $run=New-R4SnesExport -Records $selected -Profile $(if($Profile -eq 'Core'){'core-throughput'}else{'window-audio'}) -Region $Region -Mode $variant -HostId $HostId -Started $started -Finished $finished -Environment $environment -Artifacts $used -Versions $versions -Failure $failure
  $directory=Join-Path $OutputRoot $run.run_id;$null=New-Item -ItemType Directory -Force $directory
  $path=Join-Path $directory 'run.json';[IO.File]::WriteAllText($path,($run|ConvertTo-Json -Depth 48)+"`n",[Text.UTF8Encoding]::new($false))
+ $exportPaths.Add($path)
  Write-Host "SNES $($run.status): $path"
  if($run.status -ne 'completed'){$failed=$true;Write-Host $run.failure_reason}
 }
+if($Upload){foreach($path in $exportPaths){
+ try{$null=Publish-R4SnesExport -Path $path -WorkspaceRoot $workspaceRoot -ApiUrl $DevCenterUrl}
+ catch{$failed=$true;Write-Warning ($_.Exception.Message+'; retry the same file with -ImportRun '+$path)}
+}}
 if($failed){exit 1}
