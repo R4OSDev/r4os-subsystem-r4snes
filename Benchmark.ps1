@@ -3,6 +3,7 @@ param(
  [ValidateSet('ntsc','pal')][string]$Region='ntsc',
  [ValidateSet('normal','detail','paired')][string]$Mode='normal',
  [ValidateSet('active-v2')][string]$Scene='active-v2',
+ [ValidateSet('Small','Maximized')][string]$WindowSize='Small',[switch]$OutputAnalysis,
  [string]$HostId='', [string]$OutputRoot='', [switch]$CheckOnly,
  [switch]$Upload, [string]$ImportRun='', [string]$DevCenterUrl='',
  [ValidateRange(30,1200)][int]$TimeoutSeconds=420
@@ -50,6 +51,7 @@ if($ImportRun){
  exit 0
 }
 if($CheckOnly -and $Upload){throw '-CheckOnly produces no export to upload'}
+if($Profile -eq 'Core' -and ($WindowSize -ne 'Small' -or $OutputAnalysis)){throw 'WindowSize/OutputAnalysis require -Profile Window'}
 if(!$HostId){
  $HostId=$env:R4OS_BENCHMARK_HOST_ID
  if(!$HostId -and $hostSettings.ContainsKey('HOST_ID')){$HostId=$hostSettings.HOST_ID}
@@ -83,17 +85,18 @@ try{
    if($build.Code -ne 0 -or $build.Timeout){throw ('Guest benchmark component build failed: '+$build.Error)}
   }
   . (Join-Path $workspaceRoot 'Repositories/Distribution/Tools/SnesBenchmarkGuest.ps1')
-  $guest=Invoke-R4SnesGuestBenchmark -Region $Region -Mode $Mode -CheckOnly:$CheckOnly -TimeoutSeconds $TimeoutSeconds
+  $guest=Invoke-R4SnesGuestBenchmark -Region $Region -Mode $Mode -WindowSize $WindowSize -OutputAnalysis:$OutputAnalysis -CheckOnly:$CheckOnly -TimeoutSeconds $TimeoutSeconds
   $records=@($guest.Records)
   if($guest.Image){
    $versions.release_version=$guest.Image.installation.releaseVersion;$versions.kernel_version=$guest.Image.installation.kernelVersion
    $environment.image_sha256_before_boot=$guest.Image.sha256
    $used+=@{name='R4SNES.R4X';role='guest-emulator';sha256=$guest.Image.r4snes_sha256;optimize='ReleaseFast';target='r4os-avx2-v1'}
+   $used+=@{name='R4DESK.R4X';role='guest-output-owner';sha256=$guest.Image.desktop_sha256;optimize='ReleaseSmall';target='r4os-avx2-v1'}
   }
   if($guest.HostProfile){$environment.accelerator=$guest.HostProfile.Name;$environment.qemu_cpu=$guest.HostProfile.CpuModel}
-  $environment.global_desktop_presents=$guest.GlobalDesktopPresents
   if($guest.Failure){throw $guest.Failure}
-  if($records.Count){$environment.conditions.viewport=Convert-R4SnesLossless $records[0].viewport}
+  Add-R4SnesWindowOutput -Records $records -Output $guest.WindowOutput -WindowSize $WindowSize -Environment $environment
+  if($guest.OutputAnalysis){$environment.software_output_analysis=Convert-R4SnesLossless $guest.OutputAnalysis}
  }
 }catch{$failure=$_.Exception.Message}
 if(!$failure -and !$CheckOnly -and $Mode -eq 'paired'){
@@ -115,6 +118,13 @@ $environment.components=[ordered]@{}
 foreach($component in @('SDK','Contract','Kernel','Distribution','Apps/Desktop')){
  $state=Invoke-R4SnesCommand 'git' @('-C',(Join-Path $workspaceRoot ('Repositories/'+$component)),'rev-parse','HEAD') $moduleRoot
  $environment.components[$component]=$state.Output.Trim()
+}
+$environment.output_owner_source=[ordered]@{}
+foreach($component in @('Apps/Desktop','Distribution')){
+ $componentRoot=Join-Path $workspaceRoot ('Repositories/'+$component)
+ $diff=Invoke-R4SnesCommand 'git' @('-C',$componentRoot,'diff','--binary','HEAD') $moduleRoot
+ $files=Invoke-R4SnesCommand 'git' @('-C',$componentRoot,'ls-files','--others','--exclude-standard','-z') $moduleRoot
+ $environment.output_owner_source[$component]=[ordered]@{diff_sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($diff.Output))).ToLowerInvariant();dirty=[bool]$diff.Output;untracked=@(foreach($name in $files.Output.Split([char]0)){if($name){@{path=$name;sha256=(Get-FileHash (Join-Path $componentRoot $name)).Hash.ToLowerInvariant()}}})}
 }
 $devkitRoot=[IO.Path]::GetFullPath((Join-Path $moduleRoot $settings.DEVKIT_ROOT))
 $zig=Join-Path (Join-Path $devkitRoot $settings.ZIG_ROOT) $(if($IsWindows){'zig.exe'}else{'zig'})

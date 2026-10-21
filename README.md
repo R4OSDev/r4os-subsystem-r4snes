@@ -42,6 +42,31 @@ On upload failure keep the same file and retry `-ImportRun`.
 NTSC/PAL core and NTSC window runs, their original export hashes, and paired
 diagnostic IDs. Actual samples stay in DevCenter or the local artifact cache.
 
+The window runner also accepts an explicit fixed output size (R4OS 0.86.44):
+
+    ./Benchmark.sh -Profile Window -Mode normal -WindowSize Small -OutputAnalysis -Upload
+    ./Benchmark.sh -Profile Window -Mode normal -WindowSize Maximized -Upload
+
+Small uses a 414x224 client; Maximized uses the actual desktop work area.
+Geometry is established before child warmup and must remain stable. Exports
+retain screen/frame/client/viewport context, global desktop presents and the
+window generations observed in successful software display copies, including
+existing owner frame/composition/present wall times. A partial copy is marked
+separately; none of these observations proves physical scanout or complete
+frame visibility. With no cursor input, cursor latency stays null. Generation
+cohorts may finish copying after the guest's measured interval; their counts
+are not visible FPS. Added output conditions deliberately separate these runs
+from old window references and from the other geometry. Fixed v2 guest work
+and all existing reference UUIDs/hashes remain unchanged.
+
+`-OutputAnalysis` additionally runs a small offscreen, public synthetic
+Desktop fixture before starting SNES. It separates layer begin/clear, fills,
+nearest scaling, row comparison/copy and composition, with complete original
+canvas hashes checked outside timing. One warmup and four samples per size
+and variant include a diagnostic omission of a fully covered background.
+These RAM timings and static-layer costs are analysis, not game performance.
+Normal emulation and ordinary desktop operation do not run these probes.
+
 Version 0.22.13 separates sampled CPU/bus, DMA, PPU, S-SMP, S-DSP and
 coprocessor wall spans. Nested PPU/DSP costs are subtracted from their
 enclosing spans. Profiling is instance-local and optional; normal emulation

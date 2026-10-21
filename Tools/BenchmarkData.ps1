@@ -19,6 +19,53 @@ function Get-R4SnesStatistics($Values) {
  $sorted=@($Values|Sort-Object)
  return [ordered]@{median_value=$median.ToString([Globalization.CultureInfo]::InvariantCulture);min_value=([decimal]$sorted[0]).ToString([Globalization.CultureInfo]::InvariantCulture);max_value=([decimal]$sorted[-1]).ToString([Globalization.CultureInfo]::InvariantCulture);mad_value=$mad.ToString([Globalization.CultureInfo]::InvariantCulture)}
 }
+function Add-R4SnesWindowOutput {
+ param([object[]]$Records,$Output,[string]$WindowSize,$Environment)
+ if(!$Output -or $Output.contract -cne 'desktop-window-output-v1' -or
+    $Output.receipt -cne 'software-display-copy-present-success' -or
+    $Output.window_case -cne $WindowSize.ToLowerInvariant() -or $null -ne $Output.physical_visibility){throw 'Invalid software output context'}
+ if(!$Records.Count -or !$Output.records.Count -or $Output.client.w -le 0 -or $Output.client.h -le 0 -or
+    $Output.session_end_ns -le $Output.session_start_ns){throw 'Incomplete output geometry/time'}
+ if($WindowSize -eq 'Small' -and ($Output.client.w -ne 414 -or $Output.client.h -ne 224)){throw 'Small client geometry changed'}
+ if($WindowSize -eq 'Maximized' -and ($Output.frame.w -ne $Output.screen.w -or $Output.client.w -le 414 -or $Output.client.h -le 224)){throw 'Maximized client geometry missing'}
+ $lastGeneration=[ulong]0;$lastTime=[ulong]0
+ foreach($copy in $Output.records){
+  if([ulong]$copy.generation -le $lastGeneration -or [ulong]$copy.completed_ns -lt $lastTime -or
+     [ulong]$copy.frame_wall_ns -lt [ulong]$copy.compose_wall_ns -or [ulong]$copy.frame_wall_ns -lt [ulong]$copy.present_wall_ns){throw 'Invalid copy trace order/time'}
+  $lastGeneration=[ulong]$copy.generation;$lastTime=[ulong]$copy.completed_ns
+ }
+ $viewport=Convert-R4SnesLossless $Records[0].viewport
+ $viewportText=$viewport|ConvertTo-Json -Compress -Depth 8
+ foreach($record in $Records){
+  if(((Convert-R4SnesLossless $record.viewport)|ConvertTo-Json -Compress -Depth 8) -cne $viewportText){throw 'Viewport changed during fixed-size run'}
+  if($record.viewport.x -lt 0 -or $record.viewport.y -lt 0 -or
+     $record.viewport.x+$record.viewport.w -gt $Output.client.w -or $record.viewport.y+$record.viewport.h -gt $Output.client.h){throw 'Viewport outside observed client'}
+  $selected=@($Output.records|Where-Object {[ulong]$_.generation -gt [ulong]$record.generation_start_exclusive -and [ulong]$_.generation -le [ulong]$record.generation_end_inclusive})
+  if(!$selected.Count -or $selected.Count -gt [ulong]$record.submitted_frames){throw 'Measured generation cohort has missing/inconsistent copy observations'}
+  $stats=[ordered]@{}
+  foreach($field in @('frame_wall_ns','compose_wall_ns','present_wall_ns')){
+   $stats[$field]=Get-R4SnesStatistics @($selected|ForEach-Object {[decimal]$_[$field]})
+  }
+  $cursor=@($selected|Where-Object {$null -ne $_.cursor_queued_to_copy_ticks})
+  $record['desktop_output']=[ordered]@{
+   window_generation_copy_observations=$selected.Count
+   full_client_copy_observations=@($selected|Where-Object {$_.full_client_copy}).Count
+   first_copy_completed_ns=$selected[0].completed_ns;last_copy_completed_ns=$selected[-1].completed_ns
+   owner_wall_ns=$stats
+   cursor_queued_to_copy_ticks=if($cursor.Count){Get-R4SnesStatistics @($cursor|ForEach-Object {[decimal]$_.cursor_queued_to_copy_ticks})}else{$null}
+   physical_visible_frames=$null
+  }
+ }
+ $Environment.window_output=Convert-R4SnesLossless $Output
+ $Environment.global_desktop_presents=$Output.global_desktop_presents
+ $Environment.conditions.viewport=$viewport
+ $Environment.conditions.window_case=$Output.window_case
+ $Environment.conditions.output_context_contract=$Output.contract
+ $Environment.conditions.screen=Convert-R4SnesLossless $Output.screen
+ $Environment.conditions.window_frame=Convert-R4SnesLossless $Output.frame
+ $Environment.conditions.window_client=Convert-R4SnesLossless $Output.client
+}
+
 function New-R4SnesExport {
  param([object[]]$Records,[string]$Profile,[string]$Region,[string]$Mode,[string]$HostId,[string]$Started,[string]$Finished,$Environment,$Artifacts,$Versions,[AllowNull()][string]$Failure)
  $samples=@(foreach($record in $Records){
