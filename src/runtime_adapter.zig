@@ -31,6 +31,7 @@ pub const Adapter = struct {
     audio_degraded: bool = false,
     audio_prefill_frames: usize = runtime.default_quantum_frames * runtime.default_target_quanta,
     audio_prefill_released: bool = false,
+    audio_backpressured: bool = false,
     audio_render_calls: u64 = 0,
     audio_feedback_calls: u64 = 0,
     last_step_guest_ns: u64 = 0,
@@ -61,6 +62,7 @@ pub const Adapter = struct {
         self.dsp.endCapture();
         self.transport_pending_bytes = 0;
         self.audio_prefill_released = false;
+        self.audio_backpressured = false;
     }
 };
 
@@ -72,6 +74,15 @@ fn step(context: *anyopaque, budget: u32, guest_now_ns: u64) runtime.StepResult 
     }
     self.last_step_guest_ns = guest_now_ns;
     if (!self.source_finished) {
+        // A catch-up slice may run much faster than the host audio timeline.
+        // Keep the same bounded source prefill instead of overwriting unheard
+        // PCM. Transport feedback wakes this event wait; guest time and the
+        // machine's clock debt keep advancing independently.
+        if (self.audio_capture_enabled and self.dsp.queuedFrames() >= self.audio_prefill_frames) {
+            self.audio_backpressured = true;
+            return runtime.StepResult.waitUntil(0, false);
+        }
+        self.audio_backpressured = false;
         const result = self.source.step(budget, guest_now_ns);
         switch (result.status) {
             .failed => return result,
@@ -79,7 +90,8 @@ fn step(context: *anyopaque, budget: u32, guest_now_ns: u64) runtime.StepResult 
                 self.source_finished = true;
                 self.source_exit_code = result.exit_code;
                 if (self.dsp.queuedFrames() == 0 and self.transport_pending_bytes == 0) return result;
-                return runtime.StepResult.progress(result.frame_ready).withOperations(result.operations);
+                self.audio_backpressured = true;
+                return runtime.StepResult.waitUntil(0, result.frame_ready).withOperations(result.operations);
             },
             .progress, .waiting => return result,
         }
@@ -87,7 +99,8 @@ fn step(context: *anyopaque, budget: u32, guest_now_ns: u64) runtime.StepResult 
     if (self.dsp.queuedFrames() == 0 and self.transport_pending_bytes == 0) {
         return runtime.StepResult.complete(self.source_exit_code, false);
     }
-    return runtime.StepResult.progress(false);
+    self.audio_backpressured = true;
+    return runtime.StepResult.waitUntil(0, false);
 }
 
 fn reset(context: *anyopaque) i32 {
@@ -99,6 +112,7 @@ fn reset(context: *anyopaque) i32 {
     self.audio_capture_enabled = true;
     self.audio_degraded = false;
     self.audio_prefill_released = false;
+    self.audio_backpressured = false;
     self.transport_pending_bytes = 0;
     self.source_finished = false;
     self.source_exit_code = 0;
@@ -149,5 +163,7 @@ fn audioFeedback(context: *anyopaque, feedback: runtime.AudioFeedback) bool {
         self.audio_capture_enabled = true;
         self.audio_prefill_released = false;
     }
-    return false;
+    const wake = self.audio_backpressured and (resolved != 0 or unavailable);
+    if (wake) self.audio_backpressured = false;
+    return wake;
 }

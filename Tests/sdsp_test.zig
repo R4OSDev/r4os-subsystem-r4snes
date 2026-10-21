@@ -316,19 +316,27 @@ test "runtime adapter feedback isolates mute degradation reset and close" {
     try std.testing.expectEqual(@as(i32, quantum.len), driver.renderAudio(quantum[0..]));
     try std.testing.expect(adapter.audio_prefill_released);
 
-    _ = driver.audioFeedback(.{ .state = .degraded, .muted = false, .discarded_bytes = 128 });
+    dsp.runClocks(&prefill_aram, 641 * 32);
+    try std.testing.expectEqual(r4os.subsystem_runtime.StepStatus.waiting, driver.step(32, 1).status);
+    try std.testing.expect(driver.audioFeedback(.{ .state = .degraded, .muted = false, .discarded_bytes = 128 }));
     try std.testing.expect(adapter.audio_degraded);
     try std.testing.expect(!adapter.audio_capture_enabled);
     try std.testing.expectEqual(@as(usize, 0), dsp.queuedFrames());
     _ = driver.audioFeedback(.{ .state = .ready, .muted = false });
     try std.testing.expect(adapter.audio_capture_enabled);
-    _ = driver.audioFeedback(.{ .state = .active, .muted = true });
+    dsp.runClocks(&prefill_aram, 641 * 32);
+    try std.testing.expectEqual(r4os.subsystem_runtime.StepStatus.waiting, driver.step(32, 2).status);
+    try std.testing.expect(driver.audioFeedback(.{ .state = .active, .muted = true }));
     try std.testing.expect(!adapter.audio_capture_enabled);
+    try std.testing.expectEqual(r4os.subsystem_runtime.StepStatus.progress, driver.step(32, 3).status);
     _ = driver.audioFeedback(.{ .state = .active, .muted = false });
     try std.testing.expect(adapter.audio_capture_enabled);
 
+    dsp.runClocks(&prefill_aram, 641 * 32);
+    try std.testing.expectEqual(r4os.subsystem_runtime.StepStatus.waiting, driver.step(32, 4).status);
     try std.testing.expectEqual(@as(i32, 0), driver.reset());
     try std.testing.expectEqual(@as(u32, 1), source_state.resets);
+    try std.testing.expectEqual(r4os.subsystem_runtime.StepStatus.progress, driver.step(32, 5).status);
     adapter.close();
     adapter.close();
     try std.testing.expect(!dsp.capture_enabled);
@@ -446,6 +454,84 @@ test "subsystem runtime submits bounded S-DSP PCM and backend loss never stops g
     failed_adapter.close();
 }
 
+test "PCM catchup waits for transport progress without dropping or reordering samples" {
+    const rt = r4os.subsystem_runtime;
+    var probe = Probe{};
+    probe.initialize();
+    probe.sample(0, 0x2000, 0xc3, ascending);
+    probe.voice(0, 0, 0x1000, 0, 0, 0x7f, 127, 96);
+    probe.dsp.write(0x5d, 0x10);
+    probe.dsp.write(0x4c, 1);
+    var source = RuntimeSource{ .probe = &probe, .target_clocks = 24_000 * 32 };
+    var adapter = core.runtime_adapter.Adapter.init(&probe.dsp, source.source());
+    defer adapter.close();
+    var sink = RuntimeSink{};
+    var host = RuntimeHost{};
+    var queue: [3840]u8 = undefined;
+    var scratch: [1920]u8 = undefined;
+    var runtime = try rt.Runtime.init(.{ .slice_budget = 3200 }, 1000, 0, .{
+        .config = .{ .max_catchup_quanta = 16 },
+        .queue_storage = &queue,
+        .scratch = &scratch,
+        .sink = sink.sink(),
+    });
+
+    // The producer can catch up many slices before the next host deadline.
+    // A full bounded timeline must produce a real wait instead of more PCM.
+    var waiting = false;
+    for (0..128) |_| {
+        switch (runtime.cycle(1, adapter.driver(), host.driver())) {
+            .wait => |ticks| if (ticks != 0) {
+                waiting = true;
+                break;
+            },
+            .finished => return error.PrematureCompletion,
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 0), probe.dsp.stats.frames_dropped);
+    try std.testing.expect(waiting);
+    const held_clocks = source.executed_clocks;
+    for (0..3) |_| _ = runtime.cycle(1, adapter.driver(), host.driver());
+    try std.testing.expectEqual(held_clocks, source.executed_clocks);
+
+    var completed = false;
+    for (2..2000) |tick| {
+        switch (runtime.cycle(@intCast(tick), adapter.driver(), host.driver())) {
+            .wait => {},
+            .finished => |result| {
+                try std.testing.expectEqual(rt.LifecycleState.completed, result.state);
+                try std.testing.expectEqual(@as(i32, 0), result.exit_code);
+                completed = true;
+                break;
+            },
+        }
+    }
+    try std.testing.expect(completed);
+    try std.testing.expectEqual(source.target_clocks, source.executed_clocks);
+    try std.testing.expectEqual(@as(u64, 0), probe.dsp.stats.frames_dropped);
+    try std.testing.expectEqual(@as(usize, 0), probe.dsp.queuedFrames());
+    try std.testing.expectEqual(@as(u16, 1), runtime.audio.stats.maximum_service_operations_per_cycle);
+
+    // Independently drain the same digital source after each small chunk.
+    // Compare all submitted PCM bytes, including the final partial quantum.
+    var reference = Probe{};
+    reference.initialize();
+    reference.sample(0, 0x2000, 0xc3, ascending);
+    reference.voice(0, 0, 0x1000, 0, 0, 0x7f, 127, 96);
+    reference.dsp.write(0x5d, 0x10);
+    reference.dsp.write(0x4c, 1);
+    reference.dsp.beginCapture();
+    var reference_sink = RuntimeSink{};
+    for (0..240) |_| {
+        reference.dsp.runClocks(&reference.aram, 3200);
+        const rendered = reference.dsp.renderPcm(&scratch);
+        try std.testing.expect(rendered > 0);
+        _ = RuntimeSink.write(&reference_sink, scratch[0..@intCast(rendered)]);
+    }
+    try std.testing.expectEqual(reference_sink.bytes, sink.bytes);
+    try std.testing.expectEqual(reference_sink.digest, sink.digest);
+}
+
 const AdapterSource = struct {
     dsp: *core.sdsp.Dsp,
     resets: u32 = 0,
@@ -516,6 +602,7 @@ const RuntimeSink = struct {
     closes: u32 = 0,
     bytes: u64 = 0,
     all_zero: bool = true,
+    digest: u64 = fnv_offset,
 
     fn sink(self: *RuntimeSink) r4os.subsystem_runtime.AudioSink {
         return .{
@@ -540,7 +627,10 @@ const RuntimeSink = struct {
         if (self.fail_writes) return -77;
         self.writes += 1;
         self.bytes +%= data.len;
-        for (data) |byte| self.all_zero = self.all_zero and byte == 0;
+        for (data) |byte| {
+            self.all_zero = self.all_zero and byte == 0;
+            self.digest = (self.digest ^ byte) *% fnv_prime;
+        }
         return @intCast(data.len);
     }
 

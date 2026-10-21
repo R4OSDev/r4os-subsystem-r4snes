@@ -8,18 +8,45 @@ const rt = r4os.subsystem_runtime;
 const video = r4os.subsystem_host;
 const product = core.product_host;
 
+const FailureContext = struct {
+    sample: usize = 0,
+    runtime_exit_code: ?i32 = null,
+    warmup_reached: ?bool = null,
+    audio_state: ?rt.AudioState = null,
+    audio_last_error: ?i32 = null,
+    audio_write_failures: ?u64 = null,
+    dsp_dropped_frames: ?u64 = null,
+    warmup_dsp_dropped_frames: ?u64 = null,
+    audio_stats: ?rt.AudioStats = null,
+    dsp_stats: ?core.sdsp.AudioStats = null,
+    generated_frames: ?u64 = null,
+    generation_start: ?u64 = null,
+    generation_end: ?u64 = null,
+    non_silent_frames: ?u64 = null,
+    master_start: ?u64 = null,
+    master_end: ?u64 = null,
+};
+
 pub fn run(app: *r4os.App, check_only: bool) i32 {
-    execute(app, check_only) catch |fault| {
+    var failure_context = FailureContext{};
+    execute(app, check_only, &failure_context) catch |fault| {
         const sys = app.system();
         sys.write("R4SNES integrated profile FAILED: ");
         sys.println(@errorName(fault));
-        _ = sys.fileWrite("C:\\TEMP\\SNES-PERF.ERROR", @errorName(fault));
+        if (app.allocator()) |allocator| {
+            const detail = std.json.Stringify.valueAlloc(allocator, .{ .error_name = @errorName(fault), .context = failure_context }, .{}) catch {
+                _ = sys.fileWrite("C:\\TEMP\\SNES-PERF.ERROR", @errorName(fault));
+                return 98;
+            };
+            defer allocator.free(detail);
+            _ = sys.fileWrite("C:\\TEMP\\SNES-PERF.ERROR", detail);
+        } else _ = sys.fileWrite("C:\\TEMP\\SNES-PERF.ERROR", @errorName(fault));
         return 98;
     };
     return 0;
 }
 
-fn execute(app: *r4os.App, check_only: bool) !void {
+fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !void {
     const options = try core.performance_options.guest(app.args());
     if (app.profile != .desktop) return error.DesktopRequired;
     const allocator = app.allocator() orelse return error.AllocatorMissing;
@@ -38,6 +65,7 @@ fn execute(app: *r4os.App, check_only: bool) !void {
     const measured_ns = if (check_only) scene.warmup_ns else scene.duration_ns;
     for (0..sample_count) |run_index| {
         const sample = options.sample(run_index);
+        failure_context.* = .{ .sample = sample };
         const instrumented = options.detailed(run_index);
         const image = try allocator.alloc(u8, scene.image_bytes);
         try scene.buildForRegion(image, options.region);
@@ -88,6 +116,26 @@ fn execute(app: *r4os.App, check_only: bool) !void {
         var clock_end: r4os.abi.MonotonicClockInfo = .{};
         if (sys.monotonicClock(&clock_end) <= 0 or clock_end.flags & r4os.abi.monotonic_clock_flag_valid == 0 or clock_end.generation != clock_info.generation or
             clock_end.source != clock_info.source) return error.ClockChanged;
+        // Capture the exact rejected state after timing, before normal cleanup.
+        // Failed runs retain these facts even without a completed sample.
+        failure_context.* = .{
+            .sample = sample,
+            .runtime_exit_code = code,
+            .warmup_reached = probe.measuring,
+            .audio_state = runtime.audio.state,
+            .audio_last_error = runtime.audio.last_error,
+            .audio_write_failures = after.audio_failures,
+            .dsp_dropped_frames = guest.machine.?.smp.dsp.stats.frames_dropped,
+            .warmup_dsp_dropped_frames = probe.warmup_dsp_dropped_frames,
+            .audio_stats = runtime.audio.stats,
+            .dsp_stats = guest.machine.?.smp.dsp.stats,
+            .generated_frames = if (probe.measuring) after.generated -| probe.before.generated else null,
+            .generation_start = if (probe.measuring) probe.before.generation else null,
+            .generation_end = after.generation,
+            .non_silent_frames = if (probe.measuring) after.non_silent -| probe.before.non_silent else null,
+            .master_start = if (probe.measuring) probe.before.master else null,
+            .master_end = after.master,
+        };
         if (code != 0 or !probe.measuring or runtime.audio.state == .degraded or
             guest.machine.?.smp.dsp.stats.frames_dropped != 0 or
             after.generated -| probe.before.generated < (if (check_only) @as(u64, 8) else 100) or
@@ -256,6 +304,7 @@ const Probe = struct {
     measuring: bool = false,
     warmup_started_ns: u64 = 0,
     warmup_wall_ns: u64 = 0,
+    warmup_dsp_dropped_frames: ?u64 = null,
     started_ns: u64 = 0,
     cpu_start: ?u64 = null,
     before: Snapshot = undefined,
@@ -358,6 +407,7 @@ const Probe = struct {
         if (!self.measuring and machine.host_budget.pending_master_cycles == 0 and
             machine.clock.master_cycles >= @as(u128, scene.warmup_ns) * hz / std.time.ns_per_s) {
             self.before = self.snapshot();
+            self.warmup_dsp_dropped_frames = machine.smp.dsp.stats.frames_dropped;
             self.warmup_wall_ns = self.now() -| self.warmup_started_ns;
             self.guest.setGuestTimeLimit(scene.warmup_ns + self.measured_ns) catch return rt.StepResult.fail(98);
             self.cpu_start = self.taskTicks();
