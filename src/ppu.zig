@@ -620,7 +620,12 @@ pub const Ppu = struct {
         const layer_x: u16 = if (self.mode == 5 or self.mode == 6) x else logical_x;
         var backgrounds: [4]?Candidate = .{null} ** 4;
         const main = self.outputCandidate(self.main_enable, self.main_window_enable, layer_x, logical_x, y, field, &backgrounds);
-        const sub = self.outputCandidate(self.sub_enable, self.sub_window_enable, layer_x, logical_x, y, field, &backgrounds);
+        // Identical masks select the same cached pixels and replay the same
+        // palette fetches. Their final CGRAM latch is already established.
+        const sub = if (self.main_enable == self.sub_enable and self.main_window_enable == self.sub_window_enable)
+            main
+        else
+            self.outputCandidate(self.sub_enable, self.sub_window_enable, layer_x, logical_x, y, field, &backgrounds);
         const main_colour = self.composeMain(main, sub, logical_x);
         const output_colour = if ((self.pseudo_hires or self.mode == 5 or self.mode == 6) and (x & 1) == 0)
             self.composeMain(sub, main, logical_x)
@@ -665,10 +670,10 @@ pub const Ppu = struct {
         const hires = self.mode == 5 or self.mode == 6;
         const horizontal_scale: u16 = if (self.nativeWidth() == hires_width and !hires) 2 else 1;
         const mosaic_span: u16 = if (self.mosaic_enabled[index]) @as(u16, self.mosaic_size) * horizontal_scale else 1;
-        const sample_x = raw_x - raw_x % mosaic_span;
+        const sample_x = if (mosaic_span == 1) raw_x else raw_x - raw_x % mosaic_span;
         var interlace_y: u16 = raw_y;
         if (hires and self.interlace) interlace_y = raw_y * 2 + @intFromBool(field and !self.mosaic_enabled[index]);
-        const sample_y = if (self.mosaic_enabled[index]) interlace_y - interlace_y % self.mosaic_size else interlace_y;
+        const sample_y = if (self.mosaic_enabled[index] and self.mosaic_size != 1) interlace_y - interlace_y % self.mosaic_size else interlace_y;
         const scroll_x = self.backgrounds[index].horizontal_scroll *% (if (hires) @as(u16, 2) else 1);
         var x: u16 = sample_x +% scroll_x;
         var y: u16 = sample_y +% self.backgrounds[index].vertical_scroll;
@@ -714,8 +719,8 @@ pub const Ppu = struct {
     fn mode7Pixel(self: *Ppu, index: usize, raw_x: u16, raw_y: u16) Candidate {
         if (index > 1 or (index == 1 and !self.mode7_extbg)) return .{};
         const sample_span: u16 = if (self.mosaic_enabled[0]) self.mosaic_size else 1;
-        var x: i32 = @intCast(raw_x - raw_x % sample_span);
-        var y: i32 = @intCast(raw_y - raw_y % sample_span);
+        var x: i32 = @intCast(if (sample_span == 1) raw_x else raw_x - raw_x % sample_span);
+        var y: i32 = @intCast(if (sample_span == 1) raw_y else raw_y - raw_y % sample_span);
         if (self.mode7_hflip) x = 255 - x;
         if (self.mode7_vflip) y = 255 - y;
 

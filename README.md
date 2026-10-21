@@ -96,6 +96,11 @@ stereo stream is converted deterministically to 48 kHz S16LE in caller-owned
 blocks of at most 2048 frames through a bounded queue. A thin adapter composes
 that queue only with `r4os.subsystem_runtime`; mute or backend degradation
 discards audio without changing guest time, video or machine progress.
+With available audio, a full source prefill waits for transport progress before
+another bounded emulation slice. Accepted, suppressed or discarded transport
+bytes wake held work; mute, backend degradation and reset release the wait.
+The FIFO size and PCM order stay unchanged, and finite completion drains the
+source and transport queues through the same feedback path.
 
 The unchanged Gilyon CPU and SPC ROMs, all 256000 SPC700 state and bus-cycle
 vectors, a 32768-byte IPL-speed transfer, twelve exact PPU models and nine HDRV
