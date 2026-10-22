@@ -19,6 +19,59 @@ function Get-R4SnesStatistics($Values) {
  $sorted=@($Values|Sort-Object)
  return [ordered]@{median_value=$median.ToString([Globalization.CultureInfo]::InvariantCulture);min_value=([decimal]$sorted[0]).ToString([Globalization.CultureInfo]::InvariantCulture);max_value=([decimal]$sorted[-1]).ToString([Globalization.CultureInfo]::InvariantCulture);mad_value=$mad.ToString([Globalization.CultureInfo]::InvariantCulture)}
 }
+function Read-R4SnesSpectraBenchmark {
+ param([string]$Text,[string]$Region,[string]$Mode,[bool]$CheckOnly,[bool]$OutputAnalysis,[string]$WindowSize)
+ . (Join-Path $PSScriptRoot '../../../Diagnostics/Spectra/Tools/StructuredOutput.ps1')
+ $rows=Read-SpectraStructuredOutput $Text
+ $samples=@($rows|Where-Object {$_.group -ceq 'SNES' -and $_.kind -ceq 'snes-sample'}|ForEach-Object {$_.data})
+ $windows=@($rows|Where-Object {$_.group -ceq 'SNES' -and $_.kind -ceq 'desktop-output'}|ForEach-Object {$_.data})
+ $software=@($rows|Where-Object {$_.group -ceq 'DESKTOP' -and $_.kind -ceq 'software-output'}|ForEach-Object {$_.data})
+ $contexts=@($rows|Where-Object {$_.group -ceq 'SNES' -and $_.kind -ceq 'context'}|ForEach-Object {$_.data})
+ $controls=@($rows|Where-Object {$_.group -ceq 'SNES' -and $_.kind -ceq 'benchmark-control'}|ForEach-Object {$_.data})
+ $results=@($rows|Where-Object {$_.group -ceq 'SNES' -and $_.kind -ceq 'result'}|ForEach-Object {$_.data})
+ $failure=$null
+ try{
+  if($results.Count -ne 1){throw 'Missing/duplicate Spectra result'}
+  if(!$results[0].success -or [int](Get-SpectraScalar $results[0].exit_code) -ne 0 -or !$results[0].cleanup_acknowledged){
+   $reasons=@($rows|Where-Object {$_.group -ceq 'SNES' -and $_.kind -ceq 'unavailable'}|ForEach-Object {$_.data.reason})
+   $reasons+=@($rows|Where-Object {$_.group -ceq 'SNES' -and $_.kind -ceq 'snes-error'}|ForEach-Object {$_.data.error_name})
+   throw ('Spectra failed/incomplete: '+($reasons -join ', '))
+  }
+  if($contexts.Count -ne 1 -or $controls.Count -ne 1 -or !$controls[0].snes -or
+   $controls[0].options.mode -cne $Mode -or $controls[0].options.pal -ne ($Region -ceq 'pal') -or
+   $controls[0].options.maximized -ne ($WindowSize -ceq 'Maximized') -or $controls[0].options.check_only -ne $CheckOnly -or
+   $controls[0].output_analysis -ne $OutputAnalysis){throw 'Spectra benchmark control context differs'}
+  $expected=if($CheckOnly){1}elseif($Mode -ceq 'paired'){10}else{5}
+  if($samples.Count -ne $expected -or [int](Get-SpectraScalar $results[0].original_owner_records) -ne $samples.Count){throw 'Incomplete original SNES samples'}
+  foreach($sample in $samples){
+   if($sample -isnot [Collections.IDictionary] -or $sample.profile -cne 'r4os-window-audsvc-v2' -or
+    $sample.scene -cne 'r4snes.active-scene.v2' -or $sample.region -cne $Region -or
+    $sample.qualification_only -ne $CheckOnly -or !$sample.cleanup_verified -or
+    ($Mode -cne 'paired' -and $sample.instrumented -ne ($Mode -ceq 'detail'))){throw 'Unexpected original SNES owner record'}
+  }
+  $completions=@($rows|Where-Object {$_.group -ceq 'SNES' -and $_.kind -ceq 'completion'}|ForEach-Object {$_.data})
+  $children=@($rows|Where-Object {$_.group -ceq 'SNES' -and $_.kind -ceq 'benchmark-child'}|ForEach-Object {$_.data})
+  if($completions.Count -ne 1 -or $children.Count -ne 1 -or !$completions[0].reaped -or
+   [int](Get-SpectraScalar $completions[0].exit_code) -ne 0 -or [int](Get-SpectraScalar $children[0].exit_code) -ne 0 -or
+   [ulong](Get-SpectraScalar $completions[0].sequence) -eq 0 -or
+   (Get-SpectraScalar $completions[0].sequence) -cne (Get-SpectraScalar $children[0].sequence)){throw 'Missing real SNES completion/reap'}
+  if($windows.Count -ne 1){throw 'Missing/duplicate Desktop output owner report'}
+  foreach($field in @('instance_id','generation')){
+   $identity=Get-SpectraScalar $completions[0].handle[$field]
+   if([ulong]$identity -eq 0 -or $identity -cne (Get-SpectraScalar $children[0].handle[$field]) -or
+    [ulong]$identity -ne [ulong]$windows[0].process[$field]){throw 'Changed benchmark child generation'}
+  }
+  if($OutputAnalysis){
+   if($software.Count -ne 1 -or $software[0].contract -cne 'desktop-software-output-v1' -or $software[0].records.Count -ne 20){throw 'Incomplete original software output analysis'}
+  }elseif($software.Count -ne 0){throw 'Unrequested software output analysis'}
+ }catch{$failure=$_.Exception.Message}
+ return [pscustomobject]@{Records=$samples;WindowOutput=if($windows.Count -eq 1){$windows[0]}else{$null};
+  OutputAnalysis=if($software.Count -eq 1){$software[0]}else{$null};Failure=$failure;
+  Frontend=[ordered]@{contract='r4os.spectra/1';context=if($contexts.Count -eq 1){$contexts[0]}else{$null};
+   control=if($controls.Count -eq 1){$controls[0]}else{$null};result=if($results.Count -eq 1){$results[0]}else{$null};
+   owner_errors=@($rows|Where-Object {$_.group -ceq 'SNES' -and $_.kind -ceq 'snes-error'}|ForEach-Object {$_.data})}}
+}
+
 function Add-R4SnesWindowOutput {
  param([object[]]$Records,$Output,[string]$WindowSize,$Environment)
  if(!$Output -or $Output.contract -cne 'desktop-window-output-v1' -or

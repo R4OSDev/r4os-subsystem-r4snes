@@ -80,7 +80,8 @@ try{
   if((Get-FileHash $binary).Hash.ToLowerInvariant() -cne $binaryHash){throw 'Host benchmark artifact changed during execution'}
   $used+=@{name='r4snes-performance-harness';role='host-owner';sha256=$binaryHash;optimize='ReleaseFast';target='native-host'}
  }else{
-  foreach($buildRoot in @($moduleRoot,(Join-Path $workspaceRoot 'Repositories/Apps/Desktop'))){
+  foreach($buildRoot in @($moduleRoot,(Join-Path $workspaceRoot 'Repositories/Apps/Desktop'),
+   (Join-Path $workspaceRoot 'Repositories/Services/WindowService'),(Join-Path $workspaceRoot 'Repositories/Diagnostics/Spectra'))){
    $build=Invoke-R4SnesCommand 'pwsh' @('-NoLogo','-NoProfile','-File',(Join-Path $buildRoot 'Build.ps1')) $buildRoot $TimeoutSeconds
    if($build.Code -ne 0 -or $build.Timeout){throw ('Guest benchmark component build failed: '+$build.Error)}
   }
@@ -92,11 +93,14 @@ try{
    $environment.image_sha256_before_boot=$guest.Image.sha256
    $used+=@{name='R4SNES.R4X';role='guest-emulator';sha256=$guest.Image.r4snes_sha256;optimize='ReleaseFast';target='r4os-avx2-v1'}
    $used+=@{name='R4DESK.R4X';role='guest-output-owner';sha256=$guest.Image.desktop_sha256;optimize='ReleaseSmall';target='r4os-avx2-v1'}
+   $used+=@{name='SPECTRA.R4X';role='guest-control';sha256=$guest.Image.spectra_sha256;optimize='ReleaseSmall';target='r4os-avx2-v1'}
+   $used+=@{name='WINSVC.R4X';role='guest-owner-transport';sha256=$guest.Image.winsvc_sha256;optimize='ReleaseSmall';target='r4os-avx2-v1'}
   }
   if($guest.HostProfile){$environment.accelerator=$guest.HostProfile.Name;$environment.qemu_cpu=$guest.HostProfile.CpuModel}
   if($guest.Failure){throw $guest.Failure}
   Add-R4SnesWindowOutput -Records $records -Output $guest.WindowOutput -WindowSize $WindowSize -Environment $environment
   if($guest.OutputAnalysis){$environment.software_output_analysis=Convert-R4SnesLossless $guest.OutputAnalysis}
+  if($guest.Frontend){$environment.frontend=Convert-R4SnesLossless $guest.Frontend}
  }
 }catch{$failure=$_.Exception.Message}
 if(!$failure -and !$CheckOnly -and $Mode -eq 'paired'){
@@ -133,6 +137,10 @@ $environment.compiler_version=$compiler.Output.Trim()
 foreach($scriptPath in @($PSCommandPath,(Join-Path $moduleRoot 'Tools/BenchmarkData.ps1'),(Join-Path $moduleRoot 'Tools/BenchmarkUpload.ps1'),(Join-Path $workspaceRoot 'Repositories/Distribution/Tools/SnesBenchmarkGuest.ps1'),(Join-Path $workspaceRoot 'Repositories/Distribution/Tools/ReadGuestFile.cs'))){
  $used+=@{name=[IO.Path]::GetFileName($scriptPath);role='host-runner';sha256=(Get-FileHash $scriptPath).Hash.ToLowerInvariant()}
 }
+if($Profile -eq 'Window'){
+ $structuredParser=Join-Path $workspaceRoot 'Repositories/Diagnostics/Spectra/Tools/StructuredOutput.ps1'
+ $used+=@{name='StructuredOutput.ps1';role='host-framing';sha256=(Get-FileHash $structuredParser).Hash.ToLowerInvariant()}
+}
 $failed=$false
 $exportPaths=[Collections.Generic.List[string]]::new()
 foreach($variant in $(if($Mode -eq 'paired'){@('normal','detail')}else{@($Mode)})){
@@ -144,7 +152,8 @@ foreach($variant in $(if($Mode -eq 'paired'){@('normal','detail')}else{@($Mode)}
  Write-Host "SNES $($run.status): $path"
  if($run.status -ne 'completed'){$failed=$true;Write-Host $run.failure_reason}
 }
-if($Upload){foreach($path in $exportPaths){
+if($Upload -and $records.Count -eq 0){Write-Host 'No measured owner records; unavailable preparation exports remain local.'}
+if($Upload -and $records.Count -gt 0){foreach($path in $exportPaths){
  try{$null=Publish-R4SnesExport -Path $path -WorkspaceRoot $workspaceRoot -ApiUrl $DevCenterUrl}
  catch{$failed=$true;Write-Warning ($_.Exception.Message+'; retry the same file with -ImportRun '+$path)}
 }}

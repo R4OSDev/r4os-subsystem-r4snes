@@ -21,6 +21,12 @@ initial/final state, frame and available PCM digests bind the comparison.
 `Artifacts/Distribution/Diagnostics/SubsystemBenchmarks/<UUID>/run.json`.
 The schema preserves raw warmup/work data, errors, artifact identity and
 lossless counters. Disabled timings and unavailable physical output are null.
+Since0.86.76 the Window host harness invokes `SPECTRA BENCH SNES /WINDOW`.
+Spectra controls an exact pending GUI child, while R4SNES retains the original
+v2 body and Desktop retains geometry, composition and copy receipts. Owner
+JSON remains separate from control metadata; Core keeps its native host
+context. R4SNES0.22.18 is rebuilt with the current SDK; scene, fixed work,
+oracles and frozen references remain unchanged.
 Ordinary builds/tests never start this benchmark. See the workspace's
 `Docs/Diagnostics/SnesBenchmark.txt` for interpretation and limitations.
 
