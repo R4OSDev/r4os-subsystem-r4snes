@@ -185,7 +185,7 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
             .dropped_presents = after.dropped -| probe.before.dropped,
             .generation_start_exclusive = probe.before.generation,
             .generation_end_inclusive = after.generation,
-            .actual_presentation_source = "SNES-PRESENT.TXT: successful Desktop display presents, filtered by generation interval",
+            .actual_presentation_source = "Spectra desktop-output records: successful software copies, filtered by generation interval",
             .apu_cpu_cycles = after.apu_cycles -| probe.before.apu_cycles,
             .apu_source_hz = core.timing.apu_source_hz,
             .apu_native_frames = after.native -| probe.before.native,

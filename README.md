@@ -334,3 +334,10 @@ defined-field, evidence-artifact and two-start BW-RAM gate.
 Use `./Build.sh nec-dsp-reference-test` for the six open uPD7725 firmware
 variants. Supplying `-Dnec-dsp-private-root=<directory>` additionally validates
 locally owned firmware without making it a build prerequisite.
+
+Since0.86.77 the original Window record names the structured Spectra
+`desktop-output` trace as its copy source. The redundant SNES-PRESENT.TXT
+writer and old Desktop PERF forwarders are retired. This metadata correction
+requires SNES0.22.19; emulation, fixed v2 work, timers and references remain
+unchanged. Use the existing Benchmark.ps1 or SPECTRA BENCH SNES /WINDOW;
+native Core comparisons keep their independent host context.
