@@ -7,6 +7,7 @@ const scene = core.performance_scene;
 const rt = r4os.subsystem_runtime;
 const video = r4os.subsystem_host;
 const product = core.product_host;
+const tasks = core.performance_tasks;
 
 const FailureContext = struct {
     sample: usize = 0,
@@ -93,6 +94,10 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
         var queue: [rt.default_quantum_frames * 2 * core.sdsp.sample_bytes]u8 = undefined;
         var scratch: [rt.default_quantum_frames * core.sdsp.sample_bytes]u8 = undefined;
         var probe = Probe{ .sys = &sys, .guest = &guest, .window = &window, .owner = app.raw.instance_id, .sink = sink.sink(), .measured_ns = measured_ns, .instrumented = instrumented };
+        if (instrumented) {
+            probe.devices = app.devicesLowLevel();
+            _ = sys.programOpenHandle(@intCast(app.raw.instance_id), &probe.task_owner);
+        }
         time.probe = &probe;
         var runtime = try rt.Runtime.init(.{ .slice_budget = product.slice_budget_master_cycles }, sys.monotonicHz(), sys.ticks(), .{
             .config = .{ .sample_rate = core.sdsp.output_sample_rate, .channels = core.sdsp.channels, .quantum_frames = rt.default_quantum_frames, .target_quanta = 2, .max_catchup_quanta = 16 },
@@ -111,6 +116,13 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
         probe.warmup_started_ns = probe.now();
         const code = runtime.run(&sys, probe.driver(), probe.hostDriver());
         const end_ns = probe.now();
+        const cpu_end = probe.taskTicks();
+        var task_after = tasks.Snapshot{};
+        if (instrumented) {
+            var source = tasks.Live{ .sys = sys, .dev = probe.devices };
+            task_after = tasks.capture(&source, probe.task_owner);
+        }
+        const task_delta = tasks.difference(&probe.task_before, &task_after);
         guest.machine.?.profile = null;
         const after = probe.snapshot();
         var clock_end: r4os.abi.MonotonicClockInfo = .{};
@@ -142,7 +154,7 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
             after.generation <= probe.before.generation or
             after.non_silent -| probe.before.non_silent == 0 or after.audio_failures != 0)
             return error.InvalidMeasuredRun;
-        const cpu_ticks = if (probe.cpu_start) |start| if (probe.taskTicks()) |end| end -| start else null else null;
+        const cpu_ticks = if (probe.cpu_start) |start| if (cpu_end) |end| if (end >= start) end - start else null else null else null;
         const record = .{
             .profile = "r4os-window-audsvc-v2",
             .scene = scene.identity,
@@ -172,6 +184,10 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
             .viewport = window.video.currentViewport(),
             .assigned_runtime_ticks = cpu_ticks,
             .runtime_tick_hz = sys.monotonicHz(),
+            .batch_tasks = if (instrumented) @as(?tasks.Report, .{ .before = probe.task_before.view(), .after = task_after.view(),
+                .delta_unavailable_reason = if (task_delta.reason == .none) null else task_delta.reason, .deltas = task_delta.values() }) else null,
+            .host_counter_delta = if (instrumented) tasks.counters(video.HostStats, probe.host_before, window.stats) else null,
+            .raster_counter_delta = if (instrumented) tasks.counters(video.PresentStats, probe.raster_before, window.video.stats) else null,
             .stage_wall_ns = probe.stage_ns,
             .stage_calls = probe.stage_calls,
             .stage_order = "guest-step-including-persistence,pcm-render,video-submit,host-poll,host-wait,audio-service",
@@ -307,6 +323,11 @@ const Probe = struct {
     warmup_dsp_dropped_frames: ?u64 = null,
     started_ns: u64 = 0,
     cpu_start: ?u64 = null,
+    devices: ?r4os.r4dev.Context = null,
+    task_owner: r4os.abi.ProgramProcessHandle = .{},
+    task_before: tasks.Snapshot = .{},
+    host_before: video.HostStats = .{},
+    raster_before: video.PresentStats = .{},
     before: Snapshot = undefined,
     stage_ns: [6]u64 = .{0} ** 6,
     stage_calls: [6]u64 = .{0} ** 6,
@@ -410,8 +431,18 @@ const Probe = struct {
             self.warmup_dsp_dropped_frames = machine.smp.dsp.stats.frames_dropped;
             self.warmup_wall_ns = self.now() -| self.warmup_started_ns;
             self.guest.setGuestTimeLimit(scene.warmup_ns + self.measured_ns) catch return rt.StepResult.fail(98);
+            if (self.instrumented) {
+                // Exclude diagnostic preparation from both the wall timer and
+                // the existing guest-clock anchor. Physical audio is not paused.
+                self.runtime.clock.pause(self.runtime.clock.last_host_tick);
+                var source = tasks.Live{ .sys = self.sys.*, .dev = self.devices };
+                self.task_before = tasks.capture(&source, self.task_owner);
+                self.host_before = self.window.stats;
+                self.raster_before = self.window.video.stats;
+            }
             self.cpu_start = self.taskTicks();
             self.started_ns = self.now();
+            if (self.instrumented) self.runtime.clock.resumeAt(self.sys.ticks());
             self.measuring = true;
             machine.profile = if (self.instrumented) &self.profile else null;
         }

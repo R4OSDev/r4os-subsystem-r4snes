@@ -27,6 +27,13 @@ v2 body and Desktop retains geometry, composition and copy receipts. Owner
 JSON remains separate from control metadata; Core keeps its native host
 context. R4SNES0.22.18 is rebuilt with the current SDK; scene, fixed work,
 oracles and frozen references remain unchanged.
+R4SNES0.22.23 adds explicit detail-mode batch task observations through the
+existing R4SYS/R4DEV APIs. Stable task/process generations and inventory epochs
+bind both boundary captures; unavailable data stays null. Host/raster deltas
+include publication and backpressure counters. Normal mode collects none of
+these extra detail data. Scheduler ticks and lifetime latency maxima are not
+CPU-time or cumulative-wait accounting. CPU-owner operation counts include
+host-budget-partitioned WAI fast-forward chunks, not just retired instructions.
 Ordinary builds/tests never start this benchmark. See the workspace's
 `Docs/Diagnostics/SnesBenchmark.txt` for interpretation and limitations.
 

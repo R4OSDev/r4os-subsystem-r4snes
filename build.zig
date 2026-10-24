@@ -21,7 +21,8 @@ pub fn build(b: *std.Build) void {
     });
     unit_root.addImport("core", core);
     unit_root.addImport("r4os", host_r4os);
-    const unit_tests = b.addTest(.{ .root_module = unit_root });
+    const unit_filter = b.option([]const u8, "unit-test-filter", "Select existing bounded owner tests by name");
+    const unit_tests = b.addTest(.{ .root_module = unit_root, .filters = if (unit_filter) |f| &.{f} else &.{} });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const run_wav_analyzer = b.addSystemCommand(&.{ "pwsh", "-NoLogo", "-NoProfile", "-File" });
     run_wav_analyzer.addFileArg(b.path("Tests/Analyze-SdspWav.ps1"));
