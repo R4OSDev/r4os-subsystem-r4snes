@@ -65,6 +65,15 @@ are not visible FPS. Added output conditions deliberately separate these runs
 from old window references and from the other geometry. Fixed v2 guest work
 and all existing reference UUIDs/hashes remain unchanged.
 
+Since0.87.2 the direct Spectra window command also accepts managed Desktop
+outputs. Its `managed-output-context-only` receipt retains actual published
+window geometry and the number of observed generations, with an empty copy
+record array. Per-generation presentation counts, output timings, GPU
+completions and physical visibility stay null. Actual CPU copy receipts keep
+their existing contract. The graphics backend and receipt remain explicit
+measurement conditions; changing them does not produce a strict same-condition
+DevCenter comparison or an isolated GPU speedup.
+
 `-OutputAnalysis` additionally runs a small offscreen, public synthetic
 Desktop fixture before starting SNES. It separates layer begin/clear, fills,
 nearest scaling, row comparison/copy and composition, with complete original

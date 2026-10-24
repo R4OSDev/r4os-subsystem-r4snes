@@ -75,9 +75,12 @@ function Read-R4SnesSpectraBenchmark {
 function Add-R4SnesWindowOutput {
  param([object[]]$Records,$Output,[string]$WindowSize,$Environment)
  if(!$Output -or $Output.contract -cne 'desktop-window-output-v1' -or
-    $Output.receipt -cne 'software-display-copy-present-success' -or
-    $Output.window_case -cne $WindowSize.ToLowerInvariant() -or $null -ne $Output.physical_visibility){throw 'Invalid software output context'}
- if(!$Records.Count -or !$Output.records.Count -or $Output.client.w -le 0 -or $Output.client.h -le 0 -or
+    $Output.receipt -cnotin @('software-display-copy-present-success','managed-output-context-only') -or
+    $Output.window_case -cne $WindowSize.ToLowerInvariant() -or $null -ne $Output.physical_visibility){throw 'Invalid window output context'}
+ $managed=$Output.receipt -ceq 'managed-output-context-only'
+ if(!$Records.Count -or (!$managed -and !$Output.records.Count) -or
+    ($managed -and ($Output.records.Count -ne 0 -or [ulong]$Output.published_generations_observed -eq 0 -or $null -ne $Output.presentation_receipts)) -or
+    $Output.client.w -le 0 -or $Output.client.h -le 0 -or
     $Output.session_end_ns -le $Output.session_start_ns){throw 'Incomplete output geometry/time'}
  if($WindowSize -eq 'Small' -and ($Output.client.w -ne 414 -or $Output.client.h -ne 224)){throw 'Small client geometry changed'}
  if($WindowSize -eq 'Maximized' -and ($Output.frame.w -ne $Output.screen.w -or $Output.client.w -le 414 -or $Output.client.h -le 224)){throw 'Maximized client geometry missing'}
@@ -91,8 +94,18 @@ function Add-R4SnesWindowOutput {
  $viewportText=$viewport|ConvertTo-Json -Compress -Depth 8
  foreach($record in $Records){
   if(((Convert-R4SnesLossless $record.viewport)|ConvertTo-Json -Compress -Depth 8) -cne $viewportText){throw 'Viewport changed during fixed-size run'}
-  if($record.viewport.x -lt 0 -or $record.viewport.y -lt 0 -or
-     $record.viewport.x+$record.viewport.w -gt $Output.client.w -or $record.viewport.y+$record.viewport.h -gt $Output.client.h){throw 'Viewport outside observed client'}
+  if([decimal]$record.viewport.x -lt 0 -or [decimal]$record.viewport.y -lt 0 -or
+     [decimal]$record.viewport.x+[decimal]$record.viewport.w -gt [decimal]$Output.client.w -or
+     [decimal]$record.viewport.y+[decimal]$record.viewport.h -gt [decimal]$Output.client.h){throw 'Viewport outside observed client'}
+  if($managed){
+   $record['desktop_output']=[ordered]@{
+    window_generation_copy_observations=$null;full_client_copy_observations=$null
+    first_copy_completed_ns=$null;last_copy_completed_ns=$null;owner_wall_ns=$null
+    cursor_queued_to_copy_ticks=$null;physical_visible_frames=$null
+    scope='Managed output context only; per-generation presentation observations unavailable'
+   }
+   continue
+  }
   $selected=@($Output.records|Where-Object {[ulong]$_.generation -gt [ulong]$record.generation_start_exclusive -and [ulong]$_.generation -le [ulong]$record.generation_end_inclusive})
   if(!$selected.Count -or $selected.Count -gt [ulong]$record.submitted_frames){throw 'Measured generation cohort has missing/inconsistent copy observations'}
   $stats=[ordered]@{}
@@ -117,6 +130,7 @@ function Add-R4SnesWindowOutput {
  $Environment.conditions.screen=Convert-R4SnesLossless $Output.screen
  $Environment.conditions.window_frame=Convert-R4SnesLossless $Output.frame
  $Environment.conditions.window_client=Convert-R4SnesLossless $Output.client
+ if($managed){$Environment.conditions.output_receipt=$Output.receipt}
 }
 
 function New-R4SnesExport {
