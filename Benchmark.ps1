@@ -92,7 +92,18 @@ try{
    $versions.release_version=$guest.Image.installation.releaseVersion;$versions.kernel_version=$guest.Image.installation.kernelVersion
    $environment.image_sha256_before_boot=$guest.Image.sha256
    $used+=@{name='R4SNES.R4X';role='guest-emulator';sha256=$guest.Image.r4snes_sha256;optimize='ReleaseFast';target='r4os-avx2-v1'}
-   $used+=@{name='R4DESK.R4X';role='guest-output-owner';sha256=$guest.Image.desktop_sha256;optimize='ReleaseSmall';target='r4os-avx2-v1'}
+   $desktopRoot=Join-Path $workspaceRoot 'Repositories/Apps/Desktop'
+   $desktopManifest=Read-R4SnesFields (Join-Path $desktopRoot 'module.R4MF')
+   $desktopOptimization=if($desktopManifest.ContainsKey('OPTIMIZE')){$desktopManifest.OPTIMIZE.ToLowerInvariant()}else{'size'}
+   $desktopLabel=switch($desktopOptimization){'size'{'ReleaseSmall'};'speed'{'ReleaseFast'};default{throw 'Invalid built Desktop optimization'}}
+   $used+=@{name='R4DESK.R4X';role='guest-output-owner';sha256=$guest.Image.desktop_sha256;optimize=$desktopLabel;target='r4os-avx2-v1'}
+   if($desktopManifest.ContainsKey('LANGUAGE') -and $desktopManifest.LANGUAGE -ceq 'Rust'){
+    $desktopSettings=Read-R4SnesFields (Join-Path $desktopRoot 'Settings.R4S')
+    $desktopReceiptPath=Join-Path ([IO.Path]::GetFullPath($desktopSettings.ARTIFACTS_ROOT.Replace('\',[IO.Path]::DirectorySeparatorChar),$desktopRoot)) 'build.json'
+    $desktopReceipt=Get-Content -Raw -LiteralPath $desktopReceiptPath|ConvertFrom-Json -AsHashtable
+    if($desktopReceipt.status -cne 'success' -or $desktopReceipt.module.name -cne 'R4DESK' -or $desktopReceipt.artifact.sha256 -cne $guest.Image.desktop_sha256 -or $desktopReceipt.codegen.optimization -cne $desktopOptimization){throw 'Desktop build receipt does not match the measured artifact/profile'}
+    $environment.output_owner_build=[ordered]@{language='Rust';manifest_sha256=(Get-FileHash (Join-Path $desktopRoot 'module.R4MF')).Hash.ToLowerInvariant();receipt_sha256=(Get-FileHash $desktopReceiptPath).Hash.ToLowerInvariant();module_version=$desktopReceipt.module.version;rust_target=$desktopReceipt.cargo.target;optimization=$desktopReceipt.codegen.optimization;rust_opt_level=$desktopReceipt.codegen.opt_level;overflow_checks=$desktopReceipt.codegen.overflow_checks;backend_feature_policy=$desktopReceipt.codegen.backend_feature_policy;target_features=$desktopReceipt.codegen.target_features;tools=$desktopReceipt.tools}
+   }
    $used+=@{name='SPECTRA.R4X';role='guest-control';sha256=$guest.Image.spectra_sha256;optimize='ReleaseSmall';target='r4os-avx2-v1'}
    $used+=@{name='WINSVC.R4X';role='guest-owner-transport';sha256=$guest.Image.winsvc_sha256;optimize='ReleaseSmall';target='r4os-avx2-v1'}
   }
