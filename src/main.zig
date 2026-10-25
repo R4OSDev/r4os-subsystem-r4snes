@@ -1063,7 +1063,7 @@ noinline fn persistenceSelfTest(app: *r4os.App) i32 {
         sys.println(@errorName(fault));
         return error_persistence_selftest;
     };
-    app.system().println("R4SNES persistence runtime: OK sav=exact rtc=versioned lock=exclusive atomic=recover async=worker+drain delta=bounded+recover");
+    app.system().println("R4SNES persistence runtime: OK sav=exact rtc=versioned lock=exclusive atomic=recover async=worker+drain delta=bounded+recover sram_calendar=0 rtc_calendar=due");
     return 0;
 }
 
@@ -1086,12 +1086,23 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     try save_session.flush(&save_cart, wall, monotonic);
     try async_store.backend().drain();
     const snapshot_before = async_store.stats.snapshot_bytes;
+    const TimeWitness = struct {
+        source: product_host.TimeSource,
+        calls: u32 = 0,
+        pub fn now(self: *@This()) product_host.TimePoint {
+            self.calls += 1;
+            return self.source.now();
+        }
+    };
+    var time_context = ProductTimeContext{ .sys = &sys };
+    var time_witness = TimeWitness{ .source = time_context.source() };
     save_cart.writeSram(0, 0xA7);
-    if (!try save_session.maybeFlush(&save_cart, core.persistence.flush_delay_master_cycles, wall, monotonic))
+    if (!try save_session.maybeFlush(&save_cart, core.persistence.flush_delay_master_cycles, &time_witness))
         return error.DeltaNotAccepted;
     save_cart.writeSram(1, 0xB8);
-    if (!try save_session.maybeFlush(&save_cart, core.persistence.flush_delay_master_cycles * 2, wall, monotonic))
+    if (!try save_session.maybeFlush(&save_cart, core.persistence.flush_delay_master_cycles * 2, &time_witness))
         return error.DeltaNotAccepted;
+    if (time_witness.calls != 0) return error.SramUnexpectedCalendar;
     if (async_store.stats.snapshot_bytes - snapshot_before != 2 * core.persistence.delta.record_bytes)
         return error.DeltaSnapshotNotBounded;
 
@@ -1157,6 +1168,19 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     const rtc_state = rtc_session.rtcState() orelse return error.RtcMissing;
     setSrtcCalendar(rtc_state, 9, 7);
     rtc_state.overflow = true;
+    if (try rtc_session.maybeFlush(&rtc_cart, core.persistence.flush_delay_master_cycles - 1, &time_witness))
+        return error.RtcFlushTooEarly;
+    if (time_witness.calls != 0) return error.RtcCalendarTooEarly;
+    if (!try rtc_session.maybeFlush(&rtc_cart, core.persistence.flush_delay_master_cycles, &time_witness))
+        return error.RtcFlushMissing;
+    if (time_witness.calls != 1) return error.RtcCalendarMissing;
+    var rtc_bytes: [core.persistence.rtc_record_bytes]u8 = undefined;
+    if (rtc_store.backend().readExact(&rtc_cart.identity, .rtc, &rtc_bytes) != .ok)
+        return error.RtcReadbackMissing;
+    const rtc_saved = try core.persistence.decodeRtc(&rtc_bytes);
+    if (rtc_saved.generation != generation + 3 or rtc_saved.state.registers[0] != 9 or
+        rtc_saved.monotonic_anchor_ns < monotonic)
+        return error.RtcReadbackMismatch;
     try rtc_session.close(&rtc_cart, generation + 3, wall, monotonic);
 
     var recovery_state = core.persistence.RtcState.init(.s_rtc);

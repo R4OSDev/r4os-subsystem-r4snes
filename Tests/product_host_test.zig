@@ -290,7 +290,7 @@ test "same battery identity is exclusive reset preserves SAV and close failure s
     const polls_before_slices = store.poll_calls;
     _ = owner.driver().step(product.slice_budget_master_cycles, 0);
     _ = owner.driver().step(product.slice_budget_master_cycles, std.time.ns_per_ms);
-    try std.testing.expectEqual(time_calls_before_slices + 2, time.calls);
+    try std.testing.expectEqual(time_calls_before_slices, time.calls);
     try std.testing.expectEqual(polls_before_slices + 2, store.poll_calls);
 
     owner.cartridge.?.writeSram(0, 0x73);
@@ -308,6 +308,7 @@ test "same battery identity is exclusive reset preserves SAV and close failure s
     try std.testing.expectEqual(@as(u64, 2), owner.stats.machine_destroys);
     try std.testing.expectEqual(@as(u64, 2), owner.stats.cartridge_destroys);
     try std.testing.expectEqual(@as(u32, 1), store.release_calls);
+    try std.testing.expectEqual(@as(u32, 0), time.calls); // SRAM lifecycle also needs no calendar.
 }
 
 test "borrowed ROM reset keeps one source and failed preparation preserves the running guest" {

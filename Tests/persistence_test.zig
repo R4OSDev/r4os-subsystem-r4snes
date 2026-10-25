@@ -1,6 +1,22 @@
 const std = @import("std");
 const core = @import("core");
 
+const FixedTime = struct {
+    wall: ?i64 = 100,
+    monotonic: u64 = 200,
+    calls: usize = 0,
+    pub fn now(self: *FixedTime) core.product_host.TimePoint {
+        self.calls += 1;
+        return .{ .wall_seconds = self.wall, .monotonic_ns = self.monotonic };
+    }
+};
+
+const NoCalendar = struct {
+    pub fn now(_: NoCalendar) core.product_host.TimePoint {
+        @panic("SRAM persistence must not request a calendar");
+    }
+};
+
 const FakeBackend = struct {
     allocator: std.mem.Allocator,
     sram: []u8,
@@ -272,15 +288,15 @@ test "bounded SRAM journal preserves changes during snapshots and crash reopen t
     try session.flush(&cart, 100, 200);
     cart.writeSram(0, 2);
     const delay = core.persistence.flush_delay_master_cycles;
-    try std.testing.expect(!try session.maybeFlush(&cart, delay, 100, 200));
+    try std.testing.expect(!try session.maybeFlush(&cart, delay, NoCalendar{}));
     try std.testing.expect(cart.sram_dirty);
     try fake.backend().drain();
     try std.testing.expectEqual(@as(u8, 1), fake.sram[0]);
     fake.snapshot_bytes = 0;
     fake.published_bytes = 0;
-    try std.testing.expect(try session.maybeFlush(&cart, delay, 100, 200));
+    try std.testing.expect(try session.maybeFlush(&cart, delay, NoCalendar{}));
     cart.writeSram(257, 3);
-    try std.testing.expect(try session.maybeFlush(&cart, delay * 2, 100, 200));
+    try std.testing.expect(try session.maybeFlush(&cart, delay * 2, NoCalendar{}));
     try std.testing.expectEqual(@as(usize, 2 * core.persistence.delta.record_bytes), fake.snapshot_bytes);
     // The queued payload owns its bytes even as the next guest step changes RAM.
     cart.writeSram(0, 4);
@@ -309,12 +325,12 @@ test "journal checkpoint capacity failure and returning to identical baseline re
     try session.flush(&cart, 100, 200);
     cart.writeSram(1, 2);
     const delay = core.persistence.flush_delay_master_cycles;
-    try std.testing.expect(try session.maybeFlush(&cart, delay, 100, 200));
+    try std.testing.expect(try session.maybeFlush(&cart, delay, NoCalendar{}));
     const last_good = fake.delta_bytes;
     cart.writeSram(cart.sram_storage.len - 1, 3);
     cart.writeSram(0, 4); // Wide range forces a full checkpoint.
     fake.fail_before_publish = true;
-    try std.testing.expectError(error.Io, session.maybeFlush(&cart, delay * 2, 100, 200));
+    try std.testing.expectError(error.Io, session.maybeFlush(&cart, delay * 2, NoCalendar{}));
     try std.testing.expect(cart.sram_dirty);
     try std.testing.expectEqualSlices(u8, &last_good, &fake.delta_bytes);
     try std.testing.expectEqual(@as(u8, 1), fake.sram[0]);
@@ -409,7 +425,7 @@ test "battery-backed Super FX work RAM uses the canonical hash save and internal
     try std.testing.expect(first.sram_dirty);
     try std.testing.expectEqual(@as(u8, 0xEF), first.sram_storage[0x1234]);
     try std.testing.expectEqual(@as(u8, 0xBE), first.sram_storage[0x1235]);
-    try std.testing.expect(try session.maybeFlush(&first, core.persistence.flush_delay_master_cycles, 100, 200));
+    try std.testing.expect(try session.maybeFlush(&first, core.persistence.flush_delay_master_cycles, NoCalendar{}));
     try session.close(&first, 41, 100, 200);
     try std.testing.expectEqual(@as(usize, 64 * 1024), fake.sram_len);
 
@@ -455,7 +471,7 @@ test "battery-backed SA-1 BW-RAM persists atomically while I-RAM and battery-les
     try std.testing.expect(first.writeEnhancement(0x006123, 0x5C));
     try std.testing.expect(first.sram_dirty);
     try std.testing.expectEqual(@as(u8, 0x5C), first.sram_storage[0x123]);
-    try std.testing.expect(try session.maybeFlush(&first, core.persistence.flush_delay_master_cycles, 100, 200));
+    try std.testing.expect(try session.maybeFlush(&first, core.persistence.flush_delay_master_cycles, NoCalendar{}));
     try std.testing.expectEqual(@as(usize, 1), fake.write_calls);
     try std.testing.expectEqual(@as(usize, 128 * 1024), fake.sram_len);
     try session.close(&first, 51, 100, 200);
@@ -506,7 +522,7 @@ test "battery-less boards never acquire read write poll or release persistence" 
 
     var session = try core.persistence.Session.open(&cart, fake.backend(), 1, 100, 200);
     cart.writeSram(0, 0x5A);
-    try std.testing.expect(!try session.maybeFlush(&cart, core.persistence.flush_delay_master_cycles, 101, 300));
+    try std.testing.expect(!try session.maybeFlush(&cart, core.persistence.flush_delay_master_cycles, NoCalendar{}));
     try session.close(&cart, 1, 101, 300);
     try std.testing.expectEqual(@as(usize, 0), fake.acquire_calls);
     try std.testing.expectEqual(@as(usize, 0), fake.read_calls);
@@ -528,8 +544,8 @@ test "exact board-sized save lease debounce reopen and second writer fail closed
     try std.testing.expectError(error.Busy, core.persistence.Session.open(&second, fake.backend(), 8, 100, 200));
     first.writeSram(0, 0xA7);
     first.writeSram(first.sram_storage.len - 1, 0x5C);
-    try std.testing.expect(!try session.maybeFlush(&first, core.persistence.flush_delay_master_cycles - 1, 100, 200));
-    try std.testing.expect(try session.maybeFlush(&first, core.persistence.flush_delay_master_cycles, 100, 200));
+    try std.testing.expect(!try session.maybeFlush(&first, core.persistence.flush_delay_master_cycles - 1, NoCalendar{}));
+    try std.testing.expect(try session.maybeFlush(&first, core.persistence.flush_delay_master_cycles, NoCalendar{}));
     try std.testing.expectEqual(first.sram_storage.len, fake.sram_len);
     try session.close(&first, 7, 100, 200);
     try std.testing.expect(!fake.held);
@@ -806,4 +822,88 @@ fn runningEpsonState() core.persistence.RtcState {
     result.latched = result.registers;
     result.halted = false;
     return result;
+}
+
+test "RTC autosave defers calendar until dirty due and durable and keeps polling" {
+    const allocator = std.testing.allocator;
+    var fake = try FakeBackend.init(allocator);
+    defer fake.deinit();
+    fake.asynchronous = true;
+    var cart = try makeCart(allocator, 8192, true, .srtc, 0x71);
+    defer cart.deinit();
+    var session = try core.persistence.Session.open(&cart, fake.backend(), 73, 100, 200);
+    var time = FixedTime{};
+    const due = core.persistence.flush_delay_master_cycles;
+    for (0..1000) |tick| try std.testing.expect(!try session.maybeFlush(&cart, tick, &time));
+    try std.testing.expectEqual(@as(usize, 1000), fake.poll_calls);
+    try std.testing.expectEqual(@as(usize, 0), time.calls);
+    fake.fail_poll = true;
+    try std.testing.expectError(error.Io, session.maybeFlush(&cart, due, &time));
+    fake.fail_poll = false;
+    try std.testing.expectEqual(@as(usize, 0), time.calls);
+
+    cart.writeSram(0, 0xAB);
+    try session.flush(&cart, 100, 200);
+    try std.testing.expect(session.checkpoint_pending and fake.queued_count != 0);
+    _ = session.rtcState();
+    try std.testing.expect(!try session.maybeFlush(&cart, due, &time));
+    try std.testing.expectEqual(@as(usize, 0), time.calls);
+    try fake.backend().drain();
+    time.wall = 345;
+    time.monotonic = 678;
+    try std.testing.expect(try session.maybeFlush(&cart, due, &time));
+    try std.testing.expectEqual(@as(usize, 1), time.calls);
+    try fake.backend().drain();
+    const record = try core.persistence.decodeRtc(&fake.rtc);
+    try std.testing.expectEqual(@as(i64, 345), record.wall_anchor_seconds);
+    try std.testing.expectEqual(@as(u64, 678), record.monotonic_anchor_ns);
+    try std.testing.expectEqual(@as(u64, 73), record.generation);
+    try std.testing.expectEqual(@as(u8, 0xAB), fake.sram[0]);
+    const polled = fake.poll_calls;
+    for (0..1000) |tick| try std.testing.expect(!try session.maybeFlush(&cart, due * 2 + tick, &time));
+    try std.testing.expectEqual(polled + 1000, fake.poll_calls);
+    try std.testing.expectEqual(@as(usize, 1), time.calls);
+
+    _ = session.rtcState();
+    time.wall = null;
+    time.monotonic = 900;
+    try std.testing.expect(try session.maybeFlush(&cart, due * 3, &time));
+    try std.testing.expectError(error.StaleGeneration, session.close(&cart, 74, null, 900));
+    try std.testing.expect(fake.held and fake.queued_count != 0 and !session.closed);
+    try session.close(&cart, 73, null, 900);
+    try session.close(&cart, 73, null, 900);
+    try std.testing.expect(!fake.held and fake.queued_count == 0);
+    try std.testing.expectEqual(@as(usize, 1), fake.release_calls);
+    const invalid = try core.persistence.decodeRtc(&fake.rtc);
+    try std.testing.expectEqual(@as(i64, 0), invalid.wall_anchor_seconds);
+    var resumed = try core.persistence.Session.open(&cart, fake.backend(), 75, 10_000, 1000);
+    try std.testing.expectEqual(@as(u64, 0), resumed.offline_adjustment.seconds);
+    try resumed.close(&cart, 75, 10_000, 1000);
+}
+
+test "RTC autosave retries uncertain write with fresh anchor and exact generation" {
+    const allocator = std.testing.allocator;
+    var fake = try FakeBackend.init(allocator);
+    defer fake.deinit();
+    var cart = try makeCart(allocator, 0, true, .spc7110_epson_rtc, 0x72);
+    defer cart.deinit();
+    var session = try core.persistence.Session.open(&cart, fake.backend(), 81, 100, 200);
+    var time = FixedTime{};
+    const due = core.persistence.flush_delay_master_cycles;
+    fake.fail_write_after_publish = true;
+    try std.testing.expectError(error.Io, session.maybeFlush(&cart, due, &time));
+    try std.testing.expect(session.rtc_dirty and fake.held and fake.has_rtc);
+    try std.testing.expectEqual(@as(u64, 0), session.last_flush_guest_tick);
+    fake.fail_write_after_publish = false;
+    time.wall = 50; // The host calendar was set backwards before the retry.
+    time.monotonic = 300;
+    try std.testing.expect(try session.maybeFlush(&cart, due, &time));
+    try std.testing.expectEqual(@as(usize, 2), time.calls);
+    try std.testing.expect(!session.rtc_dirty);
+    const record = try core.persistence.decodeRtc(&fake.rtc);
+    try std.testing.expectEqual(@as(i64, 50), record.wall_anchor_seconds);
+    try std.testing.expectEqual(@as(u64, 300), record.monotonic_anchor_ns);
+    try std.testing.expectEqual(@as(u64, 81), record.generation);
+    try session.close(&cart, 81, 50, 300);
+    try std.testing.expect(!fake.held);
 }

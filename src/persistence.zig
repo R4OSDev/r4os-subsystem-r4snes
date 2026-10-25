@@ -278,8 +278,7 @@ pub const Session = struct {
         self: *Session,
         cart: *cartridge.Cartridge,
         guest_tick: u64,
-        wall_now_seconds: ?i64,
-        monotonic_now_ns: u64,
+        time_source: anytype,
     ) FlushError!bool {
         if (self.closed) return error.Closed;
         if (!self.enabled) return false;
@@ -299,7 +298,13 @@ pub const Session = struct {
                 cart.clearSramDirty();
             } else try self.checkpoint(cart);
         }
-        try self.flushRtc(cart, wall_now_seconds, monotonic_now_ns);
+        // Keep polling/completion and checkpoint admission ahead of time I/O.
+        // Only a dirty RTC record needs a fresh offline anchor. SRAM-only and
+        // unchanged/not-due/pending slices never invoke the host calendar.
+        if (self.rtc_record != null and (self.rtc_dirty or rtcDirty(cart))) {
+            const point = time_source.now();
+            try self.flushRtc(cart, point.wall_seconds, point.monotonic_ns);
+        } else try self.flushRtc(cart, null, 0);
         self.last_flush_guest_tick = guest_tick;
         return true;
     }
@@ -490,6 +495,12 @@ pub fn decodeRtc(bytes: []const u8) RtcDecodeError!RtcRecord {
         .monotonic_anchor_ns = readLe(u64, bytes[56..64]),
         .generation = readLe(u64, bytes[64..72]),
     };
+}
+
+/// Wall/monotonic anchors belong only to a battery-backed RTC record.
+/// Session.open uses the same chip admission, including board-only fixtures.
+pub fn calendarRequired(cart: *const cartridge.Cartridge) bool {
+    return cart.board.battery and rtcChipForCartridge(cart) != null;
 }
 
 fn rtcChipForCartridge(cart: *const cartridge.Cartridge) ?RtcChip {

@@ -75,6 +75,10 @@ pub const TimeSource = struct {
     pub fn now(self: TimeSource) TimePoint {
         return self.now_fn(self.context);
     }
+
+    fn forCartridge(self: TimeSource, cart: *const cartridge.Cartridge) TimePoint {
+        return if (persistence.calendarRequired(cart)) self.now() else .{ .wall_seconds = null, .monotonic_ns = 0 };
+    }
 };
 
 /// Every heap slice is transferred to Guest by `openOwned`, including on an
@@ -176,7 +180,7 @@ pub const Guest = struct {
         errdefer self.allocator.destroy(created);
         try machine_module.Machine.powerInPlace(created, self.instance_id, &parsed, self.exactIpl());
         errdefer created.close();
-        const point = self.time.now();
+        const point = self.time.forCartridge(&parsed);
         var session = try persistence.Session.open(
             &parsed,
             self.backend,
@@ -309,7 +313,7 @@ pub const Guest = struct {
             replacement_presenter = presenter.*;
             replacement_video.bind(&replacement_machine.ppu, &replacement_presenter, next_generation) catch return reset_error_video;
         }
-        const point = self.time.now();
+        const point = self.time.forCartridge(old_cart);
         if (self.save_session) |*session| {
             session.flush(old_cart, point.wall_seconds, point.monotonic_ns) catch return reset_error_persistence;
             session.restoreForReset(old_cart, &replacement_cart) catch return reset_error_persistence;
@@ -363,7 +367,7 @@ pub const Guest = struct {
         self.presenter = null;
         if (self.save_session) |*session| {
             if (self.cartridge) |*cart| {
-                const point = self.time.now();
+                const point = self.time.forCartridge(cart);
                 session.close(
                     cart,
                     self.save_generation,
@@ -448,12 +452,10 @@ pub const Guest = struct {
             .withOperations(result.granted_master_cycles);
         if (self.save_session) |*session| {
             if (session.enabled) {
-                const point = self.time.now();
                 const flushed = session.maybeFlush(
                     cart,
                     machine.clock.master_cycles,
-                    point.wall_seconds,
-                    point.monotonic_ns,
+                    self.time,
                 ) catch return runtime_api.StepResult.fail(runtime_error_persistence)
                     .withOperations(result.granted_master_cycles);
                 if (flushed) self.stats.flushes +%= 1;
