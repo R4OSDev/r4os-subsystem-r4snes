@@ -351,7 +351,7 @@ noinline fn runProduct(app: *r4os.App) i32 {
         };
         const persistence_ok = !battery or (save_files and persistence_stats.errors == 0 and persistence_stats.started != 0 and persistence_stats.completed != 0);
         const e2e_ok = exit_code == 0 and end_ok and close_result == 0 and !guest.resourcesOpen() and
-            guest_ns != 0 and guest_cycles != 0 and ppu_frames != 0 and published_frames != 0 and
+            guest_ns == e2e_guest_duration_ns and guest_cycles != 0 and ppu_frames != 0 and published_frames != 0 and
             drift_cycles <= product_host.slice_budget_master_cycles + core.machine.maximum_operation_overshoot_master_cycles and
             pending_cycles <= product_host.slice_budget_master_cycles and
             guest_stats.maximum_slice_grant <= product_host.slice_budget_master_cycles and
@@ -764,7 +764,6 @@ fn showStatus(
     _ = desk.guiSetMinSize(440, 230);
     if (!renderStatus(&draw, lines)) return result_code;
     var activity_sequence: u64 = 0;
-    const close_poll_ticks = @max(@as(u64, 1), sys.ticksFromMilliseconds(100));
     while (!sys.programShouldClose()) {
         var event_count: u16 = 0;
         while (event_count < runtime_api.default_max_input_events) : (event_count += 1) {
@@ -777,14 +776,10 @@ fn showStatus(
             }
         }
         if (event_count == runtime_api.default_max_input_events) continue;
-        if (desk.hasFn("desktop_activity_wait")) {
-            var sequence = activity_sequence;
-            const raw = desk.desktopActivityWait(activity_sequence, close_poll_ticks, &sequence);
-            activity_sequence = sequence;
-            if (raw < 0) return result_code;
-        } else {
-            sys.sleepTicks(1);
-        }
+        var sequence = activity_sequence;
+        const raw = desk.guiActivityWait(activity_sequence, r4os.abi.io_wait_forever, 0, &sequence);
+        if (raw < 0) return result_code;
+        activity_sequence = sequence;
     }
     return result_code;
 }

@@ -236,6 +236,39 @@ test "private product guests isolate machine input video audio and bounded runti
     second_runtime.shutdown();
 }
 
+test "completion witness retains the full configured guest work" {
+    const allocator = std.testing.allocator;
+    var store = FakeStore{};
+    var time = FakeTime{};
+    var guest = product.Guest.init(allocator, store.backend(), time.source(), 1);
+    try guest.openOwned(.{ .image = try makeRom(allocator, "R4SNES WITNESS", false, 0x11) });
+    defer _ = guest.close();
+    const target_ns: u64 = 100_000;
+    try guest.setGuestTimeLimit(target_ns);
+    try guest.setCompletionWitness(.{ .wram_index = 0x1234, .value = 0xa5 });
+    guest.machine.?.bus.wram[0x1234] = 0xa5;
+    const driver = guest.driver();
+    // This owner case has no PCM consumer. Use the real transport option
+    // so completion waits on CPU work rather than an unconsumed audio tail.
+    _ = driver.audioFeedback(.{ .state = .degraded, .muted = false });
+    try std.testing.expect(driver.step(product.slice_budget_master_cycles, 0).status != .completed);
+    try std.testing.expect(driver.step(product.slice_budget_master_cycles, target_ns / 2).status != .completed);
+    try std.testing.expectEqual(@as(u64, 0), guest.machine.?.host_budget.pending_master_cycles);
+    var result = driver.step(256, target_ns);
+    try std.testing.expect(result.status != .completed);
+    var slices: u32 = 1;
+    while (result.status != .completed and slices < 32) : (slices += 1) {
+        try std.testing.expect(result.status != .failed);
+        try std.testing.expect(result.operations <= 256);
+        result = driver.step(256, target_ns);
+    }
+    try std.testing.expectEqual(runtime_api.StepStatus.completed, result.status);
+    try std.testing.expectEqual(target_ns, guest.effectiveGuestNanoseconds());
+    try std.testing.expectEqual(@as(u64, 0), guest.machine.?.host_budget.pending_master_cycles);
+    try std.testing.expect(guest.machine.?.clock.master_cycles >=
+        @as(u64, @intCast((@as(u128, target_ns) * core.timing.Profile.forRegion(.ntsc).master_hz) / std.time.ns_per_s)));
+}
+
 test "sixty-second host debt is lossless partition-invariant and remains slice bounded" {
     const hz = core.timing.Profile.forRegion(.ntsc).master_hz;
     var one: core.timing.HostBudget = .{};

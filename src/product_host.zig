@@ -462,8 +462,12 @@ pub const Guest = struct {
             }
         }
         if (self.completion_witness) |witness| {
+            // A marked witness must not shorten the configured guest work.
+            // Its input has to arrive while the guest can still execute,
+            // before the fixed time limit freezes further clock grants.
+            const time_complete = if (self.guest_time_limit_ns) |limit| effective_guest_ns >= limit else true;
             if (machine.bus.wram[witness.wram_index] == witness.value and
-                machine.host_budget.pending_master_cycles == 0)
+                machine.host_budget.pending_master_cycles == 0 and time_complete)
             {
                 return runtime_api.StepResult.complete(0, result.frame_ready)
                     .withOperations(result.granted_master_cycles);
@@ -611,7 +615,7 @@ pub const WindowHost = struct {
             .context = self,
             .poll_fn = poll,
             .present_fn = present,
-            .wait_fn = if (self.window.desk.hasFn("desktop_activity_wait")) wait else null,
+            .wait_fn = wait,
             .should_close_fn = shouldClose,
         };
     }
@@ -710,7 +714,7 @@ pub const WindowHost = struct {
     fn wait(context: *anyopaque, timeout_ticks: u64) i32 {
         const self: *WindowHost = @ptrCast(@alignCast(context));
         var sequence = self.activity_sequence;
-        const raw = self.window.desk.desktopActivityWait(self.activity_sequence, timeout_ticks, &sequence);
+        const raw = self.window.desk.guiActivityWait(self.activity_sequence, timeout_ticks, 0, &sequence);
         self.activity_sequence = sequence;
         return raw;
     }
