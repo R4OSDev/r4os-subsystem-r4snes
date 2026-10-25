@@ -167,6 +167,7 @@ test "PPU modes zero through four produce exact repeatable pixel generations" {
         try std.testing.expectEqual(@as(u64, 1), info.generation);
         try std.testing.expectEqual(expected_colours[mode], ppu.published_frame[0]);
         try std.testing.expectEqual(expected_colours[mode], ppu.published_frame[223 * 256 + 255]);
+        try std.testing.expect(info.digest_available);
         try std.testing.expectEqual(expected_digests[mode], info.digest);
 
         var repeat = core.ppu.Ppu{};

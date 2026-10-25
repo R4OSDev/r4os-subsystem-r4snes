@@ -35,6 +35,8 @@ pub fn main(init: std.process.Init) !void {
     if (machine.ppu.frame_generation < 8 or machine.bus.wram[8] < 8 or nonzero == 0 or
         machine.smp.dsp.stats.frames_dropped != 0 or machine.smp.semantic_ipl_state != .running)
         return error.ReleaseSceneInactive;
+    if (machine.ppu.frameInfo().digest_available or machine.ppu.frame_digest != 0)
+        return error.ReleaseFrameDigestWork;
     if (machine.cpu.trace_len != 0 or machine.cpu.instructions != 0 or
         machine.scpu.dma.trace_len != 0 or machine.scpu.dma.trace_overflow != 0 or
         machine.scpu.dma.manual_bytes != 0 or machine.scpu.dma.hdma_bytes != 0 or
@@ -78,6 +80,8 @@ pub fn main(init: std.process.Init) !void {
         profile.dma_operations == 0 or profile.elapsed(.ppu) == 0 or profile.elapsed(.dsp) == 0 or
         profile.master_cycles != other.clock.master_cycles or profile.clock_regressions != 0)
         return error.InstrumentationChangedWork;
+    if (other.ppu.frameInfo().digest_available or other.ppu.frame_digest != 0)
+        return error.ProfileFrameDigestWork;
     profile.elapsed_ns[0] = ~@as(u64, 0) - 1;
     profile.add(.cpu_bus, 20);
     if (profile.elapsed_ns[0] != ~@as(u64, 0)) return error.ProfileOverflow;

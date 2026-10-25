@@ -21,7 +21,10 @@ pub const FrameInfo = struct {
     width: u16,
     height: u16,
     generation: u64,
+    /// Full FNV-1a-64 of the published pixels only in an explicit diagnostic
+    /// build. Ordinary presentation uses geometry/generation/damage instead.
     digest: u64,
+    digest_available: bool,
 };
 
 pub const FrameDamage = struct {
@@ -182,7 +185,7 @@ pub const Ppu = struct {
     storage_black: bool = true,
     published_black: bool = true,
     frame_generation: u64 = 0,
-    frame_digest: u64 = fnv_offset,
+    frame_digest: u64 = if (diagnostics) fnv_offset else 0,
     last_published_beam_frame: u64 = ~@as(u64, 0),
     interlace_pair_started: bool = false,
     published_width: u16 = frame_width,
@@ -293,6 +296,7 @@ pub const Ppu = struct {
             .height = self.published_height,
             .generation = self.frame_generation,
             .digest = self.frame_digest,
+            .digest_available = diagnostics and self.frame_generation != 0,
         };
     }
 
@@ -572,14 +576,16 @@ pub const Ppu = struct {
         }
         const previous_count = @as(usize, self.published_width) * self.published_height;
         if (count < previous_count) @memset(self.published_frame[count..previous_count], 0xff000000);
-        var digest = fnv_offset;
-        for (self.published_frame[0..count]) |pixel| {
-            digest = mix(digest, @truncate(pixel));
-            digest = mix(digest, @truncate(pixel >> 8));
-            digest = mix(digest, @truncate(pixel >> 16));
-            digest = mix(digest, @truncate(pixel >> 24));
+        if (diagnostics) {
+            var digest = fnv_offset;
+            for (self.published_frame[0..count]) |pixel| {
+                digest = mix(digest, @truncate(pixel));
+                digest = mix(digest, @truncate(pixel >> 8));
+                digest = mix(digest, @truncate(pixel >> 16));
+                digest = mix(digest, @truncate(pixel >> 24));
+            }
+            self.frame_digest = digest;
         }
-        self.frame_digest = digest;
         self.frame_generation +%= 1;
         self.published_black = self.storage_black;
         self.published_width = width;

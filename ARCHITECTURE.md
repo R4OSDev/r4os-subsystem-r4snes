@@ -71,6 +71,17 @@ that owner. Complete changed frames are packed as native XRGB32 at 256/512 by
 224/239/448/478; unchanged output does not advance the generation. The shared
 SDK alone scales, letterboxes and splits damage into at most 128x128 rasters.
 
+Since 0.22.24 the full per-frame FNV-1a-64 digest is compiled only when
+`config.diagnostics` is enabled (tests, diagnostic build, or an explicit
+`r4snes_trace_enabled` root override). Ordinary ReleaseFast presentation uses
+pixels, geometry, generation and damage; `FrameInfo.digest_available` is false
+and the unused digest is zero. A diagnostic digest is available after the
+first complete publication and retains the original four-byte-per-pixel
+algorithm and reference values. This internal struct is not a platform ABI.
+The explicit benchmark's final SHA-256 over the full published pixel buffer
+in `performance.frameDigest` remains independent and unchanged. Runtime detail
+profiling alone does not enable per-frame FNV work in the normal artifact.
+
 The S-SMP bus exposes every instruction read, write and wait phase. Its three
 divider timers advance from those phases, while the independent rational APU
 oscillator records synchronization points for the four directional port

@@ -4,6 +4,12 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
+Version 0.22.24 removes the diagnostic full-frame FNV pass from ordinary
+ReleaseFast publication. Pixel comparisons, damage and frame generations stay
+unchanged. Diagnostic builds preserve the exact existing frame references;
+`FrameInfo.digest_available` marks the distinction. The explicit benchmark's
+final full-buffer SHA-256 remains available. See `ARCHITECTURE.md`.
+
 Version 0.22.14 adds explicit reproducible benchmark exports. Linux uses
 `./Benchmark.sh`, Windows `Benchmark.bat`; both call the same PS7 script:
 
