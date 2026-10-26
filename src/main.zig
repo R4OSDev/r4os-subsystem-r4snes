@@ -46,10 +46,9 @@ const error_runtime: i32 = 80;
 const error_host_selftest: i32 = 96;
 const error_e2e_trace: i32 = 97;
 const e2e_guest_duration_ns: u64 = 60 * std.time.ns_per_s;
-// Two simultaneous SNES streams can make a healthy AUDSVC write take close
-// to 200 ms under four-vCPU TCG. Keep the bounded synchronous call below the
-// 250-ms host-step gate, but do not degrade a healthy stream at the former
-// 50-ms budget merely because the service worker is contended.
+// Absolute asynchronous RPC budget, including admission/queue/reply. The
+// interactive Runtime does not wait for this budget; terminal buffer retirement
+// and the separately bounded stream-close drain retain their own ownership.
 const audio_service_timeout_ns: u64 = 200 * std.time.ns_per_ms;
 const audio_close_timeout_ns: u64 = 500 * std.time.ns_per_ms;
 const product_audio_target_quanta: u16 = 2;
@@ -350,7 +349,7 @@ noinline fn runProduct(app: *r4os.App) i32 {
             .reject_invalid, .reject_firmware => false,
         };
         const persistence_ok = !battery or (save_files and persistence_stats.errors == 0 and persistence_stats.started != 0 and persistence_stats.completed != 0);
-        const e2e_ok = exit_code == 0 and end_ok and close_result == 0 and !guest.resourcesOpen() and
+        const e2e_ok = runtime.resources_closed and exit_code == 0 and end_ok and close_result == 0 and !guest.resourcesOpen() and
             guest_ns == e2e_guest_duration_ns and guest_cycles != 0 and ppu_frames != 0 and published_frames != 0 and
             drift_cycles <= product_host.slice_budget_master_cycles + core.machine.maximum_operation_overshoot_master_cycles and
             pending_cycles <= product_host.slice_budget_master_cycles and
@@ -385,6 +384,7 @@ noinline fn runProduct(app: *r4os.App) i32 {
             persistence_stats,
             published_frames,
             close_result,
+            runtime.resources_closed and !guest.resourcesOpen(),
         )) return error_e2e_trace;
         if (!e2e_ok) return error_e2e_trace;
     }
@@ -512,6 +512,7 @@ fn writeE2eRuntimeReport(
     persistence_stats: core.persistence_r4os.AsyncStats,
     published_frames: u64,
     close_result: i32,
+    resources_closed: bool,
 ) bool {
     var path_storage: [96]u8 = undefined;
     const path = e2eReportPath(trace, &path_storage) orelse return false;
@@ -555,7 +556,7 @@ fn writeE2eRuntimeReport(
     ) catch return false).len;
     const suffix_len = (std.fmt.bufPrint(
         report_storage[prefix_len..],
-        " dsp_native={d} dsp_resampled={d} dsp_rendered={d} dsp_non_silent={d} dsp_dropped={d} dsp_queued={d} save_async_started={d} save_async_completed={d} save_async_coalesced={d} save_async_errors={d} save_async_max_queued={d} pauses={d} resumes={d} resets={d} save_files={d} close={d} resources=closed\r\n",
+        " dsp_native={d} dsp_resampled={d} dsp_rendered={d} dsp_non_silent={d} dsp_dropped={d} dsp_queued={d} save_async_started={d} save_async_completed={d} save_async_coalesced={d} save_async_errors={d} save_async_max_queued={d} pauses={d} resumes={d} resets={d} save_files={d} close={d} resources={s}\r\n",
         .{
             dsp_stats.native_frames,
             dsp_stats.resampled_frames,
@@ -573,6 +574,7 @@ fn writeE2eRuntimeReport(
             runtime_stats.resets,
             @intFromBool(save_files),
             close_result,
+            if (resources_closed and close_result == 0) "closed" else "pending",
         },
     ) catch return false).len;
     const report = report_storage[0 .. prefix_len + suffix_len];

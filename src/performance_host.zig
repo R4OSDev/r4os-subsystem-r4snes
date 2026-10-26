@@ -77,7 +77,9 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
         var guest = product.Guest.init(allocator, store.backend(), .{ .context = &time, .now_fn = TimeSource.now }, 1);
         try guest.openOwned(.{ .image = image });
         var guest_closed = false;
-        defer if (!guest_closed) { _ = guest.close(); };
+        defer if (!guest_closed) {
+            _ = guest.close();
+        };
         const initial = core.performance.stateDigest(guest.machine.?);
         try guest.setGuestTimeLimit(scene.warmup_ns);
         // Anchor the production budget at guest time zero. Otherwise a late
@@ -169,9 +171,7 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
             .qualification_only = check_only,
             .warmup_guest_ns = scene.warmup_ns,
             .measured_guest_ns = measured_ns,
-            .warmup = .{ .wall_ns = probe.warmup_wall_ns, .guest_ns = scene.warmup_ns,
-                .master_cycles = probe.before.master, .generated_frames = probe.before.generated,
-                .apu_native_frames = probe.before.native, .audio_accepted_bytes = probe.before.audio_bytes },
+            .warmup = .{ .wall_ns = probe.warmup_wall_ns, .guest_ns = scene.warmup_ns, .master_cycles = probe.before.master, .generated_frames = probe.before.generated, .apu_native_frames = probe.before.native, .audio_accepted_bytes = probe.before.audio_bytes },
             .work_start_master = probe.before.master,
             .work_end_master = after.master,
             .master_hz = guest.machine.?.clock.profile().master_hz,
@@ -184,8 +184,7 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
             .viewport = window.video.currentViewport(),
             .assigned_runtime_ticks = cpu_ticks,
             .runtime_tick_hz = sys.monotonicHz(),
-            .batch_tasks = if (instrumented) @as(?tasks.Report, .{ .before = probe.task_before.view(), .after = task_after.view(),
-                .delta_unavailable_reason = if (task_delta.reason == .none) null else task_delta.reason, .deltas = task_delta.values() }) else null,
+            .batch_tasks = if (instrumented) @as(?tasks.Report, .{ .before = probe.task_before.view(), .after = task_after.view(), .delta_unavailable_reason = if (task_delta.reason == .none) null else task_delta.reason, .deltas = task_delta.values() }) else null,
             .host_counter_delta = if (instrumented) tasks.counters(video.HostStats, probe.host_before, window.stats) else null,
             .raster_counter_delta = if (instrumented) tasks.counters(video.PresentStats, probe.raster_before, window.video.stats) else null,
             .stage_wall_ns = probe.stage_ns,
@@ -408,7 +407,7 @@ const Probe = struct {
         return .{ .context = self, .poll_fn = poll, .present_fn = present, .wait_fn = if (self.host.wait_fn != null) wait else null, .should_close_fn = shouldClose };
     }
     fn audioSink(self: *Probe) rt.AudioSink {
-        return .{ .context = self, .open_fn = audioOpen, .write_fn = audioWrite, .volume_fn = audioVolume, .close_fn = audioClose };
+        return .{ .context = self, .open_fn = audioOpen, .write_fn = audioWrite, .volume_fn = audioVolume, .close_fn = audioClose, .poll_fn = if (self.sink.poll_fn != null) audioPoll else null, .finish_fn = if (self.sink.finish_fn != null) audioFinish else null };
     }
     fn from(context: *anyopaque) *Probe {
         return @ptrCast(@alignCast(context));
@@ -426,7 +425,8 @@ const Probe = struct {
         }
         const hz = machine.clock.profile().master_hz;
         if (!self.measuring and machine.host_budget.pending_master_cycles == 0 and
-            machine.clock.master_cycles >= @as(u128, scene.warmup_ns) * hz / std.time.ns_per_s) {
+            machine.clock.master_cycles >= @as(u128, scene.warmup_ns) * hz / std.time.ns_per_s)
+        {
             self.before = self.snapshot();
             self.warmup_dsp_dropped_frames = machine.smp.dsp.stats.frames_dropped;
             self.warmup_wall_ns = self.now() -| self.warmup_started_ns;
@@ -487,6 +487,19 @@ const Probe = struct {
     }
     fn shouldClose(context: *anyopaque) bool {
         return from(context).host.shouldClose() orelse false;
+    }
+    // Stage5 now measures main-thread submission and final drain. Completion
+    // polling is local ownership bookkeeping, not another audio RPC operation.
+    fn audioPoll(context: *anyopaque) ?rt.AudioCompletion {
+        const self = from(context);
+        return self.sink.poll_fn.?(self.sink.context);
+    }
+    fn audioFinish(context: *anyopaque) rt.AudioFinish {
+        const self = from(context);
+        const started = self.begin();
+        const result = self.sink.finish_fn.?(self.sink.context);
+        self.end(5, started);
+        return result;
     }
     fn audioOpen(context: *anyopaque, config: rt.AudioConfig) i32 {
         const self = from(context);
