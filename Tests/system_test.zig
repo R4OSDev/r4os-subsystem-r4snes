@@ -780,3 +780,194 @@ test "production NMITIMEN lock and WAI stop at the delayed NMI delivery" {
     try std.testing.expectEqual(@as(u16, 7), machine.clock.h_counter);
     try std.testing.expect(machine.scpu.nmi_flag and machine.cpu.nmi_pending and machine.cpu.waiting);
 }
+
+// Exact tick adapter deliberately has no span methods. It keeps the prior
+// Clock path as an independent ordering oracle for the aggregate path.
+const SpanClockProbe = struct {
+    dispatches: u64 = 0,
+    spans: u64 = 0,
+    skipped: u64 = 0,
+    events: u64 = 0,
+    digest: u64 = 0xcbf29ce484222325,
+
+    pub fn filteredMasterTickRequired(self: *@This(), clock: *const core.timing.Clock, refresh_start: bool, refresh_wait: bool) bool {
+        self.dispatches += 1;
+        return refresh_start or (refresh_wait and clock.refresh_active_remaining % 8 == 0) or
+            clock.h_counter == 0 or clock.h_counter == 3 or clock.h_counter == 12 or
+            clock.h_counter == core.timing.hblank_start_master_cycle or clock.h_counter == 1104 or
+            clock.master_cycles % 13 == 0 or clock.apu_phase + core.timing.apu_source_hz >= clock.profile().master_hz;
+    }
+    pub fn skippableMasterClocks(_: *@This(), clock: *const core.timing.Clock, refresh_wait: bool, limit: u32) u32 {
+        var count = @min(limit, @as(u32, @intCast((13 - clock.master_cycles % 13) % 13)));
+        for ([_]u16{ 0, 12, 1104 }) |edge| {
+            if (clock.h_counter <= edge) count = @min(count, edge - clock.h_counter);
+        }
+        if (refresh_wait) {
+            if (clock.refresh_active_remaining == 0) return 0;
+            count = @min(count, (clock.refresh_active_remaining - 1) & 7);
+        }
+        return count;
+    }
+    pub fn onMasterTick(self: *@This(), clock: *const core.timing.Clock, refresh_start: bool, refresh_wait: bool) void {
+        self.events += 1;
+        for ([_]u64{ clock.master_cycles, clock.h_counter, clock.v_counter, clock.frame, @intFromBool(clock.field), clock.apu_phase, clock.apu_ticks, clock.refresh_events, clock.refresh_wait_master_cycles, clock.refresh_active_remaining, @intFromBool(refresh_start), @intFromBool(refresh_wait) }) |value|
+            self.digest = (self.digest ^ value) *% 0x100000001b3;
+    }
+    pub fn onSkippedMasterTick(self: *@This(), _: *const core.timing.Clock) void {
+        self.skipped += 1;
+    }
+    pub fn onSkippedMasterSpan(self: *@This(), _: *const core.timing.Clock, clocks: u32) void {
+        self.dispatches += 1;
+        self.spans += 1;
+        self.skipped += clocks;
+    }
+};
+const ExactSpanClockProbe = struct {
+    inner: *SpanClockProbe,
+    pub fn filteredMasterTickRequired(self: *@This(), clock: *const core.timing.Clock, start: bool, wait: bool) bool {
+        return self.inner.filteredMasterTickRequired(clock, start, wait);
+    }
+    pub fn onMasterTick(self: *@This(), clock: *const core.timing.Clock, start: bool, wait: bool) void {
+        self.inner.onMasterTick(clock, start, wait);
+    }
+    pub fn onSkippedMasterTick(self: *@This(), clock: *const core.timing.Clock) void {
+        self.inner.onSkippedMasterTick(clock);
+    }
+};
+
+test "event spans preserve physical clock order fractional carry refresh and field edges" {
+    var aggregate_dispatches: u64 = 0;
+    var exact_dispatches: u64 = 0;
+    for ([_]core.timing.Region{ .ntsc, .pal }) |region| {
+        for (0..25) |index| {
+            var fast = core.timing.Clock.init(region);
+            fast.field = index & 1 != 0;
+            fast.interlace = index & 2 != 0;
+            fast.interlace_requested = !fast.interlace;
+            fast.overscan = index & 4 != 0;
+            fast.v_counter = switch (index / 4) {
+                0 => 0,
+                1 => 127,
+                2 => fast.profile().vblank_start - 1,
+                3 => 240,
+                4 => fast.profile().vblank_start,
+                else => fast.profile().scanlines - 1,
+            };
+            const positions = [_]u16{ 0, 1, 2, 3, 11, 12, 537, 538, 1095, 1103, 1291, 1309, 1363 };
+            fast.h_counter = @min(positions[index % positions.len], fast.lineMasterCycles() - 1);
+            if (index == 24) fast.h_counter = fast.lineMasterCycles() + 1;
+            fast.master_cycles = if (index == 23) std.math.maxInt(u64) - 40 else @as(u64, @intCast(index)) * 1364 + fast.h_counter;
+            fast.apu_phase = if (index & 1 == 0) fast.profile().master_hz - 1 else index * 7919;
+            fast.refresh_active_remaining = ([_]u8{ 0, 1, 33, 40 })[index & 3];
+            var exact = fast;
+            var a = SpanClockProbe{};
+            var b = SpanClockProbe{};
+            var reference = ExactSpanClockProbe{ .inner = &b };
+            for ([_]u32{ 0, 1, 2, 7, 257, 4096, 32769 }) |request| {
+                try std.testing.expectEqual(exact.runSlice(request, &reference), fast.runSlice(request, &a));
+                try std.testing.expectEqualDeep(exact, fast);
+                try std.testing.expectEqual(b.events, a.events);
+                try std.testing.expectEqual(b.digest, a.digest);
+                try std.testing.expectEqual(b.skipped, a.skipped);
+            }
+            for ([_]u8{ 6, 8, 12, 255 }) |cycle| {
+                try std.testing.expectEqual(exact.advanceCpuCycle(cycle, &reference), fast.advanceCpuCycle(cycle, &a));
+                try std.testing.expectEqualDeep(exact, fast);
+                try std.testing.expectEqual(b.digest, a.digest);
+                try std.testing.expectEqual(b.skipped, a.skipped);
+            }
+            try std.testing.expect(a.spans > 0 and a.dispatches < b.dispatches);
+            aggregate_dispatches += a.dispatches;
+            exact_dispatches += b.dispatches;
+        }
+    }
+    std.debug.print("Clock event-span proof: dispatches={d} exact={d}; same ordered events and every canonical Clock field\n", .{ aggregate_dispatches, exact_dispatches });
+}
+
+const SpanBlankDevice = struct {
+    pub fn filteredMasterTickRequired(_: @This(), _: *const core.timing.Clock) bool {
+        return false;
+    }
+    pub fn masterClocksUntilEvent(_: @This(), _: *const core.timing.Clock) u32 {
+        return std.math.maxInt(u32);
+    }
+    pub fn onMasterTick(_: @This(), _: *const core.timing.Clock) void {}
+};
+const ExactBlankDevice = struct {
+    pub fn filteredMasterTickRequired(_: @This(), _: *const core.timing.Clock) bool {
+        return false;
+    }
+    pub fn onMasterTick(_: @This(), _: *const core.timing.Clock) void {}
+};
+
+test "event spans retain actual SCPU IRQ NMI joypad refresh and DMA observations" {
+    const image = try makeCpuImage(std.testing.allocator);
+    defer std.testing.allocator.free(image);
+    var cart = try core.cartridge.Cartridge.parse(std.testing.allocator, image);
+    defer cart.deinit();
+    for ([_]core.timing.Region{ .ntsc, .pal }) |region| {
+        for ([_]u8{ 0x01, 0x81, 0x11, 0x21, 0xb1 }) |enable| {
+            for ([_]u16{ 0, 127, 224, 225, 240, 261 }) |line| {
+                var a = Harness{ .clock = core.timing.Clock.init(region) };
+                a.clock.v_counter = line;
+                a.clock.h_counter = 529;
+                a.clock.master_cycles = @as(u64, line) * 1364 + 529;
+                a.clock.apu_phase = a.clock.profile().master_hz - 1;
+                a.ports.port1.set(.b, true);
+                a.write(0x4200, enable);
+                a.write(0x4207, 137);
+                a.write(0x4209, @truncate(line));
+                a.write(0x420a, @intCast(line >> 8));
+                var b = a;
+                var fast = core.scpu.DmaBusPort(SpanBlankDevice){ .bus = &a.bus, .cartridge = &cart, .scpu = &a.scpu, .clock = &a.clock, .controllers = &a.ports, .cpu = &a.cpu, .device = .{} };
+                var exact = core.scpu.DmaBusPort(ExactBlankDevice){ .bus = &b.bus, .cartridge = &cart, .scpu = &b.scpu, .clock = &b.clock, .controllers = &b.ports, .cpu = &b.cpu, .device = .{} };
+                for (0..512) |step| {
+                    const clocks = ([_]u8{ 6, 8, 12 })[step % 3];
+                    try std.testing.expectEqual(exact.advanceDma(clocks), fast.advanceDma(clocks));
+                    try std.testing.expectEqualDeep(b.clock, a.clock);
+                    try std.testing.expectEqualDeep(b.scpu, a.scpu);
+                    try std.testing.expectEqualDeep(b.cpu, a.cpu);
+                    try std.testing.expectEqualDeep(b.ports, a.ports);
+                }
+            }
+        }
+    }
+}
+
+test "event span pixel distance agrees with unchanged physical PPU predicate" {
+    const display = try std.testing.allocator.create(core.ppu.Ppu);
+    defer std.testing.allocator.destroy(display);
+    display.* = .{};
+    for ([_]core.timing.Region{ .ntsc, .pal }) |region| {
+        for ([_]u3{ 0, 1, 5, 6, 7 }) |mode| {
+            display.mode = mode;
+            for ([_]bool{ false, true }) |hires| {
+                display.pseudo_hires = hires;
+                for ([_]bool{ false, true }) |overscan| {
+                    display.overscan = overscan;
+                    for ([_]u16{ 0, 1, 224, 225, 239, 240, 311 }) |line| {
+                        var clock = core.timing.Clock.init(region);
+                        clock.v_counter = line;
+                        clock.interlace = true;
+                        clock.field = true;
+                        const length = clock.lineMasterCycles();
+                        for (0..length) |h| {
+                            clock.h_counter = @intCast(h);
+                            const distance = display.masterClocksUntilEvent(&clock);
+                            const before = @min(distance, length - h);
+                            var probe = clock;
+                            for (0..before) |delta| {
+                                probe.h_counter = @intCast(h + delta);
+                                try std.testing.expect(!display.masterTickRequired(&probe));
+                            }
+                            if (distance < length - h) {
+                                probe.h_counter = @intCast(h + distance);
+                                try std.testing.expect(display.masterTickRequired(&probe));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

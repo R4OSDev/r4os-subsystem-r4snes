@@ -79,9 +79,36 @@ pub fn main(init: std.process.Init) !void {
             machine.smp.semantic_ipl_state != .running or machine.smp.dsp.stats.frames_dropped != 0)
             return error.InactiveScene;
         if (options.check) {
-            std.debug.print("R4SNES scene: OK identity={s} region={s} sha256={s}\n", .{
+            // Functional original-scene proof, no timed measurement batches.
+            // Run the same complete work on old/exact and event-span cores.
+            try drain.until(machine, &cart, scene.warmup_ns + scene.duration_ns);
+            var pcm_digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(capture[0..drain.capture_len], &pcm_digest, .{});
+            var proof_buffer: [4096]u8 = undefined;
+            var proof_out = std.Io.File.stdout().writer(init.io, &proof_buffer);
+            try std.json.Stringify.value(.{
+                .qualification_only = true,
+                .scene = scene.identity,
+                .region = @tagName(options.region),
+                .guest_ns = scene.warmup_ns + scene.duration_ns,
+                .rom_sha256 = std.fmt.bytesToHex(digest, .lower),
+                .initial_state_sha256 = std.fmt.bytesToHex(initial, .lower),
+                .state_sha256 = std.fmt.bytesToHex(core.performance.stateDigest(machine), .lower),
+                .frame_sha256 = std.fmt.bytesToHex(core.performance.frameDigest(machine), .lower),
+                .pcm_sha256 = std.fmt.bytesToHex(pcm_digest, .lower),
+                .clock = machine.clock,
+                .generated_frames = machine.ppu.frame_generation,
+                .smp_cycles = machine.smp.cycles,
+                .apu_native_frames = machine.smp.dsp.stats.native_frames,
+                .pcm_bytes = drain.bytes,
+                .pcm_nonzero_bytes = drain.nonzero_bytes,
+                .render_calls = drain.render_calls,
+            }, .{}, &proof_out.interface);
+            try proof_out.interface.writeByte('\n');
+            try proof_out.interface.print("R4SNES scene: OK identity={s} region={s} sha256={s}\n", .{
                 scene.identity, @tagName(options.region), std.fmt.bytesToHex(digest, .lower),
             });
+            try proof_out.interface.flush();
             return;
         }
         const warmup = .{

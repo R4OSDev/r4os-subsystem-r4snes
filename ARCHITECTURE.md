@@ -167,3 +167,28 @@ only the exact known revision digest from the fixed private path; the relaxed
 policy is explicitly named `allow_open_test` and is used solely by generated
 owner fixtures. Close is idempotent and erases program ROM, data ROM, RAM,
 stack and digest.
+
+0.87.50 — eventless clock advancement
+-------------------------------------
+Clock combines only spans proved silent by the product S-CPU/SystemMmio/PPU
+owners. It stops before pixel/beam/IRQ/NMI/joypad/refresh-ALU/APU-carry events,
+line/field rollover and counter wrap. Unknown raw devices retain exact ticks.
+The original Boolean PPU predicate remains the independent distance oracle;
+the last non-pixel part of a line has no invented next visible pixel.
+No pixels, latches, MMIO or complete CPU/DMA/WAI operations are reordered.
+Diagnostic skipped polls use arithmetic only in the existing diagnostic build;
+no new production counter/profiling-clock path exists.
+
+The public host grant remains32768. Complete CPU operations may cross it by
+the existing maximum32buscycles*12+40refresh-1=423; HostBudget credits the
+surplus. The original word/refresh case proves a legitimate>64overhang on
+the prior core. The Distribution report execution ceiling now matches33191;
+grant, drift, data/PCM and resource assertions are retained. This is an old
+oracle correction, not a changed guest operation or relaxed unbounded loop.
+
+Qualification:20system/13PPU/11maturity cases, original ReleaseFast/profile and
+S-DSP analyzer; old/current NTSC/PAL full3.25s scene proof is identical in all
+reported work/Clock/state/frame/PCM fields. The explicit --check-scene path
+outputs qualification-only evidence with one stdout writer; measurement
+modes are unchanged. Current real KVM4 long product/report gates pass.
+Project evidence, benchmark and physical limits: Docs/Subsystems/SNESArchitecture.txt.50.

@@ -83,6 +83,10 @@ const SystemMmio = struct {
         return self.display.masterTickRequired(clock);
     }
 
+    pub fn masterClocksUntilEvent(self: *const SystemMmio, clock: *const timing.Clock) u32 {
+        return self.display.masterClocksUntilEvent(clock);
+    }
+
     pub fn synchronizeClock(self: *const SystemMmio, clock: *timing.Clock) void {
         self.display.synchronizeClock(clock);
     }

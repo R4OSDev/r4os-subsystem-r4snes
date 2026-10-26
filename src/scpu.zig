@@ -448,8 +448,8 @@ fn EventSink(comptime Device: type) type {
         }
 
         /// Product devices may prove that a physical clock has no observable
-        /// S-CPU or device event. The Clock still advances every master tick;
-        /// only the expensive device dispatch is elided.
+        /// S-CPU or device event. Exact boundary ticks retain the full path;
+        /// a separate proof permits arithmetic advancement between them.
         pub fn filteredMasterTickRequired(self: *const Self, clock: *const timing.Clock, refresh_start: bool, refresh_wait: bool) bool {
             if (comptime !deviceFiltersMasterClock(Device)) return true;
             if (refresh_start or (refresh_wait and clock.refresh_active_remaining % 8 == 0)) return true;
@@ -458,6 +458,36 @@ fn EventSink(comptime Device: type) type {
             if ((clock.master_cycles & 127) == 0) return true;
             if (self.scpu.interruptTickRequired(clock)) return true;
             return self.device.filteredMasterTickRequired(clock);
+        }
+
+        pub fn skippableMasterClocks(self: *const Self, clock: *const timing.Clock, refresh_wait: bool, limit: u32) u32 {
+            if (comptime !deviceBatchesMasterClock(Device)) return 0;
+            var quiet = @min(limit, self.device.masterClocksUntilEvent(clock));
+            if (quiet == 0) return 0;
+            // These are the same S-CPU observations as the tick predicate.
+            for ([_]u16{ 0, 2, 12 }) |edge| {
+                if (clock.h_counter <= edge) quiet = @min(quiet, edge - clock.h_counter);
+            }
+            if (clock.v_counter < clock.profile().vblank_start and clock.h_counter <= 1_104)
+                quiet = @min(quiet, 1_104 - clock.h_counter);
+            quiet = @min(quiet, (128 - @as(u32, @intCast(clock.master_cycles & 127))) & 127);
+            if (self.scpu.h_irq_enabled or self.scpu.v_irq_enabled or self.scpu.nmi_delivery_pending or
+                clock.inVblank() != self.scpu.last_vblank)
+                quiet = @min(quiet, (2 + 4 - (clock.h_counter & 3)) & 3);
+            if (refresh_wait) {
+                if (clock.refresh_active_remaining == 0) return 0;
+                // tick decrements first; Scpu observes the resulting multiple
+                // of eight, including the final transition to zero.
+                quiet = @min(quiet, (clock.refresh_active_remaining - 1) & 7);
+            }
+            return quiet;
+        }
+
+        pub fn onSkippedMasterSpan(self: *Self, clock: *const timing.Clock, count: u32) void {
+            if (diagnostics) {
+                const first: u32 = (2 + 4 - (clock.h_counter & 3)) & 3;
+                if (first < count) self.scpu.interrupt_polls +%= 1 + (count - 1 - first) / 4;
+            }
         }
 
         pub fn onSkippedMasterTick(self: *Self, clock: *const timing.Clock) void {
@@ -482,6 +512,14 @@ fn deviceFiltersMasterClock(comptime Device: type) bool {
         else => Device,
     };
     return @hasDecl(Owner, "filteredMasterTickRequired");
+}
+
+fn deviceBatchesMasterClock(comptime Device: type) bool {
+    const Owner = switch (@typeInfo(Device)) {
+        .pointer => |pointer| pointer.child,
+        else => Device,
+    };
+    return deviceFiltersMasterClock(Device) and @hasDecl(Owner, "masterClocksUntilEvent");
 }
 
 fn deviceSynchronizesClock(comptime Device: type) bool {
@@ -539,8 +577,9 @@ pub fn TimedPortWithDevice(comptime Device: type) type {
         /// Advance an interrupt-free WAI interval without repeatedly entering
         /// the instruction decoder.  A span ends after observing at most the
         /// next scanline-start event, where vblank may assert NMI.  Every
-        /// physical clock still passes through Clock and the normal event
-        /// sink, so PPU, joypad, refresh and diagnostic ordering are retained.
+        /// observed boundary retains the normal event sink. Proved quiet
+        /// clocks advance algebraically with the same phase/diagnostic work;
+        /// PPU, joypad, refresh and interrupt ordering are retained.
         pub fn fastForwardWaiting(self: *Self, maximum_master_cycles: u32) u32 {
             std.debug.assert(maximum_master_cycles != 0);
             std.debug.assert(self.cpu.canFastForwardWaiting());

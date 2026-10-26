@@ -4,6 +4,15 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
+Version 0.22.28 advances proved eventless master-clock spans arithmetically.
+Pixel, IRQ/NMI, refresh, joypad, beam and APU carry boundaries keep the exact
+tick; CPU/DMA/MMIO operations and old raw reference sinks retain their order.
+Original NTSC/PAL scene state, frame, PCM and all Clock fields match the prior
+core. `performance-build` plus `--check-scene` qualifies the full 3.25-second
+scene once and emits proof data without timed batches or scores. The clock
+model's lower dispatch count is not an FPS or hardware speedup claim.
+See `ARCHITECTURE.md` and the project SNESArchitecture 0.87.50 qualification.
+
 Version 0.22.24 removes the diagnostic full-frame FNV pass from ordinary
 ReleaseFast publication. Pixel comparisons, damage and frame generations stay
 unchanged. Diagnostic builds preserve the exact existing frame references;

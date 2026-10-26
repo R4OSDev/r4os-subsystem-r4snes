@@ -229,6 +229,21 @@ pub const Ppu = struct {
         return relative < width * clocks_per_pixel and relative % clocks_per_pixel == 0;
     }
 
+    /// Distance to the next line/pixel observation, with registers stable
+    /// inside the current CPU/DMA/WAI operation. No pixel or latch is batched.
+    pub fn masterClocksUntilEvent(self: *const Ppu, clock: *const timing.Clock) u32 {
+        if (clock.h_counter == 0) return 0;
+        if (clock.v_counter < 1 or clock.v_counter > self.visibleHeight()) return @import("std").math.maxInt(u32);
+        if (clock.h_counter < visible_h_start) return visible_h_start - clock.h_counter;
+        const width = self.nativeWidth();
+        const clocks_per_pixel: u16 = if (width == hires_width) 2 else 4;
+        const relative = clock.h_counter - visible_h_start;
+        if (relative >= width * clocks_per_pixel) return @import("std").math.maxInt(u32);
+        const distance = (clocks_per_pixel - relative % clocks_per_pixel) % clocks_per_pixel;
+        if (relative + distance >= width * clocks_per_pixel) return @import("std").math.maxInt(u32);
+        return distance;
+    }
+
     /// Observe one physical master clock. Register changes affect the first
     /// not-yet-produced pixel; OAM evaluation remains scanline-latched.
     pub fn onMasterTick(self: *Ppu, clock: *const timing.Clock) void {

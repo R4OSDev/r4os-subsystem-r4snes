@@ -195,8 +195,9 @@ pub const Clock = struct {
         if (self.paused or requested == 0) return 0;
         const bounded: u32 = @intCast(@min(requested, maximum_host_slice_master_cycles));
         var elapsed: u32 = 0;
-        while (elapsed < bounded) : (elapsed += 1) {
-            _ = self.tick(sink, self.refresh_active_remaining != 0);
+        while (elapsed < bounded) {
+            const step = self.advanceEventStep(bounded - elapsed, sink, self.refresh_active_remaining != 0);
+            elapsed += step.clocks;
         }
         return bounded;
     }
@@ -206,17 +207,64 @@ pub const Clock = struct {
     pub fn advanceCpuCycle(self: *Clock, base_master_cycles: u8, sink: anytype) u8 {
         var elapsed: u8 = 0;
         var refresh_due = false;
-        while (elapsed < base_master_cycles) : (elapsed += 1) {
-            refresh_due = self.tick(sink, false) or refresh_due;
+        while (elapsed < base_master_cycles) {
+            const step = self.advanceEventStep(base_master_cycles - elapsed, sink, false);
+            refresh_due = step.refresh_start or refresh_due;
+            elapsed += @intCast(step.clocks);
         }
         if (refresh_due) {
             var stolen: u8 = 0;
-            while (stolen < refresh_master_cycles) : (stolen += 1) {
-                _ = self.tick(sink, true);
+            while (stolen < refresh_master_cycles) {
+                const step = self.advanceEventStep(refresh_master_cycles - stolen, sink, true);
+                stolen += @intCast(step.clocks);
             }
             elapsed +%= refresh_master_cycles;
         }
         return elapsed;
+    }
+
+    const Step = struct { clocks: u32, refresh_start: bool = false };
+
+    fn advanceEventStep(self: *Clock, limit: u32, sink: anytype, refresh_wait: bool) Step {
+        if (comptime sinkBatchesMasterClock(@TypeOf(sink))) {
+            var quiet = self.eventlessLimit(limit, refresh_wait);
+            if (quiet != 0) quiet = @min(quiet, sink.skippableMasterClocks(self, refresh_wait, quiet));
+            if (quiet != 0) {
+                // The opt-in sink proves its own skipped work can be combined.
+                // It sees the original starting beam; no MMIO occurs inside
+                // this bounded CPU/DMA operation or WAI interval.
+                sink.onSkippedMasterSpan(self, quiet);
+                if (refresh_wait) {
+                    self.refresh_wait_master_cycles +%= quiet;
+                    self.refresh_active_remaining -= @intCast(@min(quiet, self.refresh_active_remaining));
+                }
+                self.apu_phase += @as(u64, quiet) * apu_source_hz;
+                self.master_cycles +%= quiet;
+                self.h_counter += @intCast(quiet);
+                return .{ .clocks = quiet };
+            }
+        }
+        return .{ .clocks = 1, .refresh_start = self.tick(sink, refresh_wait) };
+    }
+
+    fn eventlessLimit(self: *const Clock, limit: u32, refresh_wait: bool) u32 {
+        // Never aggregate a line/field rollover or an APU fractional carry.
+        // Their original tick keeps the exact physical ordering and latches.
+        const length = self.lineMasterCycles();
+        if (self.h_counter >= length) return 0;
+        var quiet = @min(limit, length - self.h_counter - 1);
+        quiet = @intCast(@min(quiet, std.math.maxInt(u64) - self.master_cycles));
+        const hz = self.profile().master_hz;
+        if (self.apu_phase >= hz) return 0;
+        quiet = @intCast(@min(quiet, (hz - 1 - self.apu_phase) / apu_source_hz));
+        // Status MMIO observes both HBlank transitions on the same beam.
+        for ([_]u16{ 3, hblank_start_master_cycle }) |edge| {
+            if (self.h_counter <= edge) quiet = @min(quiet, edge - self.h_counter);
+        }
+        if (!refresh_wait and self.h_counter <= self.refresh_position)
+            quiet = @min(quiet, self.refresh_position - self.h_counter);
+        if (refresh_wait) quiet = @min(quiet, self.refresh_active_remaining);
+        return quiet;
     }
 
     fn tick(self: *Clock, sink: anytype, refresh_wait: bool) bool {
@@ -277,4 +325,13 @@ fn sinkFiltersMasterClock(comptime Sink: type) bool {
         else => Sink,
     };
     return @hasDecl(Owner, "filteredMasterTickRequired") and @hasDecl(Owner, "onSkippedMasterTick");
+}
+
+fn sinkBatchesMasterClock(comptime Sink: type) bool {
+    const Owner = switch (@typeInfo(Sink)) {
+        .pointer => |pointer| pointer.child,
+        else => Sink,
+    };
+    return sinkFiltersMasterClock(Sink) and @hasDecl(Owner, "skippableMasterClocks") and
+        @hasDecl(Owner, "onSkippedMasterSpan");
 }
