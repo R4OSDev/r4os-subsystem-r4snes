@@ -102,7 +102,7 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
         }
         time.probe = &probe;
         var runtime = try rt.Runtime.init(.{ .slice_budget = product.slice_budget_master_cycles }, sys.monotonicHz(), sys.ticks(), .{
-            .config = .{ .sample_rate = core.sdsp.output_sample_rate, .channels = core.sdsp.channels, .quantum_frames = rt.default_quantum_frames, .target_quanta = 2, .max_catchup_quanta = 16 },
+            .config = .{ .sample_rate = core.sdsp.output_sample_rate, .channels = core.sdsp.channels, .quantum_frames = rt.default_quantum_frames, .target_quanta = 2, .max_catchup_quanta = 16, .continuous = true },
             .queue_storage = &queue,
             .scratch = &scratch,
             .sink = probe.audioSink(),
@@ -215,7 +215,23 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
             .runtime_zero_progress_waits = after.zero_progress_waits -| probe.before.zero_progress_waits,
             .audio_failures = after.audio_failures,
             .audio_discarded_bytes = after.discarded -| probe.before.discarded,
-            .audio_playback_frames = @as(?u64, null), // No per-stream hardware cursor in ABI.
+            .audio_playback_frames = if (after.playback != null and probe.before.playback != null) after.playback.? -| probe.before.playback.? else @as(?u64, null),
+            .audio_progress_source = "generation-bound per-stream DMA cursor; canonical48000Hz stereo S16; no speaker receipt",
+            .audio_backend_frames = after.backend_frames -| probe.before.backend_frames,
+            .audio_dma_frames = after.dma_frames -| probe.before.dma_frames,
+            .audio_unconfirmed_frames = after.unconfirmed_frames -| probe.before.unconfirmed_frames,
+            .audio_source_starvations = after.source_starvations -| probe.before.source_starvations,
+            .audio_queue_age_ns = after.queue_age_ns,
+            .audio_kernel_queued_start_frames = probe.before.queued_frames,
+            .audio_kernel_queued_end_frames = after.queued_frames,
+            .audio_progress_observed_ns = after.progress_observed_ns,
+            .audio_stream_generation_start = probe.before.stream_generation,
+            .audio_stream_generation_end = after.stream_generation,
+            .audio_backend_generation = after.backend_generation,
+            .audio_output_generation_start = probe.before.output_generation,
+            .audio_output_generation_end = after.output_generation,
+            .audio_reset_generation_start = probe.before.reset_generation,
+            .audio_reset_generation_end = after.reset_generation,
             .actually_presented_frames = @as(?u64, null), // Desktop trace is global, not an app receipt.
             .sampled_operations = probe.profile.sampled_operations,
             .cpu_operations = probe.profile.cpu_operations,
@@ -302,6 +318,18 @@ const Snapshot = struct {
     zero_progress_waits: u64,
     audio_failures: u64,
     discarded: u64,
+    playback: ?u64,
+    backend_frames: u64,
+    dma_frames: u64,
+    unconfirmed_frames: u64,
+    source_starvations: u64,
+    queue_age_ns: u64,
+    queued_frames: u64,
+    progress_observed_ns: u64,
+    stream_generation: u64,
+    backend_generation: u64,
+    output_generation: u64,
+    reset_generation: u64,
 };
 
 const Probe = struct {
@@ -375,6 +403,18 @@ const Probe = struct {
             .zero_progress_waits = self.runtime.stats.zero_progress_waits,
             .audio_failures = audio.write_failures,
             .discarded = audio.discarded_bytes,
+            .playback = audio.playback_frames,
+            .backend_frames = audio.backend_frames,
+            .dma_frames = audio.dma_frames,
+            .unconfirmed_frames = audio.unconfirmed_frames,
+            .source_starvations = audio.source_starvations,
+            .queue_age_ns = audio.queue_age_ns,
+            .queued_frames = audio.queued_frames,
+            .progress_observed_ns = audio.progress_observed_ns,
+            .stream_generation = audio.stream_generation,
+            .backend_generation = audio.backend_generation,
+            .output_generation = audio.output_generation,
+            .reset_generation = audio.reset_generation,
         };
     }
     fn taskTicks(self: *Probe) ?u64 {
@@ -407,7 +447,7 @@ const Probe = struct {
         return .{ .context = self, .poll_fn = poll, .present_fn = present, .wait_fn = if (self.host.wait_fn != null) wait else null, .should_close_fn = shouldClose };
     }
     fn audioSink(self: *Probe) rt.AudioSink {
-        return .{ .context = self, .open_fn = audioOpen, .write_fn = audioWrite, .volume_fn = audioVolume, .close_fn = audioClose, .poll_fn = if (self.sink.poll_fn != null) audioPoll else null, .finish_fn = if (self.sink.finish_fn != null) audioFinish else null };
+        return .{ .context = self, .open_fn = audioOpen, .write_fn = audioWrite, .volume_fn = audioVolume, .close_fn = audioClose, .poll_fn = if (self.sink.poll_fn != null) audioPoll else null, .finish_fn = if (self.sink.finish_fn != null) audioFinish else null, .progress_fn = if (self.sink.progress_fn != null) audioProgress else null };
     }
     fn from(context: *anyopaque) *Probe {
         return @ptrCast(@alignCast(context));
@@ -488,11 +528,21 @@ const Probe = struct {
     fn shouldClose(context: *anyopaque) bool {
         return from(context).host.shouldClose() orelse false;
     }
-    // Stage5 now measures main-thread submission and final drain. Completion
-    // polling is local ownership bookkeeping, not another audio RPC operation.
+    // Stage5 includes submission, chained control/progress submission from a
+    // completed owner, and final drain. IO retirement retains its exact owner.
     fn audioPoll(context: *anyopaque) ?rt.AudioCompletion {
         const self = from(context);
-        return self.sink.poll_fn.?(self.sink.context);
+        const started = self.begin();
+        const result = self.sink.poll_fn.?(self.sink.context);
+        self.end(5, started);
+        return result;
+    }
+    fn audioProgress(context: *anyopaque) i32 {
+        const self = from(context);
+        const started = self.begin();
+        const result = self.sink.progress_fn.?(self.sink.context);
+        self.end(5, started);
+        return result;
     }
     fn audioFinish(context: *anyopaque) rt.AudioFinish {
         const self = from(context);

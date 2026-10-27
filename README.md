@@ -4,6 +4,15 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
+Version0.22.29 bounds the complete continuous audio pipeline by20/40ms
+low/high watermarks in canonical48kHz/stereo/S16 frames. Service acceptance
+alone no longer releases producer backpressure: generation-bound consumed
+progress and explicitly unconfirmed/suppressed/discarded data are accounted
+separately. Exports retain actual backend/DMA/consumed/unknown quantities,
+queue context and source undersupply without inferring playback from guest
+time. Unavailable device evidence remains unavailable; historical exports are
+unchanged. Pending host input and ready video precede audio RPC continuation.
+
 Version 0.22.28 advances proved eventless master-clock spans arithmetically.
 Pixel, IRQ/NMI, refresh, joypad, beam and APU carry boundaries keep the exact
 tick; CPU/DMA/MMIO operations and old raw reference sinks retain their order.

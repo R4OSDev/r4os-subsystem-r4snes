@@ -306,6 +306,10 @@ test "runtime adapter feedback isolates mute degradation reset and close" {
     var dsp = core.sdsp.Dsp{};
     var source_state = AdapterSource{ .dsp = &dsp };
     var adapter = core.runtime_adapter.Adapter.init(&dsp, source_state.source());
+    // This existing lifecycle fixture uses one prefill as its high water.
+    // The product's complete-pipeline 20/40ms policy is exercised separately.
+    adapter.audio_high_water_frames = adapter.audio_prefill_frames;
+    adapter.audio_low_water_frames = adapter.audio_prefill_frames / 2;
     const driver = adapter.driver();
 
     var prefill_aram: [65536]u8 = [_]u8{0} ** 65536;
@@ -344,6 +348,36 @@ test "runtime adapter feedback isolates mute degradation reset and close" {
     try std.testing.expectEqual(core.runtime_adapter.guest_closed, driver.step(1, 0).exit_code);
 }
 
+test "SNES full audio pipeline waits for consumption through its low water" {
+    var dsp = core.sdsp.Dsp{};
+    var source = AdapterSource{ .dsp = &dsp };
+    var adapter = core.runtime_adapter.Adapter.init(&dsp, source.source());
+    defer adapter.close();
+    const driver = adapter.driver();
+    var aram = [_]u8{0} ** 65536;
+    var block: [1920]u8 = undefined;
+    dsp.runClocks(&aram, 1281 * 32);
+    try std.testing.expect(dsp.queuedFrames() >= adapter.audio_high_water_frames);
+    try std.testing.expectEqual(r4os.subsystem_runtime.StepStatus.waiting, driver.step(32, 1).status);
+    var played: u64 = 0;
+    var woke = false;
+    for (0..4) |_| {
+        const rendered = driver.renderAudio(&block);
+        try std.testing.expectEqual(@as(i32, block.len), rendered);
+        try std.testing.expect(!driver.audioFeedback(.{ .state = .active, .muted = false, .accepted_bytes = block.len, .playback_frames = played }));
+        try std.testing.expectEqual(@as(u64, 0), adapter.transport_pending_bytes);
+        try std.testing.expect(adapter.playback_pending_frames != 0);
+        played += block.len / core.sdsp.sample_bytes;
+        woke = driver.audioFeedback(.{ .state = .active, .muted = false, .playback_frames = played });
+        if (dsp.queuedFrames() <= adapter.audio_low_water_frames) {
+            try std.testing.expect(woke);
+            break;
+        }
+        try std.testing.expect(!woke);
+    }
+    try std.testing.expect(woke and !adapter.audio_backpressured);
+}
+
 test "subsystem runtime submits bounded S-DSP PCM and backend loss never stops guest time" {
     const runtime_api = r4os.subsystem_runtime;
     var healthy_probe = Probe{};
@@ -371,6 +405,7 @@ test "subsystem runtime submits bounded S-DSP PCM and backend loss never stops g
             .quantum_frames = runtime_api.default_quantum_frames,
             .target_quanta = runtime_api.default_target_quanta,
             .max_catchup_quanta = 8,
+            .continuous = true,
         },
         .queue_storage = healthy_queue[0..],
         .scratch = healthy_scratch[0..],
@@ -425,6 +460,7 @@ test "subsystem runtime submits bounded S-DSP PCM and backend loss never stops g
             .quantum_frames = runtime_api.default_quantum_frames,
             .target_quanta = runtime_api.default_target_quanta,
             .max_catchup_quanta = 8,
+            .continuous = true,
         },
         .queue_storage = failed_queue[0..],
         .scratch = failed_scratch[0..],
@@ -470,7 +506,7 @@ test "PCM catchup waits for transport progress without dropping or reordering sa
     var queue: [3840]u8 = undefined;
     var scratch: [1920]u8 = undefined;
     var runtime = try rt.Runtime.init(.{ .slice_budget = 3200 }, 1000, 0, .{
-        .config = .{ .max_catchup_quanta = 16 },
+        .config = .{ .max_catchup_quanta = 16, .continuous = true },
         .queue_storage = &queue,
         .scratch = &scratch,
         .sink = sink.sink(),

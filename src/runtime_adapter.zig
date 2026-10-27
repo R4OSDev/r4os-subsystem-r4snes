@@ -37,6 +37,11 @@ pub const Adapter = struct {
     last_step_guest_ns: u64 = 0,
     maximum_step_gap_ns: u64 = 0,
     transport_pending_bytes: u64 = 0,
+    playback_pending_frames: u64 = 0,
+    last_playback_frames: u64 = 0,
+    last_unconfirmed_frames: u64 = 0,
+    audio_low_water_frames: usize = 960,
+    audio_high_water_frames: usize = 1920,
     source_finished: bool = false,
     source_exit_code: i32 = 0,
     closed: bool = false,
@@ -61,6 +66,7 @@ pub const Adapter = struct {
         self.closed = true;
         self.dsp.endCapture();
         self.transport_pending_bytes = 0;
+        self.playback_pending_frames = 0;
         self.audio_prefill_released = false;
         self.audio_backpressured = false;
     }
@@ -75,10 +81,13 @@ fn step(context: *anyopaque, budget: u32, guest_now_ns: u64) runtime.StepResult 
     self.last_step_guest_ns = guest_now_ns;
     if (!self.source_finished) {
         // A catch-up slice may run much faster than the host audio timeline.
-        // Keep the same bounded source prefill instead of overwriting unheard
-        // PCM. Transport feedback wakes this event wait; guest time and the
+        // Bound the whole PCM pipeline, including already accepted data.
+        // Consumed/explicitly unconfirmed progress wakes this wait; guest time and the
         // machine's clock debt keep advancing independently.
-        if (self.audio_capture_enabled and self.dsp.queuedFrames() >= self.audio_prefill_frames) {
+        const ahead = self.playback_pending_frames +| self.dsp.queuedFrames();
+        if (self.audio_capture_enabled and (ahead >= self.audio_high_water_frames or
+            (self.audio_backpressured and ahead > self.audio_low_water_frames)))
+        {
             self.audio_backpressured = true;
             return runtime.StepResult.waitUntil(0, false);
         }
@@ -114,6 +123,9 @@ fn reset(context: *anyopaque) i32 {
     self.audio_prefill_released = false;
     self.audio_backpressured = false;
     self.transport_pending_bytes = 0;
+    self.playback_pending_frames = 0;
+    self.last_playback_frames = 0;
+    self.last_unconfirmed_frames = 0;
     self.source_finished = false;
     self.source_exit_code = 0;
     self.last_step_guest_ns = 0;
@@ -139,6 +151,7 @@ fn renderAudio(context: *anyopaque, out: []u8) i32 {
     if (result >= 0) {
         const source_frames = self.dsp.stats.frames_rendered -| rendered_before;
         self.transport_pending_bytes +|= source_frames * audio_frame_bytes;
+        self.playback_pending_frames +|= source_frames;
     }
     return result;
 }
@@ -148,6 +161,13 @@ fn audioFeedback(context: *anyopaque, feedback: runtime.AudioFeedback) bool {
     self.audio_feedback_calls +%= 1;
     const resolved = feedback.accepted_bytes +| feedback.suppressed_bytes +| feedback.discarded_bytes;
     self.transport_pending_bytes -|= resolved;
+    const played = feedback.playback_frames orelse self.last_playback_frames;
+    const consumed = played -| self.last_playback_frames;
+    const unconfirmed = feedback.unconfirmed_frames -| self.last_unconfirmed_frames;
+    self.last_playback_frames = played;
+    self.last_unconfirmed_frames = feedback.unconfirmed_frames;
+    const retired_frames = consumed +| unconfirmed +| ((feedback.suppressed_bytes +| feedback.discarded_bytes) / audio_frame_bytes);
+    self.playback_pending_frames -|= retired_frames;
     const unavailable = feedback.muted or switch (feedback.state) {
         .disabled, .degraded, .closed => true,
         .ready, .active => false,
@@ -158,12 +178,15 @@ fn audioFeedback(context: *anyopaque, feedback: runtime.AudioFeedback) bool {
         self.audio_capture_enabled = false;
         self.audio_prefill_released = false;
         self.transport_pending_bytes = 0;
+        self.playback_pending_frames = 0;
     } else if (!unavailable and !self.audio_capture_enabled and !self.closed) {
         self.dsp.beginCapture();
         self.audio_capture_enabled = true;
         self.audio_prefill_released = false;
     }
-    const wake = self.audio_backpressured and (resolved != 0 or unavailable);
+    const ahead = self.playback_pending_frames +| self.dsp.queuedFrames();
+    const wake = self.audio_backpressured and (unavailable or
+        (self.source_finished and resolved != 0) or (retired_frames != 0 and ahead <= self.audio_low_water_frames));
     if (wake) self.audio_backpressured = false;
     return wake;
 }

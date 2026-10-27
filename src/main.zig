@@ -286,6 +286,7 @@ noinline fn runProduct(app: *r4os.App) i32 {
             .quantum_frames = runtime_api.default_quantum_frames,
             .target_quanta = product_audio_target_quanta,
             .max_catchup_quanta = product_audio_max_catchup_quanta,
+            .continuous = true,
         },
         .queue_storage = audio_queue[0..],
         .scratch = audio_scratch[0..],

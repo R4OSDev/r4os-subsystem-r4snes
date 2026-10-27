@@ -192,3 +192,21 @@ reported work/Clock/state/frame/PCM fields. The explicit --check-scene path
 outputs qualification-only evidence with one stdout writer; measurement
 modes are unchanged. Current real KVM4 long product/report gates pass.
 Project evidence, benchmark and physical limits: Docs/Subsystems/SNESArchitecture.txt.50.
+
+0.87.53 — complete audio pipeline and device progress
+---------------------------------------------------
+R4SNES29 keeps transport ownership separate from playback backpressure.
+Accepted bytes retire the copied transport prefix; only known consumed frames,
+explicitly unconfirmed residue and intentional suppression/discard retire the
+whole audio pipeline. Its low/high thresholds are960/1920 canonical frames
+(20/40ms at48kHz/stereo/S16), including DSP and already accepted data. Empty
+continuous supply carries a fixed source deadline; explicit end remains idle.
+
+SDK101 retires completed requests after input/ready video and before source
+refill. Frequent progress queries cannot prevent buffered DSP data from entering
+the software queue. Pause/resume retains late consumption for the same guest;
+real guest reset/new capture excludes old progress. Source, service, stream,
+backend, output and reset identities remain distinct. Existing performance
+exports report actual optional consumption/DMA/backend/unknown quantities and
+queue context without turning accepted frames or guest time into playback.
+Detailed qualification and physical limits: Docs/Audio/PlaybackProgress.txt.
