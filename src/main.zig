@@ -313,78 +313,57 @@ noinline fn runProduct(app: *r4os.App) i32 {
     const exit_code = runtime.run(&sys, guest.driver(), runtime_host.driver());
     const runtime_state = runtime.state;
     const audio_degraded = runtime.audio.state == .degraded;
-    const runtime_stats = runtime.stats;
-    const audio_stats = runtime.audio.stats;
-    const guest_ns = if (e2e_trace.active) guest.effectiveGuestNanoseconds() else runtime.clock.guest_ns;
-    const machine = guest.machine.?;
-    const guest_cycles = machine.clock.master_cycles;
-    const master_hz = machine.clock.profile().master_hz;
-    const expected_cycles: u64 = @intCast((@as(u128, guest_ns) * master_hz) / std.time.ns_per_s);
-    const drift_cycles = if (guest_cycles >= expected_cycles) guest_cycles - expected_cycles else expected_cycles - guest_cycles;
-    const pending_cycles = machine.host_budget.pending_master_cycles;
-    const ppu_frames = machine.clock.frame;
-    const dsp_stats = machine.smp.dsp.stats;
-    const dsp_queued_frames = machine.smp.dsp.queuedFrames();
-    const maximum_step_gap_ns = guest.runtime_guest.maximum_step_gap_ns;
-    const controller_witness = @as(u16, machine.bus.wram[core.fixture_rom.controller_low_wram_index]) |
-        (@as(u16, machine.bus.wram[core.fixture_rom.controller_high_wram_index]) << 8);
-    const completion_seen = machine.bus.wram[core.fixture_rom.completion_wram_index] == core.fixture_rom.completion_witness_value;
-    const battery = guest.cartridge.?.board.battery;
-    const rtc = guest.save_session.?.rtc_record != null;
-    const save_bytes = guest.cartridge.?.sram_storage.len;
-    const identity = guest.cartridge.?.identity;
-    const guest_stats = guest.stats;
-    const published_frames = window.video.stats.published_frames;
+    const completion = core.e2e_completion.Snapshot.capture(e2e_trace.active, &guest, &runtime, &window);
     runtime.shutdown();
     const close_result = guest.close();
-    const persistence_stats = save_store.stats;
-    const save_files = persistenceFilesPresent(&files, &identity, save_bytes, rtc);
-    if (e2e_trace.active) {
+    if (completion) |snapshot| {
+        const persistence_stats = save_store.stats;
+        const save_files = snapshot.persistenceFilesPresent(&files);
         const expected_state: runtime_api.LifecycleState = switch (e2e_trace.expected_end) {
             .witness => .completed,
             .close => .closed,
             .reject_invalid, .reject_firmware => runtime_state,
         };
         const end_ok = runtime_state == expected_state and switch (e2e_trace.expected_end) {
-            .witness => completion_seen,
+            .witness => snapshot.completion_seen,
             .close => true,
             .reject_invalid, .reject_firmware => false,
         };
-        const persistence_ok = !battery or (save_files and persistence_stats.errors == 0 and persistence_stats.started != 0 and persistence_stats.completed != 0);
+        const persistence_ok = !snapshot.battery or (save_files and persistence_stats.errors == 0 and persistence_stats.started != 0 and persistence_stats.completed != 0);
         const e2e_ok = runtime.resources_closed and exit_code == 0 and end_ok and close_result == 0 and !guest.resourcesOpen() and
-            guest_ns == e2e_guest_duration_ns and guest_cycles != 0 and ppu_frames != 0 and published_frames != 0 and
-            drift_cycles <= product_host.slice_budget_master_cycles + core.machine.maximum_operation_overshoot_master_cycles and
-            pending_cycles <= product_host.slice_budget_master_cycles and
-            guest_stats.maximum_slice_grant <= product_host.slice_budget_master_cycles and
-            guest_stats.maximum_slice_execution <= product_host.slice_budget_master_cycles + core.machine.maximum_operation_overshoot_master_cycles and
-            controller_witness != 0 and runtime_stats.input_events != 0 and
-            audio_stats.writes != 0 and audio_stats.write_failures == 0 and
-            dsp_stats.frames_rendered != 0 and dsp_stats.frames_dropped == 0 and
-            dsp_stats.frames_rendered > dsp_stats.silence_frames and persistence_ok and !audio_degraded;
+            snapshot.guest_ns == e2e_guest_duration_ns and snapshot.guest_cycles != 0 and snapshot.ppu_frames != 0 and snapshot.published_frames != 0 and
+            snapshot.drift_cycles <= product_host.slice_budget_master_cycles + core.machine.maximum_operation_overshoot_master_cycles and
+            snapshot.pending_cycles <= product_host.slice_budget_master_cycles and
+            snapshot.guest_stats.maximum_slice_grant <= product_host.slice_budget_master_cycles and
+            snapshot.guest_stats.maximum_slice_execution <= product_host.slice_budget_master_cycles + core.machine.maximum_operation_overshoot_master_cycles and
+            snapshot.controller_witness != 0 and snapshot.runtime_stats.input_events != 0 and
+            snapshot.audio_stats.writes != 0 and snapshot.audio_stats.write_failures == 0 and
+            snapshot.dsp_stats.frames_rendered != 0 and snapshot.dsp_stats.frames_dropped == 0 and
+            snapshot.dsp_stats.frames_rendered > snapshot.dsp_stats.silence_frames and persistence_ok and !audio_degraded;
         if (!writeE2eRuntimeReport(
             &sys,
             e2e_trace,
             launch.guest_path,
             e2e_ok,
-            battery,
-            rtc,
+            snapshot.battery,
+            snapshot.rtc,
             save_files,
-            guest_cycles,
-            guest_ns,
-            drift_cycles,
-            pending_cycles,
-            master_hz,
-            ppu_frames,
-            runtime_stats,
-            audio_stats,
-            dsp_stats,
-            dsp_queued_frames,
-            maximum_step_gap_ns,
-            controller_witness,
-            completion_seen,
-            guest_stats,
+            snapshot.guest_cycles,
+            snapshot.guest_ns,
+            snapshot.drift_cycles,
+            snapshot.pending_cycles,
+            snapshot.master_hz,
+            snapshot.ppu_frames,
+            snapshot.runtime_stats,
+            snapshot.audio_stats,
+            snapshot.dsp_stats,
+            snapshot.dsp_queued_frames,
+            snapshot.maximum_step_gap_ns,
+            snapshot.controller_witness,
+            snapshot.completion_seen,
+            snapshot.guest_stats,
             persistence_stats,
-            published_frames,
+            snapshot.published_frames,
             close_result,
             runtime.resources_closed and !guest.resourcesOpen(),
         )) return error_e2e_trace;
@@ -581,31 +560,6 @@ fn writeE2eRuntimeReport(
     ) catch return false).len;
     const report = report_storage[0 .. prefix_len + suffix_len];
     return sys.fileWrite(path, report) == @as(i32, @intCast(report.len));
-}
-
-fn persistenceFilesPresent(
-    files: *const r4os.Files,
-    digest: *const [core.persistence.digest_bytes]u8,
-    ram_bytes: usize,
-    has_rtc: bool,
-) bool {
-    if (ram_bytes != 0) {
-        const path = core.persistence_r4os.dataPath(digest, .sram) catch return false;
-        const info = switch (files.info(path.asZ())) {
-            .value => |value| value,
-            .missing, .failure => return false,
-        };
-        if (info.is_dir != 0 or info.size != ram_bytes) return false;
-    }
-    if (has_rtc) {
-        const path = core.persistence_r4os.dataPath(digest, .rtc) catch return false;
-        const info = switch (files.info(path.asZ())) {
-            .value => |value| value,
-            .missing, .failure => return false,
-        };
-        if (info.is_dir != 0 or info.size != core.persistence.rtc_record_bytes) return false;
-    }
-    return true;
 }
 
 const ProductTimeContext = struct {

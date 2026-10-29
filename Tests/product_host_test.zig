@@ -144,6 +144,147 @@ fn makeRuntime() !runtime_api.Runtime {
     }, 1_000, 0, null);
 }
 
+test "E2E completion disabled skips diagnostic owners and still closes SAV RTC and failures" {
+    const allocator = std.testing.allocator;
+    const Kind = enum { rom_only, sram, battery_rtc };
+    const table: r4os.abi.R4XStartR4Sys = .{ .file_info = @intFromPtr(&DiagnosticProbe.info) };
+    const bundle: r4os.program.Bundle = .{ .raw = undefined, .sys = &table };
+    const files: r4os.Files = .{ .sys = r4os.r4sys.Context.init(&bundle) };
+    for ([_]Kind{ .rom_only, .sram, .battery_rtc }) |kind| {
+        for ([_]bool{ false, true }) |fail_writes| {
+            var store = FakeStore{};
+            var time = FakeTime{};
+            var guest = product.Guest.init(allocator, store.backend(), time.source(), 0x8841);
+            const image = if (kind == .sram)
+                try makeRom(allocator, "R4SNES TRACE OFF", true, 0x41)
+            else image: {
+                const fixture: core.fixture_rom.Kind = if (kind == .rom_only) .rom_only else .battery_rtc;
+                const bytes = try allocator.alloc(u8, core.fixture_rom.imageBytes(fixture));
+                try core.fixture_rom.build(bytes, fixture);
+                break :image bytes;
+            };
+            try guest.openOwned(.{ .image = image });
+            defer _ = guest.close();
+            if (kind != .rom_only) guest.cartridge.?.writeSram(0, 0x41);
+            var runtime = try makeRuntime();
+            // No Host fields may be read for a disabled report.
+            var window: r4os.subsystem_host.Host = undefined;
+            diagnostic_probe = .{};
+            const snapshot = core.e2e_completion.Snapshot.capture(false, &guest, &runtime, &window);
+            try std.testing.expect(snapshot == null);
+            store.fail_writes = fail_writes;
+            runtime.shutdown();
+            const result = guest.close();
+            if (snapshot) |value| _ = value.persistenceFilesPresent(&files);
+            try std.testing.expectEqual(@as(u32, 0), diagnostic_probe.calls);
+            try std.testing.expectEqual(if (kind != .rom_only and fail_writes) product.close_error_persistence else @as(i32, 0), result);
+            try std.testing.expect(!guest.resourcesOpen() and !store.owner);
+            try std.testing.expectEqual(@as(u64, 1), guest.stats.machine_destroys);
+            if (kind != .rom_only) {
+                try std.testing.expect(store.write_calls != 0 and store.release_calls == 1);
+                if (!fail_writes) {
+                    try std.testing.expectEqual(@as(u8, 0x41), store.sram[0]);
+                    try std.testing.expectEqual(kind == .battery_rtc, store.rtc_present);
+                    if (kind == .battery_rtc) _ = try core.persistence.decodeRtc(&store.rtc);
+                }
+            } else try std.testing.expectEqual(@as(u32, 0), store.write_calls);
+            // A normal close also needs no diagnostic dereference after teardown.
+            try std.testing.expect(core.e2e_completion.Snapshot.capture(false, &guest, &runtime, &window) == null);
+        }
+    }
+}
+
+const DiagnosticProbe = struct {
+    calls: u32 = 0,
+    sram_path: r4os.AbsoluteFilePath = undefined,
+    rtc_path: r4os.AbsoluteFilePath = undefined,
+    sram_bytes: u32 = 0,
+    fault_kind: ?core.persistence.FileKind = null,
+    fault: enum { missing, failure, directory, short, long } = .missing,
+
+    fn info(path_z: [*:0]const u8, out: *r4os.abi.FileInfo) callconv(.c) i32 {
+        const path = std.mem.span(path_z);
+        const kind: core.persistence.FileKind = if (std.mem.eql(u8, path, diagnostic_probe.sram_path.bytes()))
+            .sram
+        else if (std.mem.eql(u8, path, diagnostic_probe.rtc_path.bytes()))
+            .rtc
+        else
+            @panic("unexpected diagnostic identity or file path");
+        diagnostic_probe.calls += 1;
+        out.* = .{ .exists = 1, .size = if (kind == .sram) diagnostic_probe.sram_bytes else core.persistence.rtc_record_bytes };
+        if (diagnostic_probe.fault_kind == kind) switch (diagnostic_probe.fault) {
+            .missing => return 0,
+            .failure => return -9,
+            .directory => out.is_dir = 1,
+            .short => out.size -= 1,
+            .long => out.size += 1,
+        };
+        return 1;
+    }
+};
+
+var diagnostic_probe: DiagnosticProbe = .{};
+
+test "E2E completion snapshot survives real guest close and preserves exact file negatives" {
+    const allocator = std.testing.allocator;
+    var store = FakeStore{};
+    var time = FakeTime{};
+    var guest = product.Guest.init(allocator, store.backend(), time.source(), 0x8842);
+    const image = try allocator.alloc(u8, core.fixture_rom.imageBytes(.battery_rtc));
+    try core.fixture_rom.build(image, .battery_rtc);
+    try guest.openOwned(.{ .image = image });
+    defer _ = guest.close();
+    var runtime = try makeRuntime();
+    var host = IdleHost{};
+    _ = runtime.cycle(0, guest.driver(), host.driver());
+    _ = runtime.cycle(1, guest.driver(), host.driver());
+    const identity = guest.cartridge.?.identity;
+    const save_bytes = guest.cartridge.?.sram_storage.len;
+    guest.machine.?.bus.wram[core.fixture_rom.controller_low_wram_index] = 0x41;
+    guest.machine.?.bus.wram[core.fixture_rom.controller_high_wram_index] = 0x88;
+    guest.machine.?.bus.wram[core.fixture_rom.completion_wram_index] = core.fixture_rom.completion_witness_value;
+    var window: r4os.subsystem_host.Host = undefined;
+    window.video.stats.published_frames = 17;
+    var snapshot = core.e2e_completion.Snapshot.capture(true, &guest, &runtime, &window).?;
+    try std.testing.expect(snapshot.battery and snapshot.rtc and snapshot.completion_seen);
+    try std.testing.expectEqual(@as(u16, 0x8841), snapshot.controller_witness);
+    try std.testing.expectEqual(@as(u64, 17), snapshot.published_frames);
+    try std.testing.expect(snapshot.guest_cycles != 0 and snapshot.runtime_stats.slices != 0);
+    try std.testing.expectEqualSlices(u8, &identity, &snapshot.identity);
+    runtime.shutdown();
+    try std.testing.expectEqual(@as(i32, 0), guest.close());
+    try std.testing.expect(!guest.resourcesOpen() and !store.owner and store.rtc_present);
+
+    const table: r4os.abi.R4XStartR4Sys = .{ .file_info = @intFromPtr(&DiagnosticProbe.info) };
+    const bundle: r4os.program.Bundle = .{ .raw = undefined, .sys = &table };
+    const files: r4os.Files = .{ .sys = r4os.r4sys.Context.init(&bundle) };
+    diagnostic_probe = .{
+        .sram_path = try core.persistence_r4os.dataPath(&identity, .sram),
+        .rtc_path = try core.persistence_r4os.dataPath(&identity, .rtc),
+        .sram_bytes = @intCast(save_bytes),
+    };
+    for ([_]bool{ false, true }) |has_sram| {
+        for ([_]bool{ false, true }) |has_rtc| {
+            snapshot.save_bytes = if (has_sram) save_bytes else 0;
+            snapshot.rtc = has_rtc;
+            diagnostic_probe.calls = 0;
+            try std.testing.expect(snapshot.persistenceFilesPresent(&files));
+            try std.testing.expectEqual(@as(u32, @intFromBool(has_sram)) + @intFromBool(has_rtc), diagnostic_probe.calls);
+        }
+    }
+    for ([_]core.persistence.FileKind{ .sram, .rtc }) |kind| {
+        inline for (std.meta.tags(@FieldType(DiagnosticProbe, "fault"))) |fault| {
+            diagnostic_probe.fault_kind = kind;
+            diagnostic_probe.fault = fault;
+            diagnostic_probe.calls = 0;
+            try std.testing.expect(!snapshot.persistenceFilesPresent(&files));
+            try std.testing.expectEqual(@as(u32, if (kind == .sram) 1 else 2), diagnostic_probe.calls);
+        }
+    }
+    try std.testing.expectEqual(@as(u8, 0), store.sram[0]);
+    _ = try core.persistence.decodeRtc(&store.rtc);
+}
+
 test "private product guests isolate machine input video audio and bounded runtime state" {
     const allocator = std.testing.allocator;
     var store = FakeStore{};
