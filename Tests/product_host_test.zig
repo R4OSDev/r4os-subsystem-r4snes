@@ -406,6 +406,66 @@ test "invalid cartridge releases its owned source without opening persistence" {
     try std.testing.expectEqual(@as(i32, 0), guest.close());
 }
 
+test "realtime admission bounds NTSC and PAL debt without turning slowdown into future catchup" {
+    for ([_]u64{ core.timing.ntsc_master_hz, core.timing.pal_master_hz }) |hz| {
+        var clock = core.timing.RealtimeAdmission{};
+        try std.testing.expectEqual(@as(u64, 0), clock.advance(0, 0, hz, null));
+        const admitted = clock.advance(std.time.ns_per_s, 0, hz, null);
+        const cap = core.timing.RealtimeAdmission.maximum_debt_ns;
+        try std.testing.expect(admitted <= cap and admitted >= cap - 100);
+        try std.testing.expectEqual(std.time.ns_per_s, admitted + clock.slowdown_ns);
+        // No execution has freed room, even after another complete host second.
+        try std.testing.expectEqual(admitted, clock.advance(2 * std.time.ns_per_s, 0, hz, null));
+        try std.testing.expectEqual(2 * std.time.ns_per_s, clock.admitted_ns + clock.slowdown_ns);
+        const slowdown = clock.slowdown_ns;
+        const done: u64 = @intCast(@as(u128, admitted) * hz / std.time.ns_per_s);
+        const resumed = clock.advance(2 * std.time.ns_per_s + std.time.ns_per_ms, done, hz, null);
+        try std.testing.expectEqual(admitted + std.time.ns_per_ms, resumed);
+        try std.testing.expectEqual(slowdown, clock.slowdown_ns);
+        try std.testing.expectEqual(resumed, clock.advance(std.time.ns_per_s, done, hz, null));
+        try std.testing.expectEqual(@as(u64, 1), clock.regressions);
+    }
+}
+
+test "realtime admission keeps fixed work debt until executed and reset starts a new clock" {
+    var store = FakeStore{};
+    var time = FakeTime{};
+    var guest = product.Guest.init(std.testing.allocator, store.backend(), time.source(), 1);
+    try guest.openOwned(.{ .image = try makeRom(std.testing.allocator, "R4SNES ADMISSION", false, 0) });
+    defer _ = guest.close();
+    guest.useRealtimeAdmission();
+    // A disabled output removes only host PCM retention, not APU execution.
+    _ = guest.driver().audioFeedback(.{ .state = .disabled, .muted = false });
+    const target_ns = 60 * std.time.ns_per_ms;
+    try guest.setGuestTimeLimit(target_ns);
+    _ = guest.driver().step(product.slice_budget_master_cycles, 0);
+    var nominal: u64 = 0;
+    var turns: u32 = 0;
+    while (guest.effectiveGuestNanoseconds() < target_ns or guest.machine.?.host_budget.pending_master_cycles != 0) {
+        turns += 1;
+        try std.testing.expect(turns < 100);
+        nominal += 100 * std.time.ns_per_ms;
+        const result = guest.driver().step(product.slice_budget_master_cycles, nominal);
+        try std.testing.expect(result.status != .failed);
+        try std.testing.expect(guest.machine.?.host_budget.pending_master_cycles <=
+            @as(u128, core.timing.RealtimeAdmission.maximum_debt_ns) * core.timing.ntsc_master_hz / std.time.ns_per_s);
+    }
+    const expected_master = @as(u128, target_ns) * core.timing.ntsc_master_hz / std.time.ns_per_s;
+    try std.testing.expect(guest.machine.?.clock.master_cycles >= expected_master);
+    try std.testing.expect(guest.machine.?.clock.master_cycles - expected_master <= core.machine.maximum_operation_overshoot_master_cycles);
+    try std.testing.expect(guest.realtime_admission.?.slowdown_ns != 0);
+    try std.testing.expectEqual(nominal, guest.realtime_admission.?.admitted_ns + guest.realtime_admission.?.slowdown_ns + guest.realtime_admission.?.limit_held_ns);
+    // Extending the finite virtual target preserves every prior admitted clock.
+    try guest.setGuestTimeLimit(target_ns + std.time.ns_per_ms);
+    const previous_master = guest.machine.?.clock.master_cycles;
+    _ = guest.driver().step(product.slice_budget_master_cycles, nominal + std.time.ns_per_ms);
+    try std.testing.expect(guest.machine.?.clock.master_cycles > previous_master);
+    try std.testing.expectEqual(@as(i32, 0), guest.reset());
+    try std.testing.expectEqual(@as(u64, 0), guest.realtime_admission.?.admitted_ns);
+    try std.testing.expectEqual(@as(u64, 0), guest.realtime_admission.?.slowdown_ns);
+    try std.testing.expect(guest.realtime_admission.?.last_nominal_ns == null);
+}
+
 fn makeRom(allocator: std.mem.Allocator, title: []const u8, battery: bool, variant: u8) ![]u8 {
     const rom = try allocator.alloc(u8, 32 * 1024);
     @memset(rom, 0xea);

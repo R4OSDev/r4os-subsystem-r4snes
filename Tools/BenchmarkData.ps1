@@ -123,6 +123,11 @@ function Add-R4SnesWindowOutput {
   }
  }
  $Environment.window_output=Convert-R4SnesLossless $Output
+ if($Records[0].Contains('pacing_contract')){
+  $pacing=$Records[0].pacing_contract
+  foreach($record in $Records){if($record.pacing_contract -cne $pacing){throw 'Pacing contract changed between fixed batches'}}
+  $Environment.conditions.pacing=$pacing
+ }
  $Environment.global_desktop_presents=$Output.global_desktop_presents
  $Environment.conditions.viewport=$viewport
  $Environment.conditions.window_case=$Output.window_case

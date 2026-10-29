@@ -230,6 +230,7 @@ noinline fn runProduct(app: *r4os.App) i32 {
         }
         return shown;
     };
+    guest.useRealtimeAdmission();
     if (e2e_trace.active and (e2e_trace.expected_end == .witness or e2e_trace.expected_end == .close)) {
         guest.setGuestTimeLimit(e2e_guest_duration_ns) catch {
             _ = writeE2eFailure(&sys, e2e_trace, "time-limit", error.InvalidGuestTimeLimit, "none", 0);

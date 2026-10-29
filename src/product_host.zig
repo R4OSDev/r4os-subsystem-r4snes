@@ -16,6 +16,7 @@ const host_api = r4os.subsystem_host;
 const runtime_api = r4os.subsystem_runtime;
 
 pub const slice_budget_master_cycles: u32 = timing.maximum_host_slice_master_cycles;
+pub const realtime_pacing_contract = "snes-admission-40ms-audio-pending-tick1-v1";
 pub const idle_interval_ns: u64 = std.time.ns_per_ms;
 pub const close_error_persistence: i32 = -9740;
 pub const runtime_error_persistence: i32 = -9741;
@@ -146,6 +147,7 @@ pub const Guest = struct {
     completion_witness: ?CompletionWitness = null,
     guest_time_limit_ns: ?u64 = null,
     last_effective_guest_ns: u64 = 0,
+    realtime_admission: ?timing.RealtimeAdmission = null,
     stats: GuestStats = .{},
 
     pub fn init(
@@ -236,6 +238,14 @@ pub const Guest = struct {
         if (guest_nanoseconds == 0 or self.state != .running) return error.InvalidGuestTimeLimit;
         self.guest_time_limit_ns = guest_nanoseconds;
         self.last_effective_guest_ns = 0;
+    }
+
+    /// Select the interactive policy before the first machine slice. The
+    /// optional fixed-work limit then names admitted virtual time, not wall
+    /// time; reaching it still requires every corresponding guest clock.
+    pub fn useRealtimeAdmission(self: *Guest) void {
+        std.debug.assert(self.state == .running and self.machine.?.host_budget.paused);
+        self.realtime_admission = .{};
     }
 
     pub fn effectiveGuestNanoseconds(self: *const Guest) u64 {
@@ -342,6 +352,7 @@ pub const Guest = struct {
         self.runtime_guest_ready = true;
         self.focused = false;
         self.last_effective_guest_ns = 0;
+        if (self.realtime_admission != null) self.realtime_admission = .{};
         _ = host_adapter.applyInput(&replacement_machine.controllers, 0, .reset);
         if (self.presenter) |presenter| {
             self.video = replacement_video;
@@ -442,7 +453,12 @@ pub const Guest = struct {
         if (self.state != .running) return runtime_api.StepResult.fail(runtime_error_closed);
         const machine = self.machine orelse return runtime_api.StepResult.fail(runtime_error_closed);
         const cart = if (self.cartridge) |*value| value else return runtime_api.StepResult.fail(runtime_error_closed);
-        const effective_guest_ns = if (self.guest_time_limit_ns) |limit| @min(guest_now_ns, limit) else guest_now_ns;
+        const effective_guest_ns = if (self.realtime_admission) |*admission|
+            admission.advance(guest_now_ns, machine.clock.master_cycles, machine.clock.profile().master_hz, self.guest_time_limit_ns)
+        else if (self.guest_time_limit_ns) |limit|
+            @min(guest_now_ns, limit)
+        else
+            guest_now_ns;
         self.last_effective_guest_ns = effective_guest_ns;
         const result = machine.runHostSlice(cart, budget, effective_guest_ns);
         self.stats.slices +%= 1;

@@ -88,6 +88,45 @@ pub fn main(init: std.process.Init) !void {
     clock = 0;
     _ = profile.now();
     if (profile.clock_regressions != 1) return error.ProfileRegressionMissing;
+    // A deliberately slow interactive host must still execute the same full
+    // 250ms of guest work and produce the exact PCM/state as strict pacing.
+    const bounded = try init.gpa.create(core.machine.Machine);
+    defer init.gpa.destroy(bounded);
+    try core.machine.Machine.powerInPlace(bounded, 1, &cart, null);
+    defer bounded.close();
+    bounded.smp.dsp.beginCapture();
+    var admission = core.timing.RealtimeAdmission{};
+    _ = bounded.runHostSlice(&cart, 32_768, admission.advance(0, 0, core.timing.ntsc_master_hz, 250_000_000));
+    var bounded_pcm = std.crypto.hash.sha2.Sha256.init(.{});
+    var nominal: u64 = 0;
+    var turns: usize = 0;
+    while (admission.admitted_ns < 250_000_000 or bounded.host_budget.pending_master_cycles != 0) {
+        turns += 1;
+        if (turns > 1000) return error.AdmissionNoProgress;
+        nominal += 100_000_000;
+        const admitted = admission.advance(nominal, bounded.clock.master_cycles, core.timing.ntsc_master_hz, 250_000_000);
+        const result = bounded.runHostSlice(&cart, 32_768, admitted);
+        if (result.fault != null or bounded.host_budget.pending_master_cycles >
+            @as(u128, core.timing.RealtimeAdmission.maximum_debt_ns) * core.timing.ntsc_master_hz / std.time.ns_per_s)
+            return error.AdmissionDebtBound;
+        while (bounded.smp.dsp.queuedFrames() != 0) {
+            const count = bounded.smp.dsp.renderPcm(&pcm);
+            if (count <= 0) return error.AdmissionPcmStalled;
+            bounded_pcm.update(pcm[0..@intCast(count)]);
+        }
+    }
+    var bounded_digest: [32]u8 = undefined;
+    bounded_pcm.final(&bounded_digest);
+    if (admission.slowdown_ns == 0 or bounded.smp.dsp.stats.frames_dropped != 0 or
+        !std.mem.eql(u8, &expected_pcm, &bounded_digest) or
+        !std.mem.eql(u8, &machine.bus.wram, &bounded.bus.wram) or
+        !std.mem.eql(u8, &machine.smp.aram, &bounded.smp.aram) or
+        !std.mem.eql(u32, &machine.ppu.published_frame, &bounded.ppu.published_frame) or
+        machine.clock.master_cycles != bounded.clock.master_cycles or
+        machine.smp.cycles != bounded.smp.cycles or machine.cpu.pc != bounded.cpu.pc or
+        machine.ppu.frame_generation != bounded.ppu.frame_generation)
+        return error.AdmissionChangedGuestWork;
+    std.debug.print("R4SNES bounded admission: OK (40ms debt; exact strict master/WRAM/ARAM/frame/PCM under continuing host overload)\n", .{});
     machine.smp.beginTrace();
     try machine.smp.step();
     if (machine.smp.endTrace().len != 0 or machine.smp.trace_enabled)

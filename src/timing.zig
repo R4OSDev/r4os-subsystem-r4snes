@@ -119,6 +119,49 @@ pub const HostBudget = struct {
     }
 };
 
+/// Interactive time admission, before HostBudget creates any guest work.
+/// A slow host advances a slower virtual timeline instead of owing unlimited
+/// catch-up work. Already admitted CPU/DMA/PPU/APU clocks are never discarded.
+/// Fixed-work consumers may extend a virtual-time limit without rebasing this
+/// clock. The strict Machine/HostBudget contract remains independently usable.
+pub const RealtimeAdmission = struct {
+    pub const maximum_debt_ns: u64 = 40 * std.time.ns_per_ms;
+
+    last_nominal_ns: ?u64 = null,
+    admitted_ns: u64 = 0,
+    slowdown_ns: u64 = 0,
+    limit_held_ns: u64 = 0,
+    regressions: u64 = 0,
+
+    pub fn advance(self: *RealtimeAdmission, nominal_ns: u64, executed_master: u64, master_hz: u64, limit_ns: ?u64) u64 {
+        const previous = self.last_nominal_ns orelse {
+            self.last_nominal_ns = nominal_ns;
+            return self.admitted_ns;
+        };
+        if (nominal_ns < previous) {
+            self.regressions +|= 1;
+            return self.admitted_ns;
+        }
+        self.last_nominal_ns = nominal_ns;
+        const elapsed = nominal_ns - previous;
+        const requested = if (limit_ns) |limit| @min(elapsed, limit -| self.admitted_ns) else elapsed;
+        self.limit_held_ns +|= elapsed - requested;
+
+        // Relate the ceiling to actual executed clocks, including the small
+        // indivisible-operation credit. Integer rounding never raises the
+        // admitted debt above the declared region-specific bound.
+        const cap_master = @as(u128, maximum_debt_ns) * master_hz / nanoseconds_per_second;
+        const ceiling: u64 = @intCast(@min(
+            (@as(u128, executed_master) + cap_master) * nanoseconds_per_second / master_hz,
+            std.math.maxInt(u64),
+        ));
+        const accepted = @min(requested, ceiling -| self.admitted_ns);
+        self.admitted_ns +|= accepted;
+        self.slowdown_ns +|= requested - accepted;
+        return self.admitted_ns;
+    }
+};
+
 pub const Clock = struct {
     region: Region = .ntsc,
     master_cycles: u64 = 0,

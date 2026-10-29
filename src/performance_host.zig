@@ -76,6 +76,7 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
         var store = core.persistence_r4os.AsyncStore.init(files, allocator);
         var guest = product.Guest.init(allocator, store.backend(), .{ .context = &time, .now_fn = TimeSource.now }, 1);
         try guest.openOwned(.{ .image = image });
+        guest.useRealtimeAdmission();
         var guest_closed = false;
         defer if (!guest_closed) {
             _ = guest.close();
@@ -184,6 +185,9 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
             .viewport = window.video.currentViewport(),
             .assigned_runtime_ticks = cpu_ticks,
             .runtime_tick_hz = sys.monotonicHz(),
+            .pacing_contract = product.realtime_pacing_contract,
+            .pacing_scope = "Cumulative including warmup; limit names admitted virtual time. Slowdown is not completed guest work. All fixed guest clocks still execute. No wall-time input/display/audio guarantee.",
+            .realtime_admission = guest.realtime_admission,
             .batch_tasks = if (instrumented) @as(?tasks.Report, .{ .before = probe.task_before.view(), .after = task_after.view(), .delta_unavailable_reason = if (task_delta.reason == .none) null else task_delta.reason, .deltas = task_delta.values() }) else null,
             .host_counter_delta = if (instrumented) tasks.counters(video.HostStats, probe.host_before, window.stats) else null,
             .raster_counter_delta = if (instrumented) tasks.counters(video.PresentStats, probe.raster_before, window.video.stats) else null,
