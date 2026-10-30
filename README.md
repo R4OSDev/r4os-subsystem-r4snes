@@ -4,6 +4,12 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
+R4SNES 0.22.36 uses SDK 0.64.116. The shared runtime evaluates absolute
+guest/audio deadlines after guest, presentation and I/O work, immediately
+before waiting. Newly started retries retain their full interval. Core/DSP
+work, PCM generation, pause behavior and owned terminal Close remain unchanged.
+Qualification is recorded in the workspace Audio/README.txt, section 0.88.58.
+
 Version0.22.30 binds SDK0.64.102, whose general/discrete audio pump now
 retains active null PCM until explicit producer idle/stop. SNES already used
 the continuous path below; no core/DSP/clock or PCM-state contract changes.
