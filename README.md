@@ -4,7 +4,7 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-R4SNES 0.22.36 uses SDK 0.64.116. The shared runtime evaluates absolute
+R4SNES 0.22.37 uses SDK 0.64.125. The shared runtime evaluates absolute
 guest/audio deadlines after guest, presentation and I/O work, immediately
 before waiting. Newly started retries retain their full interval. Core/DSP
 work, PCM generation, pause behavior and owned terminal Close remain unchanged.
@@ -385,3 +385,9 @@ writer and old Desktop PERF forwarders are retired. This metadata correction
 requires SNES0.22.19; emulation, fixed v2 work, timers and references remain
 unchanged. Use the existing Benchmark.ps1 or SPECTRA BENCH SNES /WINDOW;
 native Core comparisons keep their independent host context.
+
+E2E reports in version0.22.37 also retain the actual terminal audio
+`last_error` as `audio_last_error`. It is read from the existing runtime
+state at report creation, without another clock, I/O/status probe or PCM-path
+measurement. It is the last error, not an attributed first-write receipt;
+a successful final Close does not by itself explain a prior write failure.

@@ -356,6 +356,7 @@ noinline fn runProduct(app: *r4os.App) i32 {
             snapshot.ppu_frames,
             snapshot.runtime_stats,
             snapshot.audio_stats,
+            runtime.audio.last_error,
             snapshot.dsp_stats,
             snapshot.dsp_queued_frames,
             snapshot.maximum_step_gap_ns,
@@ -484,6 +485,7 @@ fn writeE2eRuntimeReport(
     ppu_frames: u64,
     runtime_stats: runtime_api.RuntimeStats,
     audio_stats: runtime_api.AudioStats,
+    audio_last_error: i32,
     dsp_stats: core.sdsp.AudioStats,
     dsp_queued_frames: usize,
     maximum_step_gap_ns: u64,
@@ -502,7 +504,7 @@ fn writeE2eRuntimeReport(
     const non_silent_frames = dsp_stats.frames_rendered -| dsp_stats.silence_frames;
     const prefix_len = (std.fmt.bufPrint(
         report_storage[0..],
-        "R4SNES E2E runtime: {s} id={s} extension={s} end={s} battery={d} rtc={d} guest_ns={d} guest_cycles={d} master_hz={d} drift_cycles={d} pending_cycles={d} ppu_frames={d} slices={d} max_slice_grant={d} max_slice_execution={d} max_step_gap_ns={d} input={d} controller=0x{x:0>4} completion={d} frames={d} dropped_presents={d} audio_writes={d} audio_busy={d} audio_failures={d} audio_late={d} audio_discarded={d} audio_paused={d} audio_muted={d} audio_suppressed={d}",
+        "R4SNES E2E runtime: {s} id={s} extension={s} end={s} battery={d} rtc={d} guest_ns={d} guest_cycles={d} master_hz={d} drift_cycles={d} pending_cycles={d} ppu_frames={d} slices={d} max_slice_grant={d} max_slice_execution={d} max_step_gap_ns={d} input={d} controller=0x{x:0>4} completion={d} frames={d} dropped_presents={d} audio_writes={d} audio_busy={d} audio_failures={d} audio_late={d} audio_discarded={d} audio_paused={d} audio_muted={d} audio_suppressed={d} audio_last_error={d}",
         .{
             if (ok) "OK" else "FAILED",
             trace.id,
@@ -533,6 +535,7 @@ fn writeE2eRuntimeReport(
             audio_stats.paused_bytes,
             audio_stats.muted_bytes,
             audio_stats.suppressed_bytes,
+            audio_last_error,
         },
     ) catch return false).len;
     const suffix_len = (std.fmt.bufPrint(
