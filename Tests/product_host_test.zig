@@ -147,9 +147,11 @@ fn makeRuntime() !runtime_api.Runtime {
 test "E2E completion disabled skips diagnostic owners and still closes SAV RTC and failures" {
     const allocator = std.testing.allocator;
     const Kind = enum { rom_only, sram, battery_rtc };
-    const table: r4os.abi.R4XStartR4Sys = .{ .file_info = @intFromPtr(&DiagnosticProbe.info) };
-    const bundle: r4os.program.Bundle = .{ .raw = undefined, .sys = &table };
-    const files: r4os.Files = .{ .sys = r4os.r4sys.Context.init(&bundle) };
+    const table: r4os.platform2.abi.R4XStartR4Sys2 = .{ .file_metadata2 = @intFromPtr(&DiagnosticProbe.metadata) };
+    const imports = [_]r4os.abi.R4XStartImport{.{ .group_id = 1, .resolved_version = 2, .table = @intFromPtr(&table) }};
+    const start: r4os.platform2.abi.R4XStartContext2 = .{ .imports = @intFromPtr(&imports), .import_count = imports.len };
+    const platform = try r4os.platform2.Context.init(&start);
+    const files: r4os.Files = .{ .sys = r4os.r4sys.Context.fromProgram(.{ .generation2 = &platform }) };
     for ([_]Kind{ .rom_only, .sram, .battery_rtc }) |kind| {
         for ([_]bool{ false, true }) |fail_writes| {
             var store = FakeStore{};
@@ -198,11 +200,11 @@ const DiagnosticProbe = struct {
     calls: u32 = 0,
     sram_path: r4os.AbsoluteFilePath = undefined,
     rtc_path: r4os.AbsoluteFilePath = undefined,
-    sram_bytes: u32 = 0,
+    sram_bytes: u64 = 0,
     fault_kind: ?core.persistence.FileKind = null,
-    fault: enum { missing, failure, directory, short, long } = .missing,
+    fault: enum { missing, failure, directory, short, long, unknown_size } = .missing,
 
-    fn info(path_z: [*:0]const u8, out: *r4os.abi.FileInfo) callconv(.c) i32 {
+    fn metadata(path_z: [*:0]const u8, out: *r4os.abi.FileMetadata2) callconv(.c) i32 {
         const path = std.mem.span(path_z);
         const kind: core.persistence.FileKind = if (std.mem.eql(u8, path, diagnostic_probe.sram_path.bytes()))
             .sram
@@ -211,13 +213,18 @@ const DiagnosticProbe = struct {
         else
             @panic("unexpected diagnostic identity or file path");
         diagnostic_probe.calls += 1;
-        out.* = .{ .exists = 1, .size = if (kind == .sram) diagnostic_probe.sram_bytes else core.persistence.rtc_record_bytes };
+        out.* = .{
+            .byte_size = if (kind == .sram) diagnostic_probe.sram_bytes else core.persistence.rtc_record_bytes,
+            .flags = r4os.abi.file_metadata2_flag_exists | r4os.abi.file_metadata2_flag_byte_size_valid | r4os.abi.file_metadata2_flag_identity_valid,
+            .identity = .{ .mount_slot = 2, .mount_generation = 1, .namespace_generation = 1, .object_lo = 0x1_0000_0042 },
+        };
         if (diagnostic_probe.fault_kind == kind) switch (diagnostic_probe.fault) {
             .missing => return 0,
             .failure => return -9,
-            .directory => out.is_dir = 1,
-            .short => out.size -= 1,
-            .long => out.size += 1,
+            .directory => out.flags |= r4os.abi.file_metadata2_flag_directory,
+            .short => out.byte_size -= 1,
+            .long => out.byte_size += 1,
+            .unknown_size => out.flags &= ~r4os.abi.file_metadata2_flag_byte_size_valid,
         };
         return 1;
     }
@@ -255,9 +262,11 @@ test "E2E completion snapshot survives real guest close and preserves exact file
     try std.testing.expectEqual(@as(i32, 0), guest.close());
     try std.testing.expect(!guest.resourcesOpen() and !store.owner and store.rtc_present);
 
-    const table: r4os.abi.R4XStartR4Sys = .{ .file_info = @intFromPtr(&DiagnosticProbe.info) };
-    const bundle: r4os.program.Bundle = .{ .raw = undefined, .sys = &table };
-    const files: r4os.Files = .{ .sys = r4os.r4sys.Context.init(&bundle) };
+    const table: r4os.platform2.abi.R4XStartR4Sys2 = .{ .file_metadata2 = @intFromPtr(&DiagnosticProbe.metadata) };
+    const imports = [_]r4os.abi.R4XStartImport{.{ .group_id = 1, .resolved_version = 2, .table = @intFromPtr(&table) }};
+    const start: r4os.platform2.abi.R4XStartContext2 = .{ .imports = @intFromPtr(&imports), .import_count = imports.len };
+    const platform = try r4os.platform2.Context.init(&start);
+    const files: r4os.Files = .{ .sys = r4os.r4sys.Context.fromProgram(.{ .generation2 = &platform }) };
     diagnostic_probe = .{
         .sram_path = try core.persistence_r4os.dataPath(&identity, .sram),
         .rtc_path = try core.persistence_r4os.dataPath(&identity, .rtc),
@@ -272,6 +281,16 @@ test "E2E completion snapshot survives real guest close and preserves exact file
             try std.testing.expectEqual(@as(u32, @intFromBool(has_sram)) + @intFromBool(has_rtc), diagnostic_probe.calls);
         }
     }
+    // Canonical hash names and backend identities cannot be narrowed through
+    // FileInfo. Keep the exact u64 size and every original rejection below.
+    const save_path = diagnostic_probe.sram_path.bytes();
+    const basename = save_path[(std.mem.lastIndexOfScalar(u8, save_path, '\\') orelse unreachable) + 1 ..];
+    try std.testing.expect(basename.len > 64);
+    snapshot.save_bytes = @as(usize, std.math.maxInt(u32)) + 4096;
+    diagnostic_probe.sram_bytes = snapshot.save_bytes;
+    try std.testing.expect(snapshot.persistenceFilesPresent(&files));
+    snapshot.save_bytes = save_bytes;
+    diagnostic_probe.sram_bytes = save_bytes;
     for ([_]core.persistence.FileKind{ .sram, .rtc }) |kind| {
         inline for (std.meta.tags(@FieldType(DiagnosticProbe, "fault"))) |fault| {
             diagnostic_probe.fault_kind = kind;

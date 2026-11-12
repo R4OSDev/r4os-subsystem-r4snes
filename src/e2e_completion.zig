@@ -69,19 +69,23 @@ pub const Snapshot = struct {
     pub fn persistenceFilesPresent(self: *const Snapshot, files: *const r4os.Files) bool {
         if (self.save_bytes != 0) {
             const path = persistence_r4os.dataPath(&self.identity, .sram) catch return false;
-            const info = switch (files.info(path.asZ())) {
-                .value => |value| value,
+            const info = switch (files.metadata(path.asZ())) {
+                .found => |value| value,
                 .missing, .failure => return false,
             };
-            if (info.is_dir != 0 or info.size != self.save_bytes) return false;
+            if (info.flags & r4os.abi.file_metadata2_flag_directory != 0 or
+                info.flags & r4os.abi.file_metadata2_flag_byte_size_valid == 0 or
+                info.byte_size != self.save_bytes) return false;
         }
         if (self.rtc) {
             const path = persistence_r4os.dataPath(&self.identity, .rtc) catch return false;
-            const info = switch (files.info(path.asZ())) {
-                .value => |value| value,
+            const info = switch (files.metadata(path.asZ())) {
+                .found => |value| value,
                 .missing, .failure => return false,
             };
-            if (info.is_dir != 0 or info.size != persistence.rtc_record_bytes) return false;
+            if (info.flags & r4os.abi.file_metadata2_flag_directory != 0 or
+                info.flags & r4os.abi.file_metadata2_flag_byte_size_valid == 0 or
+                info.byte_size != persistence.rtc_record_bytes) return false;
         }
         return true;
     }
