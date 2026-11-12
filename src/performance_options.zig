@@ -1,4 +1,5 @@
 const std = @import("std");
+const r4os = @import("r4os");
 
 pub const Region = enum { ntsc, pal };
 pub const Mode = enum { normal, detail, paired };
@@ -22,21 +23,17 @@ pub const Options = struct {
     }
 };
 
-pub fn command(text: []const u8, name: []const u8) bool {
-    return text.len >= name.len and std.ascii.eqlIgnoreCase(text[0..name.len], name) and
-        (text.len == name.len or std.ascii.isWhitespace(text[name.len]));
-}
-
 pub fn guest(text: []const u8) !Options {
     var options = Options{};
-    var words = std.mem.tokenizeAny(u8, text, " \t\r\n");
-    _ = words.next();
-    while (words.next()) |word| {
-        if (std.ascii.eqlIgnoreCase(word, "/PAL")) options.region = .pal else
-        if (std.ascii.eqlIgnoreCase(word, "/NTSC")) options.region = .ntsc else
-        if (std.ascii.eqlIgnoreCase(word, "/NORMAL")) options.mode = .normal else
-        if (std.ascii.eqlIgnoreCase(word, "/DETAIL")) options.mode = .detail else
-        if (std.ascii.eqlIgnoreCase(word, "/PAIRED")) options.mode = .paired else return error.InvalidBenchmarkOption;
+    var failure: r4os.arguments.Failure = .{};
+    var cursor = try r4os.arguments.ArgCursor.init(text, .{}, &failure);
+    _ = (try cursor.next()) orelse return error.InvalidBenchmarkOption;
+    while (try cursor.next()) |word| {
+        if (try word.switchIs(text, "PAL")) options.region = .pal else
+        if (try word.switchIs(text, "NTSC")) options.region = .ntsc else
+        if (try word.switchIs(text, "NORMAL")) options.mode = .normal else
+        if (try word.switchIs(text, "DETAIL")) options.mode = .detail else
+        if (try word.switchIs(text, "PAIRED")) options.mode = .paired else return error.InvalidBenchmarkOption;
     }
     return options;
 }

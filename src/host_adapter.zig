@@ -3,6 +3,15 @@ const controller = @import("controller.zig");
 const ppu = @import("ppu.zig");
 
 const video_host = r4os.subsystem_host;
+const std = @import("std");
+
+pub fn copyBackend(draw: *const r4os.r4draw.Context) video_host.Backend {
+    var backend = video_host.Backend.fromDraw(draw);
+    // The shared bridge ends its source loan on synchronous copy return.
+    // Retained shared-raster/GPU transports require a different receipt.
+    backend.supports_shared_raster = false;
+    return backend;
+}
 
 pub const Binding = struct {
     usage: u32,
@@ -55,76 +64,143 @@ pub fn applyInput(ports: *controller.Ports, usage: u32, kind: InputKind) bool {
     return true;
 }
 
-pub const VideoState = enum {
-    unbound,
-    running,
-    paused,
-    closed,
-};
-
-/// Generation-safe XRGB32 bridge. The PPU owns and packs complete frames;
-/// the shared subsystem host owns scaling, bounded raster tiles and the
-/// letterbox viewport. Neither side can observe a partially rendered field.
+/// Generation-checked bridge between the private, complete PPU published_frame
+/// and the shared window presenter. The bridge never exposes `working_frame`.
 pub const VideoAdapter = struct {
     source: ?*ppu.Ppu = null,
-    binding_generation: u64 = 0,
-    observed_revision: u64 = 0,
-    state: VideoState = .unbound,
+    bridge: ?r4os.published_frame.Bridge = null,
+    ended: bool = false,
 
-    pub fn bind(self: *VideoAdapter, source: *ppu.Ppu, presenter: *video_host.Presenter, generation: u64) !void {
-        if (self.state == .closed) return error.Closed;
-        if (generation == 0 or generation <= self.binding_generation) return error.StaleGeneration;
+    pub fn bind(
+        self: *VideoAdapter,
+        source: *ppu.Ppu,
+        presenter: *video_host.Presenter,
+        generation: u64,
+        backend: video_host.Backend,
+    ) !void {
+        if (self.ended) return error.Closed;
+        if (self.bridge == null) {
+            var bridge: r4os.published_frame.Bridge = undefined;
+            const rc = r4os.published_frame.Bridge.init(backend, presenter.scratch, &bridge);
+            if (rc != 0) return error.UnsupportedPresentation;
+            self.bridge = bridge;
+        }
+        const rc = self.bridge.?.bind(generation);
+        if (rc == r4os.published_frame.stale_generation) return error.StaleGeneration;
+        if (rc != 0) return error.Busy;
         const info = source.frameInfo();
         try presenter.setSurface(try video_host.Surface.initXrgb32(
-            source.published_frame[0..],
-            info.width,
-            info.height,
-        ));
+            source.published_frame[0..], info.width, info.height));
         self.source = source;
-        self.binding_generation = generation;
-        self.observed_revision = source.frame_generation;
-        self.state = .running;
         _ = source.takeDamage();
     }
 
+    /// Observation does not consume damage or extend a source loan. The
+    /// actual complete-frame loan is acquired and released within presentTo.
     pub fn syncVideo(self: *VideoAdapter, presenter: *video_host.Presenter) bool {
         if (!self.canPresent()) return false;
         const source = self.source orelse return false;
-        const damage = source.takeDamage() orelse return false;
-        if (damage.revision <= self.observed_revision) return false;
         const info = source.frameInfo();
-        if (presenter.surface.width != info.width or presenter.surface.height != info.height) {
-            presenter.setSurface(video_host.Surface.initXrgb32(
-                source.published_frame[0..],
-                info.width,
-                info.height,
-            ) catch return false) catch return false;
-        } else {
-            presenter.invalidate(.{
-                .x = damage.x,
-                .y = damage.y,
-                .w = damage.width,
-                .h = damage.height,
-            });
+        if (presenter.surface.width != info.width or presenter.surface.height != info.height)
+            presenter.setSurface(video_host.Surface.initXrgb32(source.published_frame[0..], info.width, info.height) catch return false) catch return false;
+        return source.damage_pending;
+    }
+
+    pub fn invalidate(self: *VideoAdapter) void {
+        if (self.bridge) |*bridge| bridge.presenter.invalidateAll();
+    }
+
+    pub fn invalidateClient(self: *VideoAdapter, rect: video_host.Rect) void {
+        if (self.bridge) |*bridge| bridge.presenter.invalidateClient(rect);
+    }
+
+    pub fn presentTo(self: *VideoAdapter, presenter: *video_host.Presenter, width: i32, height: i32, overlay: ?video_host.FrameOverlay) video_host.PresentResult {
+        const frame = r4os.published_frame;
+        if (!self.canPresent()) return .{ .failure = frame.closed };
+        const source = self.source.?;
+        const bridge = &self.bridge.?;
+        // The initialized reset frame is complete revision1; working pixels
+        // remain outside the publication at every native geometry.
+        const revision = std.math.add(u64, source.frame_generation, 1) catch return .{ .failure = frame.exhausted };
+        const info = source.frameInfo();
+        var lease: frame.Lease = .{
+            .pixels = .{ .address = @intFromPtr(&source.published_frame), .length = source.published_frame.len * @sizeOf(u32) },
+            .binding_generation = bridge.generation,
+            .revision = revision,
+            .format = frame.format_xrgb32,
+            .width = info.width,
+            .height = info.height,
+            .stride_bytes = info.width * @sizeOf(u32),
+            .flags = frame.published,
+        };
+        if (bridge.revision != 0 and bridge.width == info.width and bridge.height == info.height) {
+            lease.damage_kind = frame.damage_none;
+            lease.damage_base_revision = bridge.revision;
+            if (source.damage_pending and revision != bridge.revision) {
+                lease.damage_kind = frame.damage_rect;
+                lease.damage = .{
+                    .x = source.damage_min_x,
+                    .y = source.damage_min_y,
+                    .w = @as(u32, source.damage_max_x) - source.damage_min_x + 1,
+                    .h = @as(u32, source.damage_max_y) - source.damage_min_y + 1,
+                };
+            }
         }
-        self.observed_revision = damage.revision;
-        return true;
+        var acquired: frame.Acquisition = undefined;
+        const synced = bridge.syncPublished(lease, &acquired);
+        if (synced != 0) return .{ .failure = synced };
+        // No emulator step, reset or allocation release can occur while the
+        // synchronous CPU-copy backend borrows this immutable frame span.
+        defer {
+            if (bridge.active_ticket == acquired.ticket) {
+                const retired = bridge.release(acquired.ticket);
+                std.debug.assert(retired == 0);
+            } else std.debug.assert(bridge.state == frame.ended and bridge.active_ticket == 0);
+        }
+        _ = source.takeDamage();
+        var result: frame.Presentation = undefined;
+        const rc = bridge.presentWithOverlay(acquired.ticket, width, height, &result, overlay);
+        if (rc != 0) return .{ .failure = rc };
+        // Host's presenter retains only the owned source view for input
+        // geometry; all publication and damage state belongs to the Bridge.
+        presenter.stats = bridge.presenter.stats;
+        const viewport = video_host.Viewport{
+            .x = result.viewport.x,
+            .y = result.viewport.y,
+            .w = result.viewport.width,
+            .h = result.viewport.height,
+            .guest_w = result.viewport.source_width,
+            .guest_h = result.viewport.source_height,
+            .integer_scale = result.viewport.integer_scale,
+        };
+        return switch (result.kind) {
+            0 => .unchanged,
+            1 => .hidden,
+            2 => .{ .presented = .{ .mode = @enumFromInt(result.mode), .viewport = viewport,
+                .damage_regions = result.damage_regions, .raster_blocks = result.raster_blocks,
+                .sampled_pixels = result.sampled_pixels } },
+            else => .{ .failure = result.error_code },
+        };
     }
 
     pub fn pause(self: *VideoAdapter) void {
-        if (self.state == .running) self.state = .paused;
+        if (self.bridge) |*bridge| _ = bridge.pause(true);
     }
 
     pub fn resumeRunning(self: *VideoAdapter) void {
-        if (self.state == .paused) self.state = .running;
+        if (self.bridge) |*bridge| _ = bridge.pause(false);
     }
 
     pub fn close(self: *VideoAdapter) void {
+        if (self.bridge) |*bridge| {
+            const retired = bridge.close();
+            std.debug.assert(retired == 0);
+        }
         self.source = null;
-        self.state = .closed;
+        self.ended = true;
     }
 
     pub fn canPresent(self: *const VideoAdapter) bool {
-        return self.source != null and (self.state == .running or self.state == .paused);
+        return self.source != null and !self.ended;
     }
 };

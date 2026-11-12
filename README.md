@@ -4,7 +4,15 @@ R4SNES is the public, original Zig implementation of the Super Nintendo
 subsystem for R4OS. It is a userland GUI R4X with the stable subsystem ID
 `r4os.snes` and guest format `snes.cartridge` for `.sfc` and `.smc` files.
 
-R4SNES 0.22.37 uses SDK 0.64.125. The shared runtime evaluates absolute
+R4SNES 0.22.40 uses the Generation 2 platform contract and SDK 0.64.210.
+Native diagnostic switches are parsed separately from the opaque R4SUBSYS1
+launch record. ROM and firmware reads use checked full metadata and bounded
+exact reads; benchmark clocks retain their actual source and generation.
+The shared published-frame bridge owns copy presentation, damage, pause and
+source retirement. The FPS overlay runs inside the same copy transaction.
+SNES core/DSP, audio scheduling and persistence formats remain unchanged.
+
+The shared runtime evaluates absolute
 guest/audio deadlines after guest, presentation and I/O work, immediately
 before waiting. Newly started retries retain their full interval. Core/DSP
 work, PCM generation, pause behavior and owned terminal Close remain unchanged.

@@ -316,8 +316,12 @@ test "private product guests isolate machine input video audio and bounded runti
     const surface = try first.initialSurface();
     var raster_scratch: [r4os.subsystem_host.tile_max_pixels]u32 = undefined;
     var presenter = try r4os.subsystem_host.Presenter.init(surface, raster_scratch[0..]);
-    try first.attachVideo(&presenter);
-    const first_video_generation = first.video.binding_generation;
+    // Binding/reset proof only; rendering is exercised by the existing video backend.
+    var draw = r4os.r4draw.Context.fromProgram(.{});
+    var backend = core.host_adapter.copyBackend(&draw);
+    backend.available = true;
+    try first.attachVideo(&presenter, backend);
+    const first_video_generation = first.video.bridge.?.generation;
     _ = first.driver().audioFeedback(.{ .state = .degraded, .muted = false });
     try std.testing.expect(!first.machine.?.smp.dsp.capture_enabled);
     _ = first.driver().audioFeedback(.{ .state = .ready, .muted = false });
@@ -355,7 +359,7 @@ test "private product guests isolate machine input video audio and bounded runti
     const generation = first.generation;
     first_runtime.request(.reset, tick + 102, first.driver());
     try std.testing.expectEqual(generation + 1, first.generation);
-    try std.testing.expectEqual(first_video_generation + 1, first.video.binding_generation);
+    try std.testing.expectEqual(first_video_generation + 1, first.video.bridge.?.generation);
     try std.testing.expectEqual(@as(u8, 0), first.machine.?.bus.wram[1]);
     try std.testing.expectEqual(@as(usize, 0), first.machine.?.smp.dsp.queuedFrames());
     try std.testing.expectEqual(
@@ -515,14 +519,17 @@ test "borrowed ROM reset keeps one source and failed preparation preserves the r
     store.fail_writes = false;
     var scratch: [r4os.subsystem_host.tile_max_pixels]u32 = undefined;
     var presenter = try r4os.subsystem_host.Presenter.init(try guest.initialSurface(), &scratch);
-    try guest.attachVideo(&presenter);
-    guest.video.binding_generation = guest.generation + 1;
+    var draw = r4os.r4draw.Context.fromProgram(.{});
+    var backend = core.host_adapter.copyBackend(&draw);
+    backend.available = true;
+    try guest.attachVideo(&presenter, backend);
+    guest.video.bridge.?.generation = guest.generation + 1;
     const old_pixels = presenter.surface.xrgb32Pixels().?.ptr;
     try std.testing.expectEqual(product.reset_error_video, guest.reset());
     try std.testing.expectEqual(machine, guest.machine.?);
     try std.testing.expectEqual(old_pixels, presenter.surface.xrgb32Pixels().?.ptr);
     try std.testing.expect(guest.runtime_guest_ready and store.owner);
-    guest.video.binding_generation = guest.generation;
+    guest.video.bridge.?.generation = guest.generation;
     const before = allocations.allocated_bytes;
     const fresh_mutable_bytes = guest.cartridge.?.sram_storage.len + @sizeOf(core.machine.Machine);
     try std.testing.expectEqual(@as(i32, 0), guest.reset());

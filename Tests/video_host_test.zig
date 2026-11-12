@@ -10,6 +10,10 @@ const FakeBackend = struct {
     commits: u32 = 0,
     rasters: u32 = 0,
     invalid_raster: bool = false,
+    in_frame: bool = false,
+    overlays: u32 = 0,
+    overlay_error: i32 = 0,
+    cancels: u32 = 0,
 
     fn backend(self: *FakeBackend) host.Backend {
         return .{
@@ -31,11 +35,13 @@ const FakeBackend = struct {
 
     fn beginFull(context: *anyopaque) i32 {
         state(context).full_begins += 1;
+        state(context).in_frame = true;
         return 0;
     }
 
     fn beginDamage(context: *anyopaque, _: []const r4os.abi.DisplayDamageRect) i32 {
         state(context).damage_begins += 1;
+        state(context).in_frame = true;
         return 0;
     }
 
@@ -60,11 +66,20 @@ const FakeBackend = struct {
 
     fn commit(context: *anyopaque) i32 {
         state(context).commits += 1;
+        state(context).in_frame = false;
         return 0;
     }
 
-    fn cancel(_: *anyopaque) i32 {
+    fn cancel(context: *anyopaque) i32 {
+        state(context).cancels += 1;
+        state(context).in_frame = false;
         return 0;
+    }
+    fn appendOverlay(context: *anyopaque) i32 {
+        const self = state(context);
+        if (!self.in_frame) return -201;
+        self.overlays += 1;
+        return self.overlay_error;
     }
 };
 
@@ -75,22 +90,42 @@ test "SNES video bridge preserves native geometry complete generations and bound
     var scratch: [host.tile_max_pixels]u32 = undefined;
     var presenter = try host.Presenter.init(try host.Surface.initXrgb32(placeholder[0..], 1, 1), scratch[0..]);
     var adapter: core.host_adapter.VideoAdapter = .{};
-    try adapter.bind(&display, &presenter, 1);
+    var backend: FakeBackend = .{};
+    try adapter.bind(&display, &presenter, 1, backend.backend());
     try std.testing.expectEqual(@as(u32, 256), presenter.surface.width);
     try std.testing.expectEqual(@as(u32, 224), presenter.surface.height);
     try std.testing.expectEqual(host.PixelFormat.xrgb32, presenter.surface.format());
     try std.testing.expectEqual(@intFromPtr(&display.published_frame[0]), @intFromPtr(presenter.surface.xrgb32Pixels().?.ptr));
     try std.testing.expect(@intFromPtr(&display.working_frame[0]) != @intFromPtr(presenter.surface.xrgb32Pixels().?.ptr));
 
-    var backend: FakeBackend = .{};
-    const first = presenter.presentTo(backend.backend(), 512, 448);
+    const first = adapter.presentTo(&presenter, 512, 448, null);
     switch (first) {
         .presented => |info| try std.testing.expectEqual(host.PresentMode.full, info.mode),
         else => return error.UnexpectedPresentResult,
     }
     try std.testing.expect(!backend.invalid_raster);
     try std.testing.expect(!adapter.syncVideo(&presenter));
-    try std.testing.expect(presenter.presentTo(backend.backend(), 512, 448) == .unchanged);
+    try std.testing.expect(adapter.presentTo(&presenter, 512, 448, null) == .unchanged);
+    try std.testing.expectEqual(@as(u64, 0), adapter.bridge.?.active_ticket);
+    try std.testing.expectEqual(@as(usize, 0), adapter.bridge.?.frame.pixels.length);
+    display.working_frame[0] = 0xffffffff;
+    try std.testing.expect(adapter.presentTo(&presenter, 512, 448, null) == .unchanged);
+
+
+    const overlay = host.FrameOverlay{ .context = &backend, .append_fn = FakeBackend.appendOverlay };
+    adapter.invalidateClient(.{ .x = 0, .y = 0, .w = 20, .h = 20 });
+    try std.testing.expect(adapter.presentTo(&presenter, 512, 448, overlay) == .presented);
+    try std.testing.expectEqual(@as(u32, 1), backend.overlays);
+    try std.testing.expect(!backend.in_frame);
+    backend.overlay_error = -713;
+    adapter.invalidateClient(.{ .x = 0, .y = 0, .w = 20, .h = 20 });
+    try std.testing.expectEqual(@as(i32, -713), adapter.presentTo(&presenter, 512, 448, overlay).failure);
+    try std.testing.expectEqual(@as(u32, 1), backend.cancels);
+    try std.testing.expectEqual(@as(u64, 0), adapter.bridge.?.active_ticket);
+    try std.testing.expectEqual(@as(usize, 0), adapter.bridge.?.frame.pixels.length);
+    backend.overlay_error = 0;
+    try std.testing.expect(adapter.presentTo(&presenter, 512, 448, overlay) == .presented);
+    try std.testing.expect(adapter.presentTo(&presenter, 512, 448, overlay) == .unchanged);
 
     display.published_frame[12 * 256 + 23] = 0xffff0000;
     display.frame_generation += 1;
@@ -100,7 +135,7 @@ test "SNES video bridge preserves native geometry complete generations and bound
     display.damage_min_y = 12;
     display.damage_max_y = 12;
     try std.testing.expect(adapter.syncVideo(&presenter));
-    const damaged = presenter.presentTo(backend.backend(), 512, 448);
+    const damaged = adapter.presentTo(&presenter, 512, 448, null);
     switch (damaged) {
         .presented => |info| try std.testing.expectEqual(host.PresentMode.damage, info.mode),
         else => return error.UnexpectedPresentResult,
@@ -114,7 +149,7 @@ test "SNES video bridge preserves native geometry complete generations and bound
     try std.testing.expect(adapter.syncVideo(&presenter));
     try std.testing.expectEqual(@as(u32, 512), presenter.surface.width);
     try std.testing.expectEqual(@as(u32, 478), presenter.surface.height);
-    const geometry = presenter.presentTo(backend.backend(), 900, 700);
+    const geometry = adapter.presentTo(&presenter, 900, 700, null);
     switch (geometry) {
         .presented => |info| {
             try std.testing.expectEqual(host.PresentMode.full, info.mode);
@@ -136,7 +171,8 @@ test "SNES video pause reset rebind and close reject partial or stale generation
         scratch[0..],
     );
     var adapter: core.host_adapter.VideoAdapter = .{};
-    try adapter.bind(&first_display, &presenter, 1);
+    var backend: FakeBackend = .{};
+    try adapter.bind(&first_display, &presenter, 1, backend.backend());
 
     adapter.pause();
     first_display.forced_blank = false;
@@ -147,12 +183,22 @@ test "SNES video pause reset rebind and close reject partial or stale generation
     try std.testing.expect(adapter.syncVideo(&presenter));
     adapter.resumeRunning();
 
-    try adapter.bind(&second_display, &presenter, 2);
+    try adapter.bind(&second_display, &presenter, 2, backend.backend());
     try std.testing.expectEqual(@intFromPtr(&second_display.published_frame[0]), @intFromPtr(presenter.surface.xrgb32Pixels().?.ptr));
-    try std.testing.expectError(error.StaleGeneration, adapter.bind(&first_display, &presenter, 1));
+    try std.testing.expectError(error.StaleGeneration, adapter.bind(&first_display, &presenter, 1, backend.backend()));
     adapter.close();
     adapter.close();
     try std.testing.expect(!adapter.canPresent());
     try std.testing.expect(!adapter.syncVideo(&presenter));
-    try std.testing.expectError(error.Closed, adapter.bind(&first_display, &presenter, 3));
+    try std.testing.expectError(error.Closed, adapter.bind(&first_display, &presenter, 3, backend.backend()));
+}
+
+
+test "SNES native diagnostics remain outside opaque guest arguments" {
+    const launch = core.native_launch;
+    try std.testing.expectEqual(launch.Diagnostic.host, launch.diagnostic(" /HOSTTEST "));
+    try std.testing.expectEqual(launch.Diagnostic.performance, launch.diagnostic("/PERFTEST /PAL /DETAIL"));
+    try std.testing.expectEqual(launch.Diagnostic.product, launch.diagnostic("/HOSTTEST-extra"));
+    try std.testing.expectEqual(launch.Diagnostic.product, launch.diagnostic("/HOSTTEST trailing"));
+    try std.testing.expectEqual(launch.Diagnostic.product, launch.diagnostic("R4SUBSYS1\n/PERSISTTEST /HOSTTEST /PERFTEST"));
 }

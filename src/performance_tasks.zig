@@ -66,7 +66,10 @@ fn row(identity: a.ProgramTaskSnapshot, performance: a.ProgramTaskPerformanceInf
 pub const Live = struct {
     sys: r.r4sys.Context,
     dev: ?r.r4dev.Context,
-    pub fn now(self: *Live) ?u64 { return self.sys.monotonicNanoseconds(); }
+    pub fn now(self: *Live) ?u64 {
+        const sample = self.sys.base.clockSampleChecked() catch return null;
+        return sample.instant_ns;
+    }
     pub fn valid(self: *Live, owner: a.ProgramProcessHandle) bool {
         var info: a.ProgramInstanceInfo = .{};
         return self.sys.programHandleStatus(&owner, &info) == a.program_handle_ok and info.id == owner.instance_id and info.state != @intFromEnum(a.ProgramInstanceState.done);

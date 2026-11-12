@@ -41,7 +41,7 @@ follows:
 - `persistence_r4os.zig`: thin configuration of the SDK's compiled-in lease,
   serial-worker and atomic recovery mechanism for the canonical SNES tree.
 - `host_adapter.zig`: R4OS physical-key mapping and generation-safe XRGB32
-  bridge into `r4os.subsystem_host`.
+  publication through the SDK's `published_frame.Bridge`.
 - `runtime_adapter.zig`: bounded composition of the machine stepper and S-DSP
   queue with `r4os.subsystem_runtime`; it owns no guest clock or backend.
 - `timing.zig`: pause-correct host-time conversion into region-specific
@@ -70,6 +70,19 @@ mosaic, VMAIN, sprites and active-display register effects remain private to
 that owner. Complete changed frames are packed as native XRGB32 at 256/512 by
 224/239/448/478; unchanged output does not advance the generation. The shared
 SDK alone scales, letterboxes and splits damage into at most 128x128 rasters.
+
+The Generation 2 application receives its native start context through App2.
+Only the PPU's complete published buffer is lent to the SDK bridge, for the
+duration of one synchronous presentation. Geometry changes force full damage;
+later same-geometry publications keep their bounded damage. The optional FPS
+overlay executes before commit, while the original source is still borrowed.
+No shared raster or GPU fence is assumed. Reset binds the new machine before
+retiring the old one, and Close detaches the source before freeing the PPU.
+Audio retains its asynchronous 1920-byte quantum and the SNES master-clock
+admission policy; a synchronous writer or PCM-source pacer would change that
+contract. Detail diagnostics keep the task-specific inventory/performance
+join, with exact epochs and generations, rather than replacing it with a
+program-only inventory reader.
 
 Since 0.22.24 the full per-frame FNV-1a-64 digest is compiled only when
 `config.diagnostics` is enabled (tests, diagnostic build, or an explicit

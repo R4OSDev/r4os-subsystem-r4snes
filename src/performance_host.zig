@@ -28,7 +28,7 @@ const FailureContext = struct {
     master_end: ?u64 = null,
 };
 
-pub fn run(app: *r4os.App, check_only: bool) i32 {
+pub fn run(app: *r4os.App2, check_only: bool) i32 {
     var failure_context = FailureContext{};
     execute(app, check_only, &failure_context) catch |fault| {
         const sys = app.system();
@@ -47,7 +47,7 @@ pub fn run(app: *r4os.App, check_only: bool) i32 {
     return 0;
 }
 
-fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !void {
+fn execute(app: *r4os.App2, check_only: bool, failure_context: *FailureContext) !void {
     const options = try core.performance_options.guest(app.args());
     if (app.profile != .desktop) return error.DesktopRequired;
     const allocator = app.allocator() orelse return error.AllocatorMissing;
@@ -56,7 +56,7 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
     const desk = app.desktop() orelse return error.DesktopMissing;
     const draw = app.drawing() orelse return error.DrawingMissing;
     const audio = app.audio() orelse return error.AudioMissing;
-    if (sys.monotonicNanoseconds() == null) return error.ClockMissing;
+    _ = sys.base.clockSampleChecked() catch return error.ClockMissing;
     const report = try allocator.alloc(u8, 131072);
     defer allocator.free(report);
     var report_len: usize = 0;
@@ -92,7 +92,7 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
         defer if (!window_closed) window.video.deinit(video.Backend.fromDraw(&draw));
         window.setInputPolicy(.{ .key_text_mode = .key_and_text, .pointer_mode = .ignored });
         _ = window.setMinimumSize(core.ppu.frame_width, core.ppu.standard_height);
-        try guest.attachVideo(&window.video);
+        try guest.attachVideo(&window.video, core.host_adapter.copyBackend(&window.draw));
         var sink = rt.R4AudioSink.initWithTimeouts(audio, 200 * std.time.ns_per_ms, 500 * std.time.ns_per_ms);
         var queue: [rt.default_quantum_frames * 2 * core.sdsp.sample_bytes]u8 = undefined;
         var scratch: [rt.default_quantum_frames * core.sdsp.sample_bytes]u8 = undefined;
@@ -114,8 +114,15 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
         probe.runtime = &runtime;
         probe.profile = .{ .clock = .{ .context = &probe, .read = Probe.readClock } };
         const clock_pair_ns = core.performance.calibrate(probe.profile.clock);
+        const clock_start = sys.base.clockSampleChecked() catch return error.ClockMissing;
+        // Resolution is physical clock metadata, not a field of DeadlineBudget's
+        // logical clock identity. Keep the real provider report and bind both.
         var clock_info: r4os.abi.MonotonicClockInfo = .{};
-        if (sys.monotonicClock(&clock_info) <= 0 or clock_info.flags & r4os.abi.monotonic_clock_flag_valid == 0) return error.ClockMissing;
+        if (sys.monotonicClock(&clock_info) <= 0 or
+            clock_info.flags & r4os.abi.monotonic_clock_flag_valid == 0 or
+            clock_info.resolution_ns == 0 or
+            clock_info.source != clock_start.identity.source or
+            clock_info.generation != clock_start.identity.generation) return error.ClockMissing;
         probe.warmup_started_ns = probe.now();
         const code = runtime.run(&sys, probe.driver(), probe.hostDriver());
         const end_ns = probe.now();
@@ -128,9 +135,8 @@ fn execute(app: *r4os.App, check_only: bool, failure_context: *FailureContext) !
         const task_delta = tasks.difference(&probe.task_before, &task_after);
         guest.machine.?.profile = null;
         const after = probe.snapshot();
-        var clock_end: r4os.abi.MonotonicClockInfo = .{};
-        if (sys.monotonicClock(&clock_end) <= 0 or clock_end.flags & r4os.abi.monotonic_clock_flag_valid == 0 or clock_end.generation != clock_info.generation or
-            clock_end.source != clock_info.source) return error.ClockChanged;
+        const clock_end = sys.base.clockSampleChecked() catch return error.ClockChanged;
+        if (!std.meta.eql(clock_end.identity, clock_start.identity) or clock_end.instant_ns < clock_start.instant_ns or probe.clock_failed) return error.ClockChanged;
         // Capture the exact rejected state after timing, before normal cleanup.
         // Failed runs retain these facts even without a completed sample.
         failure_context.* = .{
@@ -287,10 +293,10 @@ const TimeSource = struct {
         const self: *TimeSource = @ptrCast(@alignCast(context));
         const measuring = if (self.probe) |p| p.measuring else false;
         const detailed = measuring and self.probe.?.instrumented;
-        const started = if (detailed) self.sys.monotonicNanoseconds().? else 0;
+        const started = if (detailed) (if (self.sys.base.clockSampleChecked()) |sample| sample.instant_ns else |_| 0) else 0;
         const point = product.TimePoint{
             .wall_seconds = core.persistence_r4os.wallSeconds(self.sys.timeState()),
-            .monotonic_ns = self.sys.monotonicNanoseconds() orelse 0,
+            .monotonic_ns = if (self.sys.base.clockSampleChecked()) |sample| sample.instant_ns else |_| 0,
         };
         if (measuring) {
             self.calls += 1;
@@ -365,8 +371,21 @@ const Probe = struct {
     maximum_pending: u64 = 0,
     maximum_pcm_queue: usize = 0,
 
+    clock_failed: bool = false,
+    clock_identity: ?r4os.time_contract.checked.ClockIdentity = null,
+    clock_last: u64 = 0,
+
     fn now(self: *Probe) u64 {
-        return self.sys.monotonicNanoseconds() orelse 0;
+        const sample = self.sys.base.clockSampleChecked() catch {
+            self.clock_failed = true;
+            return 0;
+        };
+        if (self.clock_identity) |identity| {
+            if (!std.meta.eql(identity, sample.identity) or sample.instant_ns < self.clock_last) self.clock_failed = true;
+        }
+        self.clock_identity = sample.identity;
+        self.clock_last = sample.instant_ns;
+        return sample.instant_ns;
     }
     fn readClock(context: *anyopaque) u64 {
         const self: *Probe = @ptrCast(@alignCast(context));

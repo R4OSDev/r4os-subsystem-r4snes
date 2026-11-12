@@ -216,10 +216,10 @@ pub const Guest = struct {
         );
     }
 
-    pub fn attachVideo(self: *Guest, presenter: *host_api.Presenter) !void {
+    pub fn attachVideo(self: *Guest, presenter: *host_api.Presenter, backend: host_api.Backend) !void {
         if (self.state != .running) return error.NotRunning;
         const machine = self.machine orelse return error.NotRunning;
-        try self.video.bind(&machine.ppu, presenter, self.generation);
+        try self.video.bind(&machine.ppu, presenter, self.generation, backend);
         self.presenter = presenter;
     }
 
@@ -295,6 +295,20 @@ pub const Guest = struct {
         return self.video.syncVideo(presenter);
     }
 
+    pub fn presentVideo(self: *Guest, window: *host_api.Host) host_api.PresentResult {
+        var info: r4os.abi.GuiWindowInfo = .{};
+        window.stats.window_info_calls +%= 1;
+        window.stats.present_window_info_calls +%= 1;
+        const rc = window.desk.guiWindowInfo(&info);
+        if (rc < 0) return .{ .failure = rc };
+        if (info.flags & r4os.abi.GuiWindowFlag.visible == 0 or info.flags & r4os.abi.GuiWindowFlag.minimized != 0) return .hidden;
+        window.stats.viewport_calculations +%= 1;
+        window.stats.present_viewport_calculations +%= 1;
+        const result = self.video.presentTo(&window.video, info.client_w, info.client_h, window.overlay);
+        if (result == .presented) window.input_viewport = result.presented.viewport;
+        return result;
+    }
+
     pub fn reset(self: *Guest) i32 {
         if (self.state != .running or !self.runtime_guest_ready) return runtime_error_closed;
         const old_machine = self.machine orelse return runtime_error_closed;
@@ -316,12 +330,12 @@ pub const Guest = struct {
         ) catch return reset_error_machine;
         var replacement_machine_powered = true;
         defer if (replacement_machine_powered) replacement_machine.close();
-        const next_generation = if (self.generation == std.math.maxInt(u64)) 1 else self.generation + 1;
+        const next_generation = std.math.add(u64, self.generation, 1) catch return reset_error_video;
         var replacement_video = self.video;
         var replacement_presenter: host_api.Presenter = undefined;
         if (self.presenter) |presenter| {
             replacement_presenter = presenter.*;
-            replacement_video.bind(&replacement_machine.ppu, &replacement_presenter, next_generation) catch return reset_error_video;
+            replacement_video.bind(&replacement_machine.ppu, &replacement_presenter, next_generation, self.video.bridge.?.backend) catch return reset_error_video;
         }
         const point = self.time.forCartridge(old_cart);
         if (self.save_session) |*session| {
@@ -375,6 +389,8 @@ pub const Guest = struct {
             self.runtime_guest_ready = false;
         }
         self.video.close();
+        // Detach the geometry-only view before the published source is freed.
+        if (self.presenter) |presenter| presenter.surface = self.video.bridge.?.presenter.surface;
         self.presenter = null;
         if (self.save_session) |*session| {
             if (self.cartridge) |*cart| {
@@ -667,7 +683,7 @@ pub const WindowHost = struct {
         if (self.fps.enabled) {
             if (self.guest.machine) |machine| {
                 if (self.fps.sample(self.runtime.clock.last_host_tick, self.runtime.clock.monotonic_hz, machine.clock.frame, self.guest.generation, self.runtime.state == .paused)) {
-                    self.window.video.invalidateClient(FpsDisplay.bounds);
+                    self.guest.video.invalidateClient(FpsDisplay.bounds);
                     return .present;
                 }
             }
@@ -683,7 +699,7 @@ pub const WindowHost = struct {
                 break :blk .{ .command = .close };
             },
             .resize => blk: {
-                self.window.video.invalidateAll();
+                self.guest.video.invalidate();
                 break :blk .present;
             },
             .focus => |focus| blk: {
@@ -707,7 +723,7 @@ pub const WindowHost = struct {
                 }
             }
             self.window.overlay = if (self.fps.enabled) .{ .context = self, .append_fn = appendFps } else null;
-            self.window.video.invalidateClient(FpsDisplay.bounds);
+            self.guest.video.invalidateClient(FpsDisplay.bounds);
             return .present;
         }
         if (actionForPhysicalUsage(key.key)) |action| {
@@ -742,7 +758,7 @@ pub const WindowHost = struct {
     fn present(context: *anyopaque) i32 {
         const self: *WindowHost = @ptrCast(@alignCast(context));
         _ = self.guest.syncVideo(&self.window.video);
-        return switch (self.window.present()) {
+        return switch (self.guest.presentVideo(self.window)) {
             .failure => |raw| raw,
             .hidden => runtime_api.host_present_hidden,
             .unchanged => runtime_api.host_present_unchanged,

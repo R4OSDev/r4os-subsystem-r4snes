@@ -35,3 +35,5 @@ pub const superfx = @import("superfx.zig");
 pub const sa1 = @import("sa1.zig");
 pub const timing = @import("timing.zig");
 pub const config = @import("config.zig");
+
+pub const native_launch = @import("native_launch.zig");

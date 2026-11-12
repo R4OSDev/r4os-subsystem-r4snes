@@ -61,16 +61,19 @@ const e2e_fixture_invalid_path = "C:\\TEMP\\R4SNES-INVALID.SFC";
 const e2e_fixture_firmware_path = "C:\\TEMP\\R4SNES-DSP-REQUIRED.SFC";
 const e2e_end_key = "end";
 
-pub fn r4_app_main(app: *r4os.App) i32 {
-    if (core.performance_options.command(app.args(), "/PERFTEST")) return @import("performance_host.zig").run(app, false);
-    if (core.performance_options.command(app.args(), "/PERFCHECK")) return @import("performance_host.zig").run(app, true);
-    if (std.mem.indexOf(u8, app.args(), "/PERSISTTEST") != null) return persistenceSelfTest(app);
-    if (std.mem.indexOf(u8, app.args(), "/HOSTTEST") != null) return hostSelfTest(app);
-    if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
+pub fn r4_app_main(app: *r4os.App2) i32 {
+    switch (core.native_launch.diagnostic(app.args())) {
+        .performance => return @import("performance_host.zig").run(app, false),
+        .performance_check => return @import("performance_host.zig").run(app, true),
+        .persistence => return persistenceSelfTest(app),
+        .host => return hostSelfTest(app),
+        .core => return selfTest(app),
+        .product => {},
+    }
     return runProduct(app);
 }
 
-noinline fn runProduct(app: *r4os.App) i32 {
+noinline fn runProduct(app: *r4os.App2) i32 {
     if (app.profile != .desktop) return error_profile;
     const sys = app.system();
     const allocator = app.allocator() orelse return error_allocator;
@@ -261,7 +264,7 @@ noinline fn runProduct(app: *r4os.App) i32 {
     };
     window.setInputPolicy(.{ .key_text_mode = .key_and_text, .pointer_mode = .ignored });
     _ = window.setMinimumSize(core.ppu.frame_width, core.ppu.standard_height);
-    guest.attachVideo(&window.video) catch |fault| {
+    guest.attachVideo(&window.video, core.host_adapter.copyBackend(&window.draw)) catch |fault| {
         return showStatus(allocator, sys, desk, draw, "R4SNES - Hostfehler", &.{
             "Die Cartridge-Surface konnte nicht an das Fenster gebunden werden.",
             @errorName(fault),
@@ -576,7 +579,7 @@ const ProductTimeContext = struct {
         const self: *ProductTimeContext = @ptrCast(@alignCast(context));
         return .{
             .wall_seconds = core.persistence_r4os.wallSeconds(self.sys.timeState()),
-            .monotonic_ns = self.sys.monotonicNanoseconds() orelse 0,
+            .monotonic_ns = if (self.sys.base.clockSampleChecked()) |sample| sample.instant_ns else |_| 0,
         };
     }
 };
@@ -604,13 +607,14 @@ fn loadCartridgeOwned(
     files: *const r4os.app_storage.Files,
     path: *r4os.AbsoluteFilePath,
 ) LoadError![]u8 {
-    const info = switch (files.info(path.asZ())) {
-        .value => |value| value,
+    const info = switch (files.metadata(path.asZ())) {
+        .found => |value| value,
         .missing => return error.Missing,
         .failure => return error.Metadata,
     };
-    if (info.is_dir != 0) return error.Directory;
-    const size = std.math.cast(usize, info.size) orelse return error.InvalidGeometry;
+    if (info.flags & r4os.abi.file_metadata2_flag_directory != 0) return error.Directory;
+    if (info.flags & r4os.abi.file_metadata2_flag_byte_size_valid == 0) return error.Metadata;
+    const size = std.math.cast(usize, info.byte_size) orelse return error.InvalidGeometry;
     _ = core.cartridge.inspectContainerSize(size) catch return error.InvalidGeometry;
     const image = allocator.alloc(u8, size) catch return error.OutOfMemory;
     errdefer allocator.free(image);
@@ -625,13 +629,14 @@ fn loadExactOwned(
     expected_size: usize,
 ) LoadError![]u8 {
     var path = r4os.AbsoluteFilePath.parse(raw_path) catch return error.Metadata;
-    const info = switch (files.info(path.asZ())) {
-        .value => |value| value,
+    const info = switch (files.metadata(path.asZ())) {
+        .found => |value| value,
         .missing => return error.Missing,
         .failure => return error.Metadata,
     };
-    if (info.is_dir != 0) return error.Directory;
-    if (info.size != expected_size) return error.WrongSize;
+    if (info.flags & r4os.abi.file_metadata2_flag_directory != 0) return error.Directory;
+    if (info.flags & r4os.abi.file_metadata2_flag_byte_size_valid == 0) return error.Metadata;
+    if (info.byte_size != expected_size) return error.WrongSize;
     const bytes = allocator.alloc(u8, expected_size) catch return error.OutOfMemory;
     errdefer allocator.free(bytes);
     try readExact(files, &path, bytes);
@@ -640,27 +645,25 @@ fn loadExactOwned(
 
 fn loadOptionalIpl(files: *const r4os.app_storage.Files) LoadError!?[core.smp.exact_ipl_size]u8 {
     var path = r4os.AbsoluteFilePath.parse(core.persistence.spc700_ipl_path) catch return error.Metadata;
-    const info = switch (files.info(path.asZ())) {
+    const info = switch (files.metadata(path.asZ())) {
         .missing => return null,
         .failure => return error.Metadata,
-        .value => |value| value,
+        .found => |value| value,
     };
-    if (info.is_dir != 0 or info.size != core.smp.exact_ipl_size) return error.WrongSize;
+    if (info.flags & r4os.abi.file_metadata2_flag_byte_size_valid == 0) return error.Metadata;
+    if (info.flags & r4os.abi.file_metadata2_flag_directory != 0 or info.byte_size != core.smp.exact_ipl_size) return error.WrongSize;
     var result: [core.smp.exact_ipl_size]u8 = undefined;
     try readExact(files, &path, result[0..]);
     return result;
 }
 
 fn readExact(files: *const r4os.app_storage.Files, path: *r4os.AbsoluteFilePath, out: []u8) LoadError!void {
-    var offset: usize = 0;
-    while (offset < out.len) {
-        const transferred = switch (files.readAt(path.asZ(), @intCast(offset), out[offset..])) {
-            .bytes => |count| count,
-            .end, .failure => return error.Read,
-        };
-        if (transferred == 0 or transferred > out.len - offset) return error.Read;
-        offset += transferred;
-    }
+    const loaded = switch (files.readDocumentPrefix(path.asZ(), out,
+        r4os.time_contract.timeoutFinite(.{ .nanoseconds = 5 * std.time.ns_per_s }))) {
+        .value => |value| value,
+        .failure => return error.Read,
+    };
+    if (loaded.bytes != out.len or loaded.file_size != out.len) return error.Read;
 }
 
 fn secureFree(allocator: std.mem.Allocator, bytes: []u8) void {
@@ -851,7 +854,7 @@ fn cartridgeError(fault: anyerror) []const u8 {
     };
 }
 
-noinline fn hostSelfTest(app: *r4os.App) i32 {
+noinline fn hostSelfTest(app: *r4os.App2) i32 {
     const sys = app.system();
     const allocator = app.allocator() orelse return error_allocator;
     const fixtures = [_]struct {
@@ -906,7 +909,7 @@ noinline fn hostSelfTest(app: *r4os.App) i32 {
     return 0;
 }
 
-noinline fn selfTest(app: *r4os.App) i32 {
+noinline fn selfTest(app: *r4os.App2) i32 {
     const sys = app.system();
     var machine = core.machine.Machine.init(1);
     if (!machine.foundationReady() or core.cpu.opcode_table.len != 256 or !machine.scpu.cpuMayRun()) return error_not_implemented;
@@ -1012,7 +1015,7 @@ noinline fn selfTest(app: *r4os.App) i32 {
     return 0;
 }
 
-noinline fn persistenceSelfTest(app: *r4os.App) i32 {
+noinline fn persistenceSelfTest(app: *r4os.App2) i32 {
     runPersistenceSelfTest(app) catch |fault| {
         const sys = app.system();
         sys.write("R4SNES persistence runtime: FAILED ");
@@ -1023,12 +1026,12 @@ noinline fn persistenceSelfTest(app: *r4os.App) i32 {
     return 0;
 }
 
-fn runPersistenceSelfTest(app: *r4os.App) !void {
+fn runPersistenceSelfTest(app: *r4os.App2) !void {
     const allocator = app.allocator() orelse return error.AllocatorUnavailable;
     const files = app.files() orelse return error.FilesUnavailable;
     const sys = app.system();
     const wall = core.persistence_r4os.wallSeconds(sys.timeState());
-    const monotonic = sys.monotonicNanoseconds() orelse 0;
+    const monotonic = (try sys.base.clockSampleChecked()).instant_ns;
     const generation = (sys.ticks() | 1) +| 2;
 
     var save_cart = try makePersistenceCart(allocator, 32768, true, .none, 0x73);
